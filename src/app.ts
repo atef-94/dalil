@@ -413,6 +413,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const role = await roleManagement.getRole(body.roleId);
     if (!role || role.companyId !== actor.companyId) throw new NotFoundError('role not found');
     const userRole = await roleManagement.assignRole(targetUser.id, body.roleId, body.expiresAt);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'assign', resource: 'role', resourceId: role.id, metadata: { targetUserId: targetUser.id } });
     return { status: 201, body: userRole };
   });
 
@@ -529,6 +530,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ fullName: string; phone: string; email?: string; sourceId?: string }>(ctx.body);
     const lead = await crm.createLead({ companyId: actor.companyId, ownerEmployeeUserId: actor.userId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     return { status: 201, body: lead };
   });
 
@@ -596,6 +598,25 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 201, body: reservation };
   });
 
+  httpServer.get('/api/sales/contracts', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'contract');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:contract permission' } };
+    const all = await sales.listContracts(actor.companyId);
+    const filtered = await filterByListScope(all, scope, (c) => employeeScopeKeys(c.creditedEmployeeUserId));
+    return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  httpServer.get('/api/sales/contracts/:contractId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'contract'))) {
+      throw new ForbiddenError('missing view:contract permission');
+    }
+    const contract = await sales.getContract(ctx.params.contractId!);
+    if (!contract || contract.companyId !== actor.companyId) throw new NotFoundError('contract not found');
+    return { status: 200, body: contract };
+  });
+
   httpServer.post('/api/sales/contracts', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'contract'))) {
@@ -617,6 +638,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       discountPercent: body.discountPercent,
       escalationPercentPerYear: body.escalationPercentPerYear,
     });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id });
     return { status: 201, body: contract };
   });
 
@@ -626,6 +648,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:contract permission');
     }
     const contract = await sales.cancelContract(ctx.params.contractId!);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'contract', resourceId: contract.id, metadata: { cancelled: true } });
     return { status: 200, body: contract };
   });
 
@@ -637,6 +660,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ contractId: string; paymentScheduleLineId: string; amount: number; method: Payment['method'] }>(ctx.body);
     const result = await finance.recordPayment({ companyId: actor.companyId, recordedByUserId: actor.userId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'payment_schedule', resourceId: result.line.id, metadata: { amount: body.amount } });
     return { status: 201, body: result };
   });
 
@@ -727,7 +751,57 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing create:lead permission');
     }
     const brokerLead = await brokers.approveBrokerLead(ctx.params.brokerLeadId!, actor.userId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'lead', resourceId: brokerLead.leadId ?? brokerLead.id });
     return { status: 200, body: brokerLead };
+  });
+
+  // ---- Broker commissions ----
+  httpServer.get('/api/brokers/commission-rules', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'broker_company'))) {
+      throw new ForbiddenError('missing view:broker_company permission');
+    }
+    const rules = await brokers.listCommissionRules(actor.companyId);
+    return { status: 200, body: rules };
+  });
+
+  httpServer.post('/api/brokers/commission-rules', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'broker_company'))) {
+      throw new ForbiddenError('missing edit:broker_company permission');
+    }
+    const body = parseJsonBody<{ ratePercent: number; brokerCompanyId?: string }>(ctx.body);
+    const rule = await brokers.setCommissionRule(actor.companyId, body.ratePercent, body.brokerCompanyId);
+    return { status: 201, body: rule };
+  });
+
+  httpServer.get('/api/brokers/commissions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'broker_company'))) {
+      throw new ForbiddenError('missing view:broker_company permission');
+    }
+    const brokerCompanyId = ctx.query.get('brokerCompanyId') ?? undefined;
+    const commissions = await brokers.listCommissions(actor.companyId, brokerCompanyId);
+    return { status: 200, body: paginate(commissions, ctx.query) };
+  });
+
+  httpServer.post('/api/brokers/companies/:brokerCompanyId/commissions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'broker_company'))) {
+      throw new ForbiddenError('missing edit:broker_company permission');
+    }
+    const body = parseJsonBody<{ contractId: string; contractAmount: number }>(ctx.body);
+    const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId, body.contractAmount);
+    return { status: 201, body: commission };
+  });
+
+  httpServer.post('/api/brokers/commissions/:commissionId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'broker_company'))) {
+      throw new ForbiddenError('missing approve:broker_company permission');
+    }
+    const commission = await brokers.approveCommission(ctx.params.commissionId!);
+    return { status: 200, body: commission };
   });
 
   // ---- Audit ----

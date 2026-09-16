@@ -150,6 +150,14 @@ export class BrokersService {
     return this.commissions.save(commission);
   }
 
+  async listCommissionRules(companyId: string): Promise<CommissionRule[]> {
+    return this.commissionRules.findAll((r) => r.companyId === companyId);
+  }
+
+  async listCommissions(companyId: string, brokerCompanyId?: string): Promise<Commission[]> {
+    return this.commissions.findAll((c) => c.companyId === companyId && (!brokerCompanyId || c.brokerCompanyId === brokerCompanyId));
+  }
+
   async approveCommission(id: string): Promise<Commission> {
     const commission = await this.commissions.findById(id);
     if (!commission) throw new NotFoundError('commission not found');

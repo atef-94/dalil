@@ -56,6 +56,10 @@ export class SalesService {
     return this.opportunities.findById(id);
   }
 
+  async listContracts(companyId: string): Promise<Contract[]> {
+    return this.contracts.findAll((c) => c.companyId === companyId);
+  }
+
   async reserveUnitForOpportunity(opportunityId: string, unitId: string) {
     const opportunity = await this.opportunities.findById(opportunityId);
     if (!opportunity) throw new NotFoundError('opportunity not found');

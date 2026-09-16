@@ -117,7 +117,7 @@ export class HttpServer {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+      "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:",
     );
     if (this.options.nodeEnv === 'production') {
       res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
