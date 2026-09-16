@@ -28,7 +28,19 @@ async function main(): Promise<void> {
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS ? Number(process.env.RATE_LIMIT_WINDOW_MS) : undefined,
     rateLimitMax: process.env.RATE_LIMIT_MAX ? Number(process.env.RATE_LIMIT_MAX) : undefined,
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
+    automationRetryBaseDelayMs: process.env.AUTOMATION_RETRY_BASE_DELAY_MS ? Number(process.env.AUTOMATION_RETRY_BASE_DELAY_MS) : 300,
+    automationMaxConcurrentRuns: process.env.AUTOMATION_MAX_CONCURRENT_RUNS ? Number(process.env.AUTOMATION_MAX_CONCURRENT_RUNS) : undefined,
   });
+
+  // Crash recovery: any WorkflowRun left `running` in storage is one that
+  // never finished because the process died mid-execution — resume them
+  // before accepting traffic so in-flight automation work is never silently
+  // lost across a restart (this is what makes the persisted run table a
+  // real durable job queue, not just an audit trail).
+  const recovered = await services.automation.recoverStuckRuns();
+  if (recovered.length > 0) {
+    process.stdout.write(`recovered ${recovered.length} workflow run(s) left running by a previous process\n`);
+  }
 
   const server = httpServer.listen(port);
   process.stdout.write(`ACTIVE Operating System listening on :${port} (${nodeEnv})\n`);

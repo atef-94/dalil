@@ -96,6 +96,13 @@ export interface AppOptions {
    * fine for dev, but production should set SECRET_STORE_KEY separately so
    * rotating one secret never invalidates the other. */
   secretStoreKey?: string;
+  /** Base delay (ms) before a retried automation step attempt, doubled each
+   * attempt up to a 30s cap. Defaults to 0 (instant retry) for fast tests;
+   * main.ts passes a real value at runtime. */
+  automationRetryBaseDelayMs?: number;
+  /** Max workflow runs the Automation Engine executes concurrently,
+   * process-wide. Defaults to 10. */
+  automationMaxConcurrentRuns?: number;
 }
 
 export interface Application {
@@ -288,6 +295,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
     marketing,
     auditLog,
     options.secretStoreKey ?? options.tokenSecret,
+    undefined,
+    options.automationRetryBaseDelayMs ?? 0,
+    options.automationMaxConcurrentRuns ?? 10,
   );
   // The engine is the sole subscriber today: every domain event emitted
   // from a route handler below is offered to every active event-triggered
@@ -1663,6 +1673,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: automation.listTemplates() };
   });
 
+  // Company-wide execution monitoring — a dashboard summary of workflow and
+  // run counts by status, plus pending approvals awaiting a decision.
+  httpServer.get('/api/automation/stats', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'workflow_run'))) {
+      throw new ForbiddenError('missing view:workflow_run permission');
+    }
+    const stats = await automation.getStats(actor.companyId);
+    return { status: 200, body: stats };
+  });
+
   httpServer.get('/api/automation/workflows/:workflowId', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'view', 'workflow'))) {
@@ -1729,6 +1750,19 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: steps };
   });
 
+  // Failure recovery — resumes a failed run from the exact step it stopped
+  // on (e.g. after fixing whatever the failing step needed, like a
+  // webhook endpoint being back up).
+  httpServer.post('/api/automation/runs/:runId/retry', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'workflow_run'))) {
+      throw new ForbiddenError('missing edit:workflow_run permission');
+    }
+    const run = await automation.retryRun(ctx.params.runId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'workflow_run', resourceId: run.id, metadata: { retried: true } });
+    return { status: 200, body: run };
+  });
+
   // ---- Automation Engine: approvals ----
   httpServer.get('/api/automation/approvals', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -1789,8 +1823,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'delete', 'secret'))) {
       throw new ForbiddenError('missing delete:secret permission');
     }
-    await automation.deleteSecret(ctx.params.secretId!, actor.companyId);
-    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'secret', resourceId: ctx.params.secretId! });
+    const force = ctx.query.get('force') === 'true';
+    await automation.deleteSecret(ctx.params.secretId!, actor.companyId, force);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'secret', resourceId: ctx.params.secretId!, metadata: { force } });
     return { status: 204 };
   });
 

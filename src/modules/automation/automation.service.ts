@@ -26,6 +26,8 @@ import { AutomationError, ForbiddenError, NotFoundError, ValidationError } from 
 import { decryptSecret, encryptSecret } from '../../infra/security.js';
 import type { DomainEvent } from '../../infra/event-bus.js';
 import { AuditLog } from '../../infra/audit-log.js';
+import { KeyedMutex } from '../../infra/keyed-mutex.js';
+import { ConcurrencyLimiter } from '../../infra/concurrency-queue.js';
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
 import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
@@ -68,6 +70,20 @@ export interface WorkflowTemplate {
 }
 
 export type SecretMetadata = Omit<Secret, 'encryptedValue' | 'iv' | 'authTag'>;
+
+export interface AutomationStats {
+  totalWorkflows: number;
+  activeWorkflows: number;
+  pausedWorkflows: number;
+  archivedWorkflows: number;
+  totalRuns: number;
+  runningRuns: number;
+  waitingApprovalRuns: number;
+  completedRuns: number;
+  failedRuns: number;
+  cancelledRuns: number;
+  pendingApprovals: number;
+}
 
 // The minimal context executeAction() needs — deliberately not tied to a
 // WorkflowRun/WorkflowDefinition so the exact same dispatcher can be
@@ -124,6 +140,20 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     trigger: { type: 'scheduled', intervalMinutes: 10080 },
     steps: [{ name: 'Create review task', action: { type: 'create_task', params: { title: 'Weekly campaign performance review' } } }],
   },
+  {
+    key: 'new-employee-onboarding-task',
+    name: 'New Employee Onboarding Task',
+    description: 'Creates an onboarding checklist task whenever a new employee record is created.',
+    trigger: { type: 'event', eventType: 'employee.created' },
+    steps: [{ name: 'Create onboarding task', action: { type: 'create_task', params: { title: 'Prepare onboarding for {{fullName}}' } } }],
+  },
+  {
+    key: 'leave-request-notification',
+    name: 'Leave Request Notification',
+    description: 'Notifies HR internally whenever a new leave request is submitted.',
+    trigger: { type: 'event', eventType: 'leave_request.created' },
+    steps: [{ name: 'Notify HR', action: { type: 'send_message', params: { subject: 'New leave request', body: 'A new leave request was submitted and needs review.' } } }],
+  },
 ];
 
 const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
@@ -160,6 +190,18 @@ const ACTION_VERB: Record<AutomationActionType, ActionName> = {
  * takes effect on the very next run.
  */
 export class AutomationService {
+  // Closes a real TOCTOU race: two near-simultaneous deliveries of the same
+  // event/webhook (a retried event, a webhook provider's own retry policy)
+  // could otherwise both pass the "no existing run" check before either had
+  // saved its run, producing two runs for one idempotency key. Keyed per
+  // `${workflowId}:${idempotencyKey}` so unrelated triggers never block
+  // each other.
+  private readonly idempotencyMutex = new KeyedMutex();
+  // Bounds how many workflow runs execute concurrently, process-wide — a
+  // burst of triggers (e.g. many leads created at once) queues instead of
+  // spawning unbounded concurrent webhook_call/etc. work.
+  private readonly executionLimiter: ConcurrencyLimiter;
+
   constructor(
     private readonly repos: AutomationRepos,
     private readonly rbac: RbacEvaluator,
@@ -170,7 +212,14 @@ export class AutomationService {
     private readonly auditLog: AuditLog,
     private readonly encryptionSecret: string,
     private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+    /** Base delay before a retried step attempt, doubled each attempt
+     * (capped) — 0 by default so tests stay instant; production wiring in
+     * app.ts passes a real value. */
+    private readonly retryBaseDelayMs = 0,
+    maxConcurrentRuns = 10,
+  ) {
+    this.executionLimiter = new ConcurrencyLimiter(maxConcurrentRuns);
+  }
 
   // ---- Workflow CRUD ----
 
@@ -285,13 +334,8 @@ export class AutomationService {
     const results: WorkflowRun[] = [];
     for (const workflow of workflows) {
       const idempotencyKey = this.computeEventIdempotencyKey(event);
-      const existing = await this.findExistingRun(workflow.id, idempotencyKey);
-      if (existing) {
-        results.push(existing);
-        continue;
-      }
-      const run = await this.startRun(workflow, event.payload, event.type, 'system', event.actorUserId, idempotencyKey);
-      results.push(await this.executeRun(run.id));
+      const { run, created } = await this.getOrCreateRun(workflow, event.payload, event.type, 'system', event.actorUserId, idempotencyKey);
+      results.push(created ? await this.executeRun(run.id) : run);
     }
     return results;
   }
@@ -309,13 +353,8 @@ export class AutomationService {
       const idempotencyKey = `scheduled:${bucket}`;
       await this.repos.workflows.save({ ...workflow, lastScheduledRunAt: now.toISOString() });
 
-      const existing = await this.findExistingRun(workflow.id, idempotencyKey);
-      if (existing) {
-        results.push(existing);
-        continue;
-      }
-      const run = await this.startRun(workflow, {}, undefined, 'system', undefined, idempotencyKey);
-      results.push(await this.executeRun(run.id));
+      const { run, created } = await this.getOrCreateRun(workflow, {}, undefined, 'system', undefined, idempotencyKey);
+      results.push(created ? await this.executeRun(run.id) : run);
     }
     return results;
   }
@@ -333,11 +372,31 @@ export class AutomationService {
     if (!workflow) throw new NotFoundError('no active workflow is registered for this webhook');
 
     const idempotencyKey = idempotencyKeyHeader?.trim() || createHash('sha256').update(`${slug}:${JSON.stringify(payload)}`).digest('hex');
-    const existing = await this.findExistingRun(workflow.id, idempotencyKey);
-    if (existing) return existing;
+    const { run, created } = await this.getOrCreateRun(workflow, payload, undefined, 'system', undefined, idempotencyKey);
+    return created ? this.executeRun(run.id) : run;
+  }
 
-    const run = await this.startRun(workflow, payload, undefined, 'system', undefined, idempotencyKey);
-    return this.executeRun(run.id);
+  /** Atomically checks-for and creates the run for a given
+   * (workflowId, idempotencyKey) pair — the mutex closes the race where two
+   * near-simultaneous duplicate deliveries could otherwise both observe "no
+   * existing run" and each create one. Execution itself happens *outside*
+   * the lock (it can be slow — a webhook_call step — and by the time the
+   * run row is saved, a concurrent duplicate will already see it via
+   * findExistingRun). */
+  private async getOrCreateRun(
+    workflow: WorkflowDefinition,
+    triggerPayload: Record<string, unknown>,
+    triggerEventType: string | undefined,
+    initiatedBy: WorkflowRunInitiator,
+    initiatedByUserId: string | undefined,
+    idempotencyKey: string,
+  ): Promise<{ run: WorkflowRun; created: boolean }> {
+    return this.idempotencyMutex.runExclusive(`${workflow.id}:${idempotencyKey}`, async () => {
+      const existing = await this.findExistingRun(workflow.id, idempotencyKey);
+      if (existing) return { run: existing, created: false };
+      const run = await this.startRun(workflow, triggerPayload, triggerEventType, initiatedBy, initiatedByUserId, idempotencyKey);
+      return { run, created: true };
+    });
   }
 
   private computeEventIdempotencyKey(event: DomainEvent): string {
@@ -376,7 +435,14 @@ export class AutomationService {
 
   // ---- Execution ----
 
+  /** Public entry point — every execution path (event/schedule/webhook/
+   * manual/approval-resume/crash-recovery) funnels through here, so the
+   * concurrency limiter's bound is process-wide, not per-trigger-type. */
   async executeRun(runId: string): Promise<WorkflowRun> {
+    return this.executionLimiter.run(() => this.executeRunInternal(runId));
+  }
+
+  private async executeRunInternal(runId: string): Promise<WorkflowRun> {
     let run = await this.repos.runs.findById(runId);
     if (!run) throw new NotFoundError('run not found');
     if (run.status !== 'running') return run;
@@ -420,6 +486,13 @@ export class AutomationService {
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         attempts = attempt;
+        if (attempt > 1 && this.retryBaseDelayMs > 0) {
+          // Exponential backoff (capped at 30s) — retrying instantly against
+          // a still-down endpoint almost never helps and just burns the
+          // concurrency budget; a real gap in the original implementation.
+          const delay = Math.min(this.retryBaseDelayMs * 2 ** (attempt - 2), 30_000);
+          await this.sleep(delay);
+        }
         try {
           output = await this.executeAction(step.action, {
             companyId: workflow.companyId,
@@ -441,13 +514,25 @@ export class AutomationService {
           action: 'execute',
           resource: 'workflow_run',
           resourceId: run.id,
-          metadata: { stepId: step.id, actionType: step.action.type, workflowId: workflow.id },
+          metadata: { stepId: step.id, actionType: step.action.type, workflowId: workflow.id, attempts },
         });
         run = await this.advanceRun(run, i + 1);
         continue;
       }
 
       await this.recordStepRun(run, step, 'failed', undefined, lastError, attempts);
+      // Failures need to be as visible in the company-wide audit trail as
+      // successes — a previously-unfixed gap where only successful steps
+      // were audited, so a failing automation left no trace outside the
+      // automation UI itself.
+      await this.auditLog.record({
+        companyId: run.companyId,
+        actorUserId: workflow.createdByUserId,
+        action: 'execute',
+        resource: 'workflow_run',
+        resourceId: run.id,
+        metadata: { stepId: step.id, actionType: step.action.type, workflowId: workflow.id, attempts, failed: true, error: lastError },
+      });
       if ((step.onFailure ?? 'stop') === 'stop') {
         run = await this.finishRun(run, 'failed', lastError);
         return run;
@@ -459,6 +544,10 @@ export class AutomationService {
       run = await this.finishRun(run, 'completed');
     }
     return run;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private evaluateCondition(condition: WorkflowCondition, payload: Record<string, unknown>): boolean {
@@ -556,10 +645,61 @@ export class AutomationService {
     const workflow = await this.getWorkflow(workflowId, companyId);
     if (workflow.status !== 'active') throw new AutomationError('only an active workflow can be run manually');
     const key = idempotencyKey?.trim() || randomUUID();
-    const existing = await this.findExistingRun(workflow.id, key);
-    if (existing) return existing;
-    const run = await this.startRun(workflow, payload, undefined, initiatedBy, initiatedByUserId, key);
-    return this.executeRun(run.id);
+    const { run, created } = await this.getOrCreateRun(workflow, payload, undefined, initiatedBy, initiatedByUserId, key);
+    return created ? this.executeRun(run.id) : run;
+  }
+
+  /** Failure recovery: resumes a `failed` run from the exact step it
+   * stopped on (currentStepIndex was never advanced past a step that
+   * failed with onFailure:'stop') — e.g. after fixing the external
+   * endpoint a webhook_call step was hitting. Without this, a failed run
+   * was terminal forever; the only "recovery" was re-triggering the whole
+   * workflow from scratch, which re-runs every already-succeeded step too. */
+  async retryRun(runId: string, companyId: string): Promise<WorkflowRun> {
+    const run = await this.getRun(runId, companyId);
+    if (run.status !== 'failed') throw new AutomationError(`only a failed run can be retried (current status: ${run.status})`);
+    const resumed = await this.repos.runs.save({ ...run, status: 'running', error: undefined, finishedAt: undefined });
+    return this.executeRun(resumed.id);
+  }
+
+  /** Crash recovery: a run only ever stays `running` in storage if the
+   * process died mid-execution (under normal operation executeRun runs to
+   * a terminal/waiting status before the triggering call returns) — so any
+   * run found `running` at boot is stuck and safe to resume from its
+   * persisted currentStepIndex. Called once from main.ts on startup, which
+   * is what turns the persisted WorkflowRun table into a real durable job
+   * queue: work survives a process restart instead of being silently lost. */
+  async recoverStuckRuns(): Promise<WorkflowRun[]> {
+    const stuck = await this.repos.runs.findAll((r) => r.status === 'running');
+    const results: WorkflowRun[] = [];
+    for (const run of stuck) {
+      results.push(await this.executeRun(run.id));
+    }
+    return results;
+  }
+
+  /** Company-wide execution monitoring — counts across workflows, runs, and
+   * pending approvals, for a dashboard summary view. */
+  async getStats(companyId: string): Promise<AutomationStats> {
+    const [workflows, runs, approvals] = await Promise.all([
+      this.repos.workflows.findAll((w) => w.companyId === companyId),
+      this.repos.runs.findAll((r) => r.companyId === companyId),
+      this.repos.approvals.findAll((a) => a.companyId === companyId && a.status === 'pending'),
+    ]);
+    const count = <T,>(items: T[], pred: (item: T) => boolean) => items.filter(pred).length;
+    return {
+      totalWorkflows: workflows.length,
+      activeWorkflows: count(workflows, (w) => w.status === 'active'),
+      pausedWorkflows: count(workflows, (w) => w.status === 'paused'),
+      archivedWorkflows: count(workflows, (w) => w.status === 'archived'),
+      totalRuns: runs.length,
+      runningRuns: count(runs, (r) => r.status === 'running'),
+      waitingApprovalRuns: count(runs, (r) => r.status === 'waiting_approval'),
+      completedRuns: count(runs, (r) => r.status === 'completed'),
+      failedRuns: count(runs, (r) => r.status === 'failed'),
+      cancelledRuns: count(runs, (r) => r.status === 'cancelled'),
+      pendingApprovals: approvals.length,
+    };
   }
 
   private async requirePermission(actorUserId: string, action: WorkflowActionConfig, companyId: string, ownerUserId?: string): Promise<void> {
@@ -802,10 +942,29 @@ export class AutomationService {
     return all.map((s) => this.toSecretMetadata(s));
   }
 
-  async deleteSecret(id: string, companyId: string): Promise<void> {
+  /** Blocks deleting a secret that an active workflow's webhook_call step
+   * still references, unless `force` is passed — a previously-unfixed gap
+   * where deleting a secret silently broke any workflow using it at its
+   * next run, with no warning until the run failed. */
+  async deleteSecret(id: string, companyId: string, force = false): Promise<void> {
     const secret = await this.repos.secrets.findById(id);
     if (!secret || secret.companyId !== companyId) throw new NotFoundError('secret not found');
+    if (!force) {
+      const referencing = await this.workflowsReferencingSecret(companyId, secret.key);
+      if (referencing.length > 0) {
+        throw new AutomationError(
+          `secret "${secret.key}" is referenced by active workflow(s): ${referencing.map((w) => w.name).join(', ')}. Pass force=true to delete anyway.`,
+        );
+      }
+    }
     await this.repos.secrets.deleteById(id);
+  }
+
+  private async workflowsReferencingSecret(companyId: string, secretKey: string): Promise<WorkflowDefinition[]> {
+    const workflows = await this.repos.workflows.findAll((w) => w.companyId === companyId && w.status === 'active');
+    return workflows.filter((w) =>
+      w.steps.some((step) => step.action.type === 'webhook_call' && step.action.params.secretKey === secretKey),
+    );
   }
 
   private toSecretMetadata(secret: Secret): SecretMetadata {

@@ -30,7 +30,7 @@ import type {
   WorkflowStepRun,
 } from '../../domain/types.js';
 
-function freshHarness() {
+function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
   const users = new InMemoryRepository<User>();
   const employees = new InMemoryRepository<Employee>();
   const roles = new InMemoryRepository<Role>();
@@ -73,6 +73,8 @@ function freshHarness() {
     auditLog,
     'test-encryption-secret-not-for-production',
     ((url: Parameters<typeof fetch>[0], init?: RequestInit) => fetchImpl(url, init)) as typeof fetch,
+    retryBaseDelayMs,
+    maxConcurrentRuns,
   );
 
   return {
@@ -87,6 +89,8 @@ function freshHarness() {
     campaigns,
     crm,
     marketing,
+    runs,
+    auditLogRepo,
     fetchCalls,
     setFetchImpl: (impl: typeof fetch) => {
       fetchImpl = impl;
@@ -572,4 +576,246 @@ test('listTemplates returns a non-empty catalogue of built-in templates', () => 
     assert.ok(t.key);
     assert.ok(t.steps.length > 0);
   }
+});
+
+test('listTemplates includes the new HR/onboarding starting points', () => {
+  const h = freshHarness();
+  const keys = h.automation.listTemplates().map((t) => t.key);
+  assert.ok(keys.includes('new-employee-onboarding-task'));
+  assert.ok(keys.includes('leave-request-notification'));
+});
+
+// ---- Phase 1 hardening: idempotency race protection ----
+
+test('two concurrent duplicate event deliveries are serialized into exactly one run', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Race test',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Create task', action: { type: 'create_task', params: { title: 'Race task' } } }],
+  });
+  const event = { companyId: 'c1', type: 'lead.created' as const, payload: { id: 'lead-race' }, dedupeKey: 'race-key' };
+  const [first, second] = await Promise.all([h.automation.handleEvent(event), h.automation.handleEvent(event)]);
+  assert.equal(first[0]!.id, second[0]!.id);
+
+  const workflow = (await h.automation.listWorkflows('c1'))[0]!;
+  const allRuns = await h.automation.listRuns(workflow.id, 'c1');
+  assert.equal(allRuns.length, 1);
+});
+
+// ---- Phase 1 hardening: retry backoff ----
+
+test('retried step attempts wait with exponential backoff between attempts', async () => {
+  const h = freshHarness(20);
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
+  let attempts = 0;
+  const timestamps: number[] = [];
+  h.setFetchImpl((async () => {
+    timestamps.push(Date.now());
+    attempts++;
+    if (attempts < 3) return new Response('error', { status: 500 });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch);
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Backoff test',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Call webhook', maxRetries: 2, action: { type: 'webhook_call', params: { url: 'https://example.com/hook' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'completed');
+  assert.equal(attempts, 3);
+  assert.ok(timestamps[1]! - timestamps[0]! >= 15, `expected a backoff delay before attempt 2, got ${timestamps[1]! - timestamps[0]!}ms`);
+  assert.ok(timestamps[2]! - timestamps[1]! >= 15, `expected a backoff delay before attempt 3, got ${timestamps[2]! - timestamps[1]!}ms`);
+});
+
+// ---- Phase 1 hardening: concurrency-bounded execution ----
+
+test('executeRun respects the configured process-wide concurrency limit', async () => {
+  const h = freshHarness(0, 1);
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
+  let concurrent = 0;
+  let maxObserved = 0;
+  h.setFetchImpl((async () => {
+    concurrent++;
+    maxObserved = Math.max(maxObserved, concurrent);
+    await new Promise((r) => setTimeout(r, 20));
+    concurrent--;
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch);
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Slow webhook A',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Call webhook', action: { type: 'webhook_call', params: { url: 'https://example.com/a' } } }],
+  });
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Slow webhook B',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.cancelled' },
+    steps: [{ name: 'Call webhook', action: { type: 'webhook_call', params: { url: 'https://example.com/b' } } }],
+  });
+
+  await Promise.all([
+    h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: { id: 'a' } }),
+    h.automation.handleEvent({ companyId: 'c1', type: 'contract.cancelled', payload: { id: 'b' } }),
+  ]);
+  assert.equal(maxObserved, 1, 'the concurrency limiter should have serialized the two runs to one at a time');
+});
+
+// ---- Phase 1 hardening: failure audit logging ----
+
+test('a failed step is written to the audit log, not just the step-run record', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Audit failure test',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Missing title fails', action: { type: 'create_task', params: {} } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'failed');
+
+  const entries = await h.auditLogRepo.findAll((e) => e.companyId === 'c1' && e.resourceId === run!.id);
+  const failureEntry = entries.find((e) => (e.metadata as Record<string, unknown> | undefined)?.failed === true);
+  assert.ok(failureEntry, 'expected a failure audit log entry for the failed step');
+});
+
+// ---- Phase 1 hardening: manual failure recovery (retryRun) ----
+
+test('retryRun resumes a failed run and can succeed once the external failure is fixed', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
+  h.setFetchImpl((async () => new Response('down', { status: 500 })) as typeof fetch);
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Outage recovery',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Call webhook', action: { type: 'webhook_call', params: { url: 'https://example.com/hook' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'failed');
+
+  h.setFetchImpl((async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch);
+  const retried = await h.automation.retryRun(run!.id, 'c1');
+  assert.equal(retried.status, 'completed');
+});
+
+test('retryRun rejects a run that is not currently failed', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Completed workflow',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'x', action: { type: 'create_task', params: { title: 'x' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  await assert.rejects(() => h.automation.retryRun(run!.id, 'c1'));
+});
+
+test('retryRun rejects a failed run belonging to a different company (cross-tenant)', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Fails',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Missing title fails', action: { type: 'create_task', params: {} } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'failed');
+  await assert.rejects(() => h.automation.retryRun(run!.id, 'c2'));
+});
+
+// ---- Phase 1 hardening: crash recovery ----
+
+test('recoverStuckRuns resumes a run left running by a simulated process crash', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
+  const workflow = await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Crash recovery',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Create task', action: { type: 'create_task', params: { title: 'Recovered task' } } }],
+  });
+  // Simulate a process crash mid-execution: a run persisted as 'running'
+  // that never got the chance to reach a terminal status.
+  await h.runs.save({
+    id: 'stuck-run-1',
+    companyId: 'c1',
+    workflowId: workflow.id,
+    status: 'running',
+    triggerPayload: {},
+    idempotencyKey: 'stuck-key',
+    currentStepIndex: 0,
+    startedAt: new Date().toISOString(),
+    initiatedBy: 'system',
+  });
+  const recovered = await h.automation.recoverStuckRuns();
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0]!.status, 'completed');
+});
+
+// ---- Phase 1 hardening: execution monitoring stats ----
+
+test('getStats returns accurate counts across workflows, runs, and pending approvals', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Stats WF',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Ask approval', action: { type: 'require_approval', params: {} } }],
+  });
+  await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  const stats = await h.automation.getStats('c1');
+  assert.equal(stats.totalWorkflows, 1);
+  assert.equal(stats.activeWorkflows, 1);
+  assert.equal(stats.totalRuns, 1);
+  assert.equal(stats.waitingApprovalRuns, 1);
+  assert.equal(stats.pendingApprovals, 1);
+});
+
+// ---- Phase 1 hardening: secret deletion safety ----
+
+test('deleteSecret blocks deleting a secret referenced by an active workflow unless forced', async () => {
+  const h = freshHarness();
+  const secret = await h.automation.setSecret('c1', 'in_use_key', 'value', 'owner-1');
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Uses secret',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Call webhook', action: { type: 'webhook_call', params: { url: 'https://example.com', secretKey: 'in_use_key' } } }],
+  });
+  await assert.rejects(() => h.automation.deleteSecret(secret.id, 'c1'));
+  await h.automation.deleteSecret(secret.id, 'c1', true);
+  const remaining = await h.automation.listSecrets('c1');
+  assert.equal(remaining.length, 0);
+});
+
+test('deleteSecret succeeds without force when no active workflow references it', async () => {
+  const h = freshHarness();
+  const secret = await h.automation.setSecret('c1', 'unused_key', 'value', 'owner-1');
+  await h.automation.deleteSecret(secret.id, 'c1');
+  const remaining = await h.automation.listSecrets('c1');
+  assert.equal(remaining.length, 0);
 });

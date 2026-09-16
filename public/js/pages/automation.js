@@ -170,6 +170,31 @@ export async function renderAutomation(container) {
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
+  // ---- Execution monitoring summary ----
+  const statsSlot = el('div', { class: 'card' });
+  container.appendChild(statsSlot);
+  async function loadStats() {
+    clear(statsSlot);
+    try {
+      const stats = await api.get('/api/automation/stats');
+      const tile = (label, value) => el('div', { style: 'text-align:center' }, [
+        el('div', { style: 'font-size:22px;font-weight:600' }, String(value)),
+        el('div', { class: 'muted' }, label),
+      ]);
+      statsSlot.appendChild(el('div', { style: 'display:flex;gap:24px;flex-wrap:wrap' }, [
+        tile('Active workflows', stats.activeWorkflows),
+        tile('Total runs', stats.totalRuns),
+        tile('Running', stats.runningRuns),
+        tile('Waiting approval', stats.waitingApprovalRuns),
+        tile('Completed', stats.completedRuns),
+        tile('Failed', stats.failedRuns),
+        tile('Pending approvals', stats.pendingApprovals),
+      ]));
+    } catch (err) {
+      statsSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   // ---- New workflow builder ----
   const nameInput = el('input', { type: 'text', placeholder: 'Workflow name' });
   const descInput = el('input', { type: 'text', placeholder: 'Description (optional)' });
@@ -220,7 +245,7 @@ export async function renderAutomation(container) {
       stepCards.length = 0;
       clear(stepsSlot);
       addStep();
-      await loadWorkflows();
+      await Promise.all([loadWorkflows(), loadStats()]);
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
     } finally {
@@ -280,7 +305,7 @@ export async function renderAutomation(container) {
     try {
       await api.post(`/api/automation/workflows/${workflow.id}/status`, { status });
       toast(`Workflow ${status}.`, 'success');
-      await loadWorkflows();
+      await Promise.all([loadWorkflows(), loadStats()]);
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
     }
@@ -289,6 +314,18 @@ export async function renderAutomation(container) {
   async function showRuns(workflow) {
     const runsPage = await api.get(`/api/automation/workflows/${workflow.id}/runs`, { limit: 20 });
     const modalBody = el('div', { class: 'modal-overlay' });
+    const retry = async (run, btn) => {
+      btn.disabled = true;
+      try {
+        await api.post(`/api/automation/runs/${run.id}/retry`, {});
+        toast('Run retried.', 'success');
+        modalBody.remove();
+        await showRuns(workflow);
+      } catch (err) {
+        btn.disabled = false;
+        errorSlot.appendChild(errorBanner(err.message));
+      }
+    };
     const card = el('div', { class: 'modal-card' }, [
       el('h3', { class: 'modal-title' }, `Run history — ${workflow.name}`),
       table(
@@ -297,8 +334,14 @@ export async function renderAutomation(container) {
           { label: 'Status', render: (r) => statusBadge(r.status) },
           { label: 'Initiated by', key: 'initiatedBy' },
           { label: 'Error', render: (r) => r.error || '' },
+          { label: '', render: (r) => {
+            if (r.status !== 'failed') return '';
+            const retryBtn = el('button', {}, 'Retry');
+            retryBtn.addEventListener('click', () => retry(r, retryBtn));
+            return retryBtn;
+          } },
         ],
-        runsPage.items,
+        runsPage.items.slice().reverse(),
         { empty: 'No runs yet.' },
       ),
       el('div', { class: 'form-actions', style: 'justify-content:flex-end' }, [
@@ -453,5 +496,5 @@ export async function renderAutomation(container) {
     }
   }
 
-  await Promise.all([loadWorkflows(), loadApprovals(), loadSecrets()]);
+  await Promise.all([loadStats(), loadWorkflows(), loadApprovals(), loadSecrets()]);
 }
