@@ -1,17 +1,87 @@
 import { randomUUID } from 'node:crypto';
-import type { AiActionRequest, AiActionStatus, AiAutonomyLevel, AiPolicy, ApprovalRequest, AutomationActionType } from '../../domain/types.js';
+import type {
+  AgentAlternative,
+  AgentDecision,
+  AgentDecisionStatus,
+  AiActionRequest,
+  AiActionStatus,
+  AiAutonomyLevel,
+  AiPolicy,
+  ApprovalRequest,
+  AutomationActionType,
+} from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { AuditLog } from '../../infra/audit-log.js';
 import { AutomationError, ForbiddenError, NotFoundError, ValidationError } from '../../infra/errors.js';
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { CrmService } from '../crm/crm.service.js';
+import { MarketingService } from '../marketing/marketing.service.js';
+import { OperationsService } from '../operations/operations.service.js';
+import { HrService } from '../hr/hr.service.js';
+import { FinanceService } from '../finance/finance.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
 
 export interface AiRepos {
   actionRequests: Repository<AiActionRequest>;
   policies: Repository<AiPolicy>;
   approvals: Repository<ApprovalRequest>;
+  agentDecisions: Repository<AgentDecision>;
+}
+
+// ---- Tool Registry ----
+// Purely descriptive metadata — what a caller (a human building a
+// workflow, an agent's own decision explanation, the frontend) sees when
+// asking "what can the AI/Automation Engine do?". It is deliberately NOT
+// consulted for any security decision: the actual authority check for
+// every single one of these, whatever calls it, is
+// AutomationService.canPerformAction() / the RBAC-gated executeAction()
+// switch. Duplicating that logic here would risk the two drifting apart;
+// this list exists only to describe them.
+export interface ToolDefinition {
+  actionType: AutomationActionType;
+  name: string;
+  description: string;
+  requiredParams: string[];
+}
+
+const TOOL_REGISTRY: ToolDefinition[] = [
+  { actionType: 'create_task', name: 'Create Task', description: 'Creates a task/reminder/follow-up.', requiredParams: ['title'] },
+  { actionType: 'create_lead', name: 'Create Lead', description: 'Creates a new CRM lead.', requiredParams: ['fullName', 'phone'] },
+  { actionType: 'send_message', name: 'Send Message', description: 'Sends an internal message/notification.', requiredParams: ['subject', 'body'] },
+  { actionType: 'update_lead_status', name: 'Update Lead Status', description: "Advances a lead's funnel status.", requiredParams: ['leadId', 'status'] },
+  { actionType: 'assign_lead_owner', name: 'Assign Lead Owner', description: 'Reassigns a lead to a different owner.', requiredParams: ['leadId', 'ownerEmployeeUserId'] },
+  { actionType: 'update_campaign_status', name: 'Update Campaign Status', description: "Changes a marketing campaign's status.", requiredParams: ['campaignId', 'status'] },
+  { actionType: 'webhook_call', name: 'Call Webhook', description: 'Calls an external webhook/API endpoint.', requiredParams: ['url'] },
+  { actionType: 'require_approval', name: 'Require Approval', description: 'Pauses for human approval (workflow steps only).', requiredParams: [] },
+];
+
+interface AgentDecisionResult {
+  chosenActionType?: AutomationActionType;
+  params?: Record<string, unknown>;
+  confidence: number;
+  reasoning: string;
+  alternatives: AgentAlternative[];
+}
+
+export interface AgentDefinition {
+  key: string;
+  name: string;
+  businessFunction: string;
+  /** What this agent is trying to accomplish — shown alongside its
+   * decisions so a human reviewing the history understands the intent,
+   * not just the mechanics. */
+  goal: string;
+  subjectType: string;
+  /** The agent's own boundary: even when the requesting human's RBAC
+   * grants and the company's AiPolicy would both permit more, this agent
+   * will never choose an action type outside this list — a decision that
+   * would fall outside it is escalated instead of proceeding. */
+  allowedActionTypes: AutomationActionType[];
+  /** Below this confidence (0-100), the agent escalates to a human instead
+   * of even attempting the action — independent of and prior to the
+   * permission/policy/approval pipeline. */
+  escalateBelowConfidence: number;
 }
 
 export interface RequestAiActionInput {
@@ -56,6 +126,8 @@ const APPROVAL_STEP_ID = 'ai-action';
  * than the human it's acting on behalf of already has.
  */
 export class AiAgentService {
+  private readonly agents: Record<string, AgentDefinition>;
+
   constructor(
     private readonly repos: AiRepos,
     private readonly rbac: RbacEvaluator,
@@ -63,7 +135,59 @@ export class AiAgentService {
     private readonly crm: CrmService,
     private readonly leadScoring: LeadScoringService,
     private readonly auditLog: AuditLog,
-  ) {}
+    private readonly marketing: MarketingService,
+    private readonly operations: OperationsService,
+    private readonly hr: HrService,
+    private readonly finance: FinanceService,
+  ) {
+    this.agents = {
+      sales: {
+        key: 'sales',
+        name: 'Sales Agent',
+        businessFunction: 'Sales',
+        goal: 'Advance qualified leads through the funnel and keep unqualified ones from going cold.',
+        subjectType: 'lead',
+        allowedActionTypes: ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message'],
+        escalateBelowConfidence: 20,
+      },
+      marketing: {
+        key: 'marketing',
+        name: 'Marketing Agent',
+        businessFunction: 'Marketing',
+        goal: 'Flag underperforming campaigns for review before budget is wasted on them.',
+        subjectType: 'campaign',
+        allowedActionTypes: ['create_task', 'update_campaign_status'],
+        escalateBelowConfidence: 20,
+      },
+      finance: {
+        key: 'finance',
+        name: 'Finance Agent',
+        businessFunction: 'Finance',
+        goal: 'Get overdue payments a timely collections follow-up.',
+        subjectType: 'payment_schedule_line',
+        allowedActionTypes: ['create_task', 'send_message'],
+        escalateBelowConfidence: 20,
+      },
+      support: {
+        key: 'support',
+        name: 'Customer Service Agent',
+        businessFunction: 'Customer Service / Operations',
+        goal: 'Make sure urgent or long-unassigned maintenance tickets get picked up promptly.',
+        subjectType: 'maintenance_ticket',
+        allowedActionTypes: ['create_task', 'send_message'],
+        escalateBelowConfidence: 20,
+      },
+      hr: {
+        key: 'hr',
+        name: 'HR Agent',
+        businessFunction: 'HR',
+        goal: 'Nudge managers on leave requests that have sat pending too long.',
+        subjectType: 'leave_request',
+        allowedActionTypes: ['create_task', 'send_message'],
+        escalateBelowConfidence: 20,
+      },
+    };
+  }
 
   async requestAction(input: RequestAiActionInput): Promise<AiActionRequest> {
     if (!input.actionType) throw new ValidationError('actionType is required');
@@ -172,48 +296,349 @@ export class AiAgentService {
     return denied;
   }
 
+  /** Backward-compatible convenience wrapper around the Sales agent —
+   * kept because the Leads page's "Ask AI" button and existing callers use
+   * this exact signature. Delegates to the same orchestration engine every
+   * other agent uses (decide()), not a separate/duplicate code path. */
+  async suggestNextAction(leadId: string, companyId: string, requestedByUserId: string): Promise<AgentDecision> {
+    return this.decide('sales', companyId, leadId, requestedByUserId);
+  }
+
+  // ---- Agent Orchestration ----
+
+  listAgents(): Omit<AgentDefinition, never>[] {
+    return Object.values(this.agents);
+  }
+
+  listTools(agentKey?: string): ToolDefinition[] {
+    if (!agentKey) return TOOL_REGISTRY;
+    const agent = this.agents[agentKey];
+    if (!agent) throw new NotFoundError('unknown agent');
+    return TOOL_REGISTRY.filter((t) => agent.allowedActionTypes.includes(t.actionType));
+  }
+
   /**
-   * Deterministic "next best action" for a lead — reuses the existing
-   * rule-based LeadScoringService (no external LLM/ML dependency in this
-   * deployment) to turn its score into a concrete, explainable suggested
-   * action, then routes it through the exact same permission/policy/
-   * approval/audit pipeline as any other AI action. Whether it actually
-   * executes depends entirely on the company's AiPolicy for that action
-   * type — this method only ever *proposes*, per requestAction()'s rules.
+   * Runs one specialized agent's decision for one subject, end to end:
+   *   1. Memory — a still-relevant recent decision for this exact subject
+   *      is returned as-is instead of re-deciding (avoids duplicate work
+   *      from repeated "Ask AI" clicks).
+   *   2. Decide — the agent's own deterministic rule set (grounded in real
+   *      data via the relevant service — LeadScoringService, campaign
+   *      performance, days-overdue, ticket age, etc. — never an external
+   *      LLM call) produces a confidence-scored recommendation plus the
+   *      alternatives it considered.
+   *   3. Confidence gate — below the agent's escalateBelowConfidence, the
+   *      decision is recorded as 'escalated' and nothing is attempted.
+   *   4. Boundary gate — a chosen action outside the agent's own declared
+   *      allowedActionTypes is also escalated, never attempted, even if
+   *      the human/company would otherwise permit it.
+   *   5. Execute — only past both gates does this call requestAction(),
+   *      the same permission/policy/approval/audit pipeline every other AI
+   *      action goes through.
    */
-  async suggestNextAction(leadId: string, companyId: string, requestedByUserId: string): Promise<AiActionRequest> {
+  async decide(agentKey: string, companyId: string, subjectId: string, requestedByUserId: string): Promise<AgentDecision> {
+    const agent = this.agents[agentKey];
+    if (!agent) throw new NotFoundError(`unknown agent: ${agentKey}`);
+
+    const recent = await this.findRecentDecision(companyId, agentKey, subjectId);
+    if (recent) return recent;
+
+    const result = await this.runDecisionRules(agent, companyId, subjectId);
+
+    if (!result.chosenActionType) {
+      return this.persistDecision(agent, companyId, subjectId, requestedByUserId, 'no_action', result);
+    }
+    if (result.confidence < agent.escalateBelowConfidence) {
+      return this.persistDecision(agent, companyId, subjectId, requestedByUserId, 'escalated', result);
+    }
+    if (!agent.allowedActionTypes.includes(result.chosenActionType)) {
+      return this.persistDecision(agent, companyId, subjectId, requestedByUserId, 'escalated', {
+        ...result,
+        reasoning: `${result.reasoning} (chosen action "${result.chosenActionType}" is outside this agent's declared boundary)`,
+      });
+    }
+
+    const request = await this.requestAction({
+      companyId,
+      requestedByUserId,
+      actionType: result.chosenActionType,
+      params: result.params ?? {},
+      reasoning: result.reasoning,
+    });
+    const decision = await this.persistDecision(agent, companyId, subjectId, requestedByUserId, 'proceeded', result, request.id, request.status);
+    return decision;
+  }
+
+  async listAgentDecisions(companyId: string, agentKey?: string): Promise<AgentDecision[]> {
+    return this.repos.agentDecisions.findAll((d) => d.companyId === companyId && (!agentKey || d.agentKey === agentKey));
+  }
+
+  async getAgentDecision(id: string, companyId: string): Promise<AgentDecision> {
+    const decision = await this.repos.agentDecisions.findById(id);
+    if (!decision || decision.companyId !== companyId) throw new NotFoundError('agent decision not found');
+    return decision;
+  }
+
+  async getAgentStats(companyId: string): Promise<Record<string, { total: number; proceeded: number; escalated: number; noAction: number }>> {
+    const decisions = await this.repos.agentDecisions.findAll((d) => d.companyId === companyId);
+    const stats: Record<string, { total: number; proceeded: number; escalated: number; noAction: number }> = {};
+    for (const key of Object.keys(this.agents)) {
+      stats[key] = { total: 0, proceeded: 0, escalated: 0, noAction: 0 };
+    }
+    for (const d of decisions) {
+      const bucket = (stats[d.agentKey] ??= { total: 0, proceeded: 0, escalated: 0, noAction: 0 });
+      bucket.total++;
+      if (d.status === 'proceeded') bucket.proceeded++;
+      else if (d.status === 'escalated') bucket.escalated++;
+      else bucket.noAction++;
+    }
+    return stats;
+  }
+
+  /** A decision is still "live" (worth reusing instead of re-deciding)
+   * within a cooldown window if it either needs human attention
+   * ('escalated') or its resulting AiActionRequest hasn't reached a
+   * terminal outcome yet ('suggested'/'pending_approval'). A decision
+   * whose request was executed or denied is stale — the situation may
+   * have changed, so the next decide() call re-evaluates from scratch. */
+  private async findRecentDecision(companyId: string, agentKey: string, subjectId: string): Promise<AgentDecision | undefined> {
+    const COOLDOWN_MS = 60 * 60 * 1000;
+    const now = Date.now();
+    const candidates = await this.repos.agentDecisions.findAll(
+      (d) => d.companyId === companyId && d.agentKey === agentKey && d.subjectId === subjectId && now - Date.parse(d.createdAt) < COOLDOWN_MS,
+    );
+    const latest = candidates.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+    if (!latest) return undefined;
+    if (latest.status === 'escalated') return latest;
+    if (latest.status === 'proceeded' && latest.aiActionRequestId) {
+      const request = await this.repos.actionRequests.findById(latest.aiActionRequestId);
+      if (request && (request.status === 'pending_approval' || request.status === 'suggested')) return latest;
+    }
+    return undefined;
+  }
+
+  private async persistDecision(
+    agent: AgentDefinition,
+    companyId: string,
+    subjectId: string,
+    requestedByUserId: string,
+    status: AgentDecisionStatus,
+    result: AgentDecisionResult,
+    aiActionRequestId?: string,
+    resultActionStatus?: AiActionStatus,
+  ): Promise<AgentDecision> {
+    const decision: AgentDecision = {
+      id: randomUUID(),
+      companyId,
+      agentKey: agent.key,
+      subjectType: agent.subjectType,
+      subjectId,
+      chosenActionType: result.chosenActionType,
+      params: result.params,
+      confidence: result.confidence,
+      reasoning: result.reasoning,
+      alternatives: result.alternatives,
+      status,
+      aiActionRequestId,
+      resultActionStatus,
+      requestedByUserId,
+      createdAt: new Date().toISOString(),
+    };
+    const saved = await this.repos.agentDecisions.save(decision);
+    await this.auditLog.record({
+      companyId,
+      actorUserId: requestedByUserId,
+      action: 'create',
+      resource: 'ai_action',
+      resourceId: saved.id,
+      metadata: { agentKey: agent.key, subjectType: agent.subjectType, subjectId, status, confidence: result.confidence, executedByAI: true },
+    });
+    return saved;
+  }
+
+  private async runDecisionRules(agent: AgentDefinition, companyId: string, subjectId: string): Promise<AgentDecisionResult> {
+    switch (agent.key) {
+      case 'sales':
+        return this.decideSales(companyId, subjectId);
+      case 'marketing':
+        return this.decideMarketing(companyId, subjectId);
+      case 'finance':
+        return this.decideFinance(companyId, subjectId);
+      case 'support':
+        return this.decideSupport(companyId, subjectId);
+      case 'hr':
+        return this.decideHr(companyId, subjectId);
+      default:
+        throw new NotFoundError(`no decision rules registered for agent: ${agent.key}`);
+    }
+  }
+
+  /** Sales Agent: turns LeadScoringService's deterministic score into a
+   * concrete next action. Thresholds are calibrated against the scorer's
+   * actual range per status (status weight alone caps 'new' at 10/100 and
+   * 'contacted' at 35/100 — the rest comes from recency/owner/source
+   * bonuses), not round numbers. */
+  private async decideSales(companyId: string, leadId: string): Promise<AgentDecisionResult> {
     const lead = await this.crm.getLead(leadId);
     if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
     if (lead.status === 'lost' || lead.status === 'opportunity') {
-      throw new AutomationError(`no next action to suggest for a lead already ${lead.status}`);
+      return { confidence: 100, reasoning: `Lead is already ${lead.status}; no further action needed.`, alternatives: [] };
     }
+
     const score = await this.leadScoring.scoreLead(leadId, companyId);
     const factorSummary = score.factors.map((f) => f.label).join(', ') || 'no positive signals yet';
+    const alternatives: AgentAlternative[] = [];
 
-    let actionType: AutomationActionType;
-    let params: Record<string, unknown>;
-    let reasoning: string;
-
-    // Thresholds are calibrated against LeadScoringService's actual range
-    // per status (status weight alone caps 'new' at 10/100 and 'contacted'
-    // at 35/100 — the rest comes from recency/owner/source bonuses), not
-    // round numbers: 25 is reachable but requires real positive signals
-    // beyond just being new, and 45 likewise for 'contacted'.
-    if (lead.status === 'new' && score.score >= 25) {
-      actionType = 'update_lead_status';
-      params = { leadId, status: 'contacted' };
-      reasoning = `Lead score is ${score.score}/100 (${factorSummary}) — high enough to warrant first contact.`;
-    } else if (lead.status === 'contacted' && score.score >= 45) {
-      actionType = 'update_lead_status';
-      params = { leadId, status: 'qualified' };
-      reasoning = `Lead score is ${score.score}/100 (${factorSummary}) — strong engagement signals suggest this lead is ready to qualify.`;
-    } else {
-      actionType = 'create_task';
-      params = { title: `Follow up with ${lead.fullName}`, relatedResource: 'lead', relatedResourceId: lead.id };
-      reasoning = `Lead score is ${score.score}/100 (${factorSummary}) — not yet ready to advance automatically; a manual follow-up is recommended.`;
+    if (lead.status === 'new') {
+      const advanceConfidence = Math.min(95, Math.round((score.score / 35) * 100));
+      if (advanceConfidence >= 50) {
+        alternatives.push({ actionType: 'create_task', confidence: 100 - advanceConfidence, reasoning: 'Fallback: a manual follow-up task instead of advancing automatically.' });
+        return {
+          chosenActionType: 'update_lead_status',
+          params: { leadId, status: 'contacted' },
+          confidence: advanceConfidence,
+          reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to mark contacted.`,
+          alternatives,
+        };
+      }
+      alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark contacted directly, but the score is not yet strong enough.' });
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Follow up with ${lead.fullName}`, relatedResource: 'lead', relatedResourceId: lead.id },
+        confidence: 100 - advanceConfidence,
+        reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not confident enough to auto-advance; recommend manual follow-up.`,
+        alternatives,
+      };
     }
 
-    return this.requestAction({ companyId, requestedByUserId, actionType, params, reasoning });
+    if (lead.status === 'qualified') {
+      // Deliberately low confidence: whether a qualified lead is ready to
+      // convert to an Opportunity isn't something the lead score (a funnel-
+      // stage/recency/owner/source signal) has any real basis to judge —
+      // this always escalates to a human rather than guessing.
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Review qualified lead ${lead.fullName} for opportunity conversion`, relatedResource: 'lead', relatedResourceId: lead.id },
+        confidence: 15,
+        reasoning: 'Lead is qualified — recommend a human review for opportunity conversion; no reliable automatic signal for this transition.',
+        alternatives: [],
+      };
+    }
+
+    // status === 'contacted'
+    const advanceConfidence = Math.min(95, Math.round((score.score / 60) * 100));
+    if (advanceConfidence >= 60) {
+      alternatives.push({ actionType: 'create_task', confidence: 100 - advanceConfidence, reasoning: 'Fallback: a manual follow-up task instead of qualifying automatically.' });
+      return {
+        chosenActionType: 'update_lead_status',
+        params: { leadId, status: 'qualified' },
+        confidence: advanceConfidence,
+        reasoning: `Lead score ${score.score}/100 (${factorSummary}) — strong engagement, ready to qualify.`,
+        alternatives,
+      };
+    }
+    alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark qualified directly, but engagement is not yet strong enough.' });
+    return {
+      chosenActionType: 'create_task',
+      params: { title: `Follow up with ${lead.fullName}`, relatedResource: 'lead', relatedResourceId: lead.id },
+      confidence: 100 - advanceConfidence,
+      reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not yet strong enough to qualify automatically.`,
+      alternatives,
+    };
+  }
+
+  /** Marketing Agent: flags a campaign whose attributed leads have real
+   * volume but poor conversion — a signal worth a human review before more
+   * budget goes toward it. Never auto-cancels a campaign on its own; that
+   * risk is called out explicitly in the recorded alternative. */
+  private async decideMarketing(companyId: string, campaignId: string): Promise<AgentDecisionResult> {
+    const campaign = await this.marketing.getCampaign(campaignId);
+    if (!campaign || campaign.companyId !== companyId) throw new NotFoundError('campaign not found');
+    if (campaign.status !== 'active') {
+      return { confidence: 100, reasoning: `Campaign is ${campaign.status}; no action needed.`, alternatives: [] };
+    }
+    const perf = await this.marketing.campaignPerformance(campaignId, companyId);
+    if (perf.leadCount >= 10 && perf.conversionRate < 10) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Review underperforming campaign "${campaign.name}" (${perf.conversionRate}% conversion)`, relatedResource: 'campaign', relatedResourceId: campaign.id },
+        confidence: 75,
+        reasoning: `${perf.leadCount} leads attributed with only ${perf.conversionRate}% conversion — recommend a performance review.`,
+        alternatives: [{ actionType: 'update_campaign_status', confidence: 30, reasoning: 'Could pause the campaign outright, but that risks losing legitimately slow-building leads — a review task is safer.' }],
+      };
+    }
+    return {
+      confidence: 90,
+      reasoning: `Campaign performance (${perf.conversionRate}% conversion across ${perf.leadCount} leads) is within normal range; no action needed.`,
+      alternatives: [],
+    };
+  }
+
+  /** Finance Agent: recommends a collections follow-up for an overdue
+   * payment line, with confidence rising the longer it's been overdue. */
+  private async decideFinance(companyId: string, scheduleLineId: string): Promise<AgentDecisionResult> {
+    const line = await this.finance.getScheduleLine(scheduleLineId, companyId);
+    if (!line) throw new NotFoundError('payment schedule line not found');
+    if (line.status !== 'overdue') {
+      return { confidence: 100, reasoning: `Payment line is ${line.status}, not overdue; no action needed.`, alternatives: [] };
+    }
+    const daysOverdue = Math.max(0, Math.floor((Date.now() - Date.parse(line.dueDate)) / (24 * 60 * 60 * 1000)));
+    const outstanding = Math.round((line.amount - line.amountPaid) * 100) / 100;
+    const confidence = Math.min(95, 50 + daysOverdue * 2);
+    return {
+      chosenActionType: 'create_task',
+      params: {
+        title: `Follow up on overdue payment "${line.label}" (${daysOverdue}d overdue, ${outstanding} outstanding)`,
+        relatedResource: 'payment_schedule_line',
+        relatedResourceId: line.id,
+      },
+      confidence,
+      reasoning: `Payment overdue by ${daysOverdue} day(s), ${outstanding} outstanding — recommend a collections follow-up.`,
+      alternatives: [],
+    };
+  }
+
+  /** Customer Service Agent: flags an open maintenance ticket that's
+   * urgent/high priority or has sat unassigned too long. */
+  private async decideSupport(companyId: string, ticketId: string): Promise<AgentDecisionResult> {
+    const ticket = await this.operations.getTicket(ticketId);
+    if (!ticket || ticket.companyId !== companyId) throw new NotFoundError('maintenance ticket not found');
+    if (ticket.status !== 'open') {
+      return { confidence: 100, reasoning: `Ticket is ${ticket.status}; no action needed.`, alternatives: [] };
+    }
+    const ageHours = Math.max(0, (Date.now() - Date.parse(ticket.createdAt)) / (60 * 60 * 1000));
+    const urgent = ticket.priority === 'urgent' || ticket.priority === 'high';
+    if (!ticket.assignedToUserId && (urgent || ageHours > 24)) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Assign unassigned ${ticket.priority} ticket: ${ticket.title}`, relatedResource: 'maintenance_ticket', relatedResourceId: ticket.id },
+        confidence: urgent ? 90 : 70,
+        reasoning: `Ticket is ${ticket.priority} priority, unassigned for ${Math.round(ageHours)}h — recommend prompt assignment.`,
+        alternatives: [],
+      };
+    }
+    return { confidence: 80, reasoning: 'Ticket is open but already assigned, or not yet urgent enough to flag.', alternatives: [] };
+  }
+
+  /** HR Agent: nudges toward a decision reminder once a leave request has
+   * sat pending past a reasonable review window. */
+  private async decideHr(companyId: string, leaveRequestId: string): Promise<AgentDecisionResult> {
+    const leave = await this.hr.getLeaveRequest(leaveRequestId);
+    if (!leave || leave.companyId !== companyId) throw new NotFoundError('leave request not found');
+    if (leave.status !== 'pending') {
+      return { confidence: 100, reasoning: `Leave request is already ${leave.status}; no action needed.`, alternatives: [] };
+    }
+    const ageHours = Math.max(0, (Date.now() - Date.parse(leave.requestedAt)) / (60 * 60 * 1000));
+    if (ageHours > 48) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Leave request pending ${Math.round(ageHours)}h — needs a decision`, relatedResource: 'leave_request', relatedResourceId: leave.id },
+        confidence: Math.min(90, 50 + ageHours / 2),
+        reasoning: `Leave request has been pending for ${Math.round(ageHours)}h with no decision — recommend a reminder.`,
+        alternatives: [],
+      };
+    }
+    return { confidence: 70, reasoning: `Leave request pending for ${Math.round(ageHours)}h — still within a normal review window.`, alternatives: [] };
   }
 
   async setPolicy(companyId: string, actionType: AutomationActionType, autonomyLevel: AiAutonomyLevel, updatedByUserId: string): Promise<AiPolicy> {

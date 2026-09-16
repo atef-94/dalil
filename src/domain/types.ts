@@ -481,7 +481,7 @@ export interface Campaign {
 
 // ---- Communication ----
 
-export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket';
+export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket' | 'campaign' | 'payment_schedule_line' | 'leave_request';
 export type MessageChannel = 'internal' | 'email' | 'whatsapp' | 'sms';
 export type MessageStatus = 'sent' | 'read';
 
@@ -718,5 +718,49 @@ export interface AiActionRequest {
   status: AiActionStatus;
   runId?: string;
   approvalRequestId?: string;
+  createdAt: string;
+}
+
+// ---- AI Agent Orchestration Layer ----
+
+/** A candidate action a specialized agent considered but did not choose —
+ * kept alongside the chosen action so a decision is explainable, not just
+ * a bare result. */
+export interface AgentAlternative {
+  actionType: AutomationActionType;
+  confidence: number;
+  reasoning: string;
+}
+
+export type AgentDecisionStatus =
+  | 'proceeded' // confidence cleared the agent's threshold and the action was within its boundary — routed into requestAction()
+  | 'escalated' // confidence too low, or the chosen action fell outside the agent's declared boundary — needs a human to decide
+  | 'no_action'; // the agent confidently determined nothing needs to happen for this subject right now
+
+/** One specialized agent's decision about one subject (a lead, a campaign,
+ * an overdue payment line, a maintenance ticket, a leave request) — the
+ * durable record behind "agent execution history" and "explainable
+ * decisions". Recent decisions for the same subject double as the agent's
+ * memory: a fresh "Ask AI" click within the cooldown window returns the
+ * still-relevant prior decision instead of re-deciding and duplicating
+ * work. */
+export interface AgentDecision {
+  id: string;
+  companyId: string;
+  agentKey: string;
+  subjectType: string;
+  subjectId: string;
+  chosenActionType?: AutomationActionType;
+  params?: Record<string, unknown>;
+  confidence: number;
+  reasoning: string;
+  alternatives: AgentAlternative[];
+  status: AgentDecisionStatus;
+  aiActionRequestId?: string;
+  /** A snapshot of the resulting AiActionRequest's status at decision time
+   * (when status === 'proceeded') — lets a caller show the outcome without
+   * a second round trip. */
+  resultActionStatus?: AiActionStatus;
+  requestedByUserId: string;
   createdAt: string;
 }

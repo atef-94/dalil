@@ -1,4 +1,5 @@
 import type {
+  AgentDecision,
   AiActionRequest,
   AiPolicy,
   ApprovalRequest,
@@ -191,6 +192,7 @@ function buildRepos(db?: DatabaseSync) {
     secrets: repo<Secret>('secrets'),
     aiActionRequests: repo<AiActionRequest>('ai_action_requests'),
     aiPolicies: repo<AiPolicy>('ai_policies'),
+    agentDecisions: repo<AgentDecision>('agent_decisions'),
   };
 }
 
@@ -307,12 +309,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     await automation.handleEvent(event);
   });
   const aiAgent = new AiAgentService(
-    { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals },
+    { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals, agentDecisions: repos.agentDecisions },
     rbac,
     automation,
     crm,
     leadScoring,
     auditLog,
+    marketing,
+    operations,
+    hr,
+    finance,
   );
 
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
@@ -1924,6 +1930,62 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const request = await aiAgent.suggestNextAction(ctx.params.leadId!, actor.companyId, actor.userId);
     return { status: 201, body: request };
+  });
+
+  // ---- AI Agent Orchestration Layer ----
+  // Specialized agents (Sales/Marketing/Finance/Support/HR), each scoped to
+  // its own declared tool boundary, deciding a confidence-scored next
+  // action for one subject (a lead, campaign, overdue payment line,
+  // maintenance ticket, or leave request) and routing it through the exact
+  // same permission/policy/approval/audit pipeline as any other AI action
+  // — see AiAgentService.decide().
+  httpServer.get('/api/ai/agents', async (ctx) => {
+    await actorOf(ctx);
+    return { status: 200, body: aiAgent.listAgents() };
+  });
+
+  httpServer.get('/api/ai/tools', async (ctx) => {
+    await actorOf(ctx);
+    const agentKey = ctx.query.get('agent') ?? undefined;
+    return { status: 200, body: aiAgent.listTools(agentKey) };
+  });
+
+  httpServer.post('/api/ai/agents/:agentKey/decide', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_action'))) {
+      throw new ForbiddenError('missing create:ai_action permission');
+    }
+    const body = parseJsonBody<{ subjectId: string }>(ctx.body);
+    const decision = await aiAgent.decide(ctx.params.agentKey!, actor.companyId, body.subjectId, actor.userId);
+    return { status: 201, body: decision };
+  });
+
+  httpServer.get('/api/ai/decisions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const agentKey = ctx.query.get('agent') ?? undefined;
+    const list = await aiAgent.listAgentDecisions(actor.companyId, agentKey);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.get('/api/ai/decisions/:decisionId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const decision = await aiAgent.getAgentDecision(ctx.params.decisionId!, actor.companyId);
+    return { status: 200, body: decision };
+  });
+
+  httpServer.get('/api/ai/agent-stats', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const stats = await aiAgent.getAgentStats(actor.companyId);
+    return { status: 200, body: stats };
   });
 
   // ---- Audit ----

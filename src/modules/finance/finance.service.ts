@@ -76,6 +76,11 @@ export class FinanceService {
     return { payment, receipt, line: updatedLine };
   }
 
+  async getScheduleLine(id: string, companyId: string): Promise<PaymentScheduleLine | undefined> {
+    const line = await this.scheduleLines.findById(id);
+    return line && line.companyId === companyId ? line : undefined;
+  }
+
   async getBalance(contractId: string, companyId: string): Promise<Balance> {
     const lines = await this.scheduleLines.findAll((l) => l.contractId === contractId && l.companyId === companyId);
     const totalDue = lines.reduce((sum, l) => sum + l.amount, 0);

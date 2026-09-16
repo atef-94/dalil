@@ -58,6 +58,92 @@ export async function renderAi(container) {
     rows.forEach((r) => policiesSlot.appendChild(r));
   }
 
+  // ---- Agents ----
+  const agentsSlot = el('div', { class: 'card' });
+  container.appendChild(agentsSlot);
+
+  async function loadAgents() {
+    clear(agentsSlot);
+    agentsSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Specialized Agents'));
+    let agents = [];
+    try {
+      agents = await api.get('/api/ai/agents');
+    } catch (err) {
+      agentsSlot.appendChild(errorBanner(err.message));
+      return;
+    }
+
+    const agentSelect = selectInput(agents.map((a) => ({ value: a.key, label: a.name })));
+    const subjectInput = el('input', { type: 'text', placeholder: `${agents[0]?.subjectType || 'subject'} id` });
+    const runBtn = el('button', { class: 'primary' }, 'Run decision');
+    const toolsSlot = el('div', { class: 'muted' });
+
+    async function renderTools() {
+      const agent = agents.find((a) => a.key === agentSelect.value);
+      subjectInput.placeholder = `${agent?.subjectType || 'subject'} id`;
+      try {
+        const tools = await api.get('/api/ai/tools', { agent: agentSelect.value });
+        clear(toolsSlot);
+        toolsSlot.appendChild(el('span', {}, `Goal: ${agent?.goal || ''} — Tools: ${tools.map((t) => t.name).join(', ')}`));
+      } catch {
+        clear(toolsSlot);
+      }
+    }
+    agentSelect.addEventListener('change', renderTools);
+    await renderTools();
+
+    runBtn.addEventListener('click', async () => {
+      if (!subjectInput.value.trim()) return;
+      runBtn.disabled = true;
+      try {
+        const decision = await api.post(`/api/ai/agents/${agentSelect.value}/decide`, { subjectId: subjectInput.value.trim() });
+        toast(`[${decision.status}, ${decision.confidence}% confidence] ${decision.reasoning}`, decision.status === 'escalated' ? 'info' : 'success');
+        await loadDecisions();
+      } catch (err) {
+        errorSlot.appendChild(errorBanner(err.message));
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+
+    agentsSlot.appendChild(el('div', { class: 'form-row', style: 'align-items:flex-end' }, [
+      el('div', {}, [el('label', {}, 'Agent'), agentSelect]),
+      el('div', {}, [el('label', {}, 'Subject id'), subjectInput]),
+      runBtn,
+    ]));
+    agentsSlot.appendChild(toolsSlot);
+  }
+
+  // ---- Agent decision history ----
+  const decisionsSlot = el('div');
+  container.appendChild(decisionsSlot);
+
+  async function loadDecisions() {
+    clear(decisionsSlot);
+    decisionsSlot.appendChild(loadingState());
+    try {
+      const page = await api.get('/api/ai/decisions', { limit: 50 });
+      clear(decisionsSlot);
+      decisionsSlot.appendChild(el('h3', {}, 'Agent decision history'));
+      decisionsSlot.appendChild(table(
+        [
+          { label: 'Agent', key: 'agentKey' },
+          { label: 'Subject', render: (d) => `${d.subjectType}:${d.subjectId}` },
+          { label: 'Chosen action', render: (d) => d.chosenActionType || '—' },
+          { label: 'Confidence', render: (d) => `${d.confidence}%` },
+          { label: 'Reasoning', render: (d) => d.reasoning },
+          { label: 'Status', render: (d) => statusBadge(d.status) },
+          { label: 'When', render: (d) => new Date(d.createdAt).toLocaleString() },
+        ],
+        page.items.slice().reverse(),
+        { empty: 'No agent decisions yet — run one above.' },
+      ));
+    } catch (err) {
+      clear(decisionsSlot);
+      decisionsSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   async function decide(request, action) {
     try {
       await api.post(`/api/ai/actions/${request.approvalRequestId}/${action}`, {});
@@ -104,5 +190,5 @@ export async function renderAi(container) {
     }
   }
 
-  await Promise.all([loadPolicies(), loadRequests()]);
+  await Promise.all([loadPolicies(), loadAgents(), loadDecisions(), loadRequests()]);
 }

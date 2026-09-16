@@ -86,14 +86,19 @@ export async function renderLeads(container) {
 
   async function askAi(lead) {
     try {
-      const request = await api.post(`/api/crm/leads/${lead.id}/suggest-next-action`, {});
-      if (request.status === 'executed') {
-        toast(`AI executed: ${request.reasoning}`, 'success');
+      const decision = await api.post(`/api/crm/leads/${lead.id}/suggest-next-action`, {});
+      const confidencePrefix = `[${decision.confidence}% confidence] `;
+      if (decision.status === 'no_action') {
+        toast(`${confidencePrefix}AI: ${decision.reasoning}`, 'info');
+      } else if (decision.status === 'escalated') {
+        toast(`${confidencePrefix}AI escalated to a human: ${decision.reasoning}`, 'info');
+      } else if (decision.resultActionStatus === 'executed') {
+        toast(`${confidencePrefix}AI executed: ${decision.reasoning}`, 'success');
         await load();
-      } else if (request.status === 'pending_approval') {
-        toast(`AI suggests: ${request.reasoning} — awaiting approval on the AI page.`, 'info');
+      } else if (decision.resultActionStatus === 'pending_approval') {
+        toast(`${confidencePrefix}AI suggests: ${decision.reasoning} — awaiting approval on the AI page.`, 'info');
       } else {
-        toast(`AI suggests: ${request.reasoning}`, 'info');
+        toast(`${confidencePrefix}AI suggests: ${decision.reasoning}`, 'info');
       }
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));

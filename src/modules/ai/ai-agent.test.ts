@@ -8,11 +8,15 @@ import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
+import { OperationsService } from '../operations/operations.service.js';
+import { HrService } from '../hr/hr.service.js';
+import { FinanceService } from '../finance/finance.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
 import { AiAgentService } from './ai-agent.service.js';
 import type {
   ActionName,
+  AgentDecision,
   AiActionRequest,
   AiPolicy,
   ApprovalRequest,
@@ -20,13 +24,19 @@ import type {
   Campaign,
   Employee,
   Lead,
+  LeaveRequest,
+  MaintenanceTicket,
   Message,
+  Payment,
+  PaymentScheduleLine,
   PermissionGrant,
   PermissionOverride,
+  Receipt,
   ResourceName,
   Role,
   Secret,
   Task,
+  Unit,
   User,
   UserRole,
   WorkflowDefinition,
@@ -54,6 +64,12 @@ function freshHarness() {
   const leads = new InMemoryRepository<Lead>();
   const campaigns = new InMemoryRepository<Campaign>();
   const auditLogRepo = new InMemoryRepository<AuditLogEntry>();
+  const maintenanceTickets = new InMemoryRepository<MaintenanceTicket>();
+  const units = new InMemoryRepository<Unit>();
+  const leaveRequests = new InMemoryRepository<LeaveRequest>();
+  const payments = new InMemoryRepository<Payment>();
+  const receipts = new InMemoryRepository<Receipt>();
+  const scheduleLines = new InMemoryRepository<PaymentScheduleLine>();
 
   const tasks = new TaskService(tasksRepo);
   const communication = new CommunicationService(messages);
@@ -61,6 +77,9 @@ function freshHarness() {
   const marketing = new MarketingService(campaigns, leads);
   const auditLog = new AuditLog(auditLogRepo);
   const leadScoring = new LeadScoringService(leads);
+  const operations = new OperationsService(maintenanceTickets, units);
+  const hr = new HrService(leaveRequests, employees);
+  const finance = new FinanceService(payments, receipts, scheduleLines);
 
   const automation = new AutomationService(
     { workflows, runs, stepRuns, approvals, secrets },
@@ -75,10 +94,22 @@ function freshHarness() {
 
   const actionRequests = new InMemoryRepository<AiActionRequest>();
   const policies = new InMemoryRepository<AiPolicy>();
+  const agentDecisions = new InMemoryRepository<AgentDecision>();
 
-  const ai = new AiAgentService({ actionRequests, policies, approvals }, rbac, automation, crm, leadScoring, auditLog);
+  const ai = new AiAgentService(
+    { actionRequests, policies, approvals, agentDecisions },
+    rbac,
+    automation,
+    crm,
+    leadScoring,
+    auditLog,
+    marketing,
+    operations,
+    hr,
+    finance,
+  );
 
-  return { rbac, ai, automation, users, roles, grants, userRoles, leads, crm, policies };
+  return { rbac, ai, automation, users, roles, grants, userRoles, leads, crm, marketing, operations, hr, finance, employees, units, policies, auditLogRepo, scheduleLines, leaveRequests };
 }
 
 async function seedUserWithGrants(
@@ -243,18 +274,21 @@ test('suggestNextAction proposes advancing a well-scored new lead to contacted',
   const h = freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Promising Client', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'human-1' });
-  const request = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
-  assert.equal(request.actionType, 'update_lead_status');
-  assert.equal((request.params as { status: string }).status, 'contacted');
-  assert.match(request.reasoning ?? '', /score/i);
+  const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'update_lead_status');
+  assert.equal((decision.params as { status: string }).status, 'contacted');
+  assert.match(decision.reasoning, /score/i);
 });
 
-test('suggestNextAction refuses to propose anything for a lead already lost', async () => {
+test('suggestNextAction reports no_action for a lead already lost, without proposing anything', async () => {
   const h = freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Gone Cold', phone: '0100' });
   await h.crm.updateStatus(lead.id, 'lost', 'went with a competitor');
-  await assert.rejects(() => h.ai.suggestNextAction(lead.id, 'c1', 'human-1'));
+  const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
+  assert.equal(decision.status, 'no_action');
+  assert.equal(decision.chosenActionType, undefined);
 });
 
 test('suggestNextAction executes automatically when the company opts a lead action into auto_execute', async () => {
@@ -262,8 +296,9 @@ test('suggestNextAction executes automatically when the company opts a lead acti
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Hot Lead', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'human-1' });
-  const request = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
-  assert.equal(request.status, 'executed');
+  const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.resultActionStatus, 'executed');
   const updated = await h.crm.getLead(lead.id);
   assert.equal(updated!.status, 'contacted');
 });
@@ -285,4 +320,190 @@ test('every AI action request is recorded in the audit log with executedByAI met
   const list = await h.ai.listActionRequests('c1');
   assert.equal(list.length, 1);
   assert.equal(list[0]!.status, 'denied_permission');
+});
+
+// ---- Phase 2: Agent Orchestration Layer ----
+
+test('listAgents returns the 5 specialized business-function agents', () => {
+  const h = freshHarness();
+  const keys = h.ai.listAgents().map((a) => a.key);
+  assert.deepEqual(keys.sort(), ['finance', 'hr', 'marketing', 'sales', 'support']);
+});
+
+test('listTools returns the full tool registry, or a per-agent boundary-filtered subset', () => {
+  const h = freshHarness();
+  const allTools = h.ai.listTools();
+  assert.ok(allTools.length >= 7);
+  const salesTools = h.ai.listTools('sales');
+  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message'].includes(t.actionType)));
+  assert.ok(!salesTools.some((t) => t.actionType === 'webhook_call'));
+});
+
+test('listTools rejects an unknown agent key', () => {
+  const h = freshHarness();
+  assert.throws(() => h.ai.listTools('not-a-real-agent'));
+});
+
+test('a qualified lead escalates to a human instead of guessing at conversion', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Qualified Client', phone: '0100' });
+  await h.crm.updateStatus(lead.id, 'contacted');
+  await h.crm.updateStatus(lead.id, 'qualified');
+  const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+  assert.equal(decision.status, 'escalated');
+  assert.equal(decision.confidence, 15);
+});
+
+test('a repeat decision within the cooldown window reuses the prior decision instead of re-deciding', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Repeat Client', phone: '0100' });
+  const first = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+  const second = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+  assert.equal(first.id, second.id);
+});
+
+test('decide throws for an unknown agent key', async () => {
+  const h = freshHarness();
+  await assert.rejects(() => h.ai.decide('not-a-real-agent', 'c1', 'subject-1', 'human-1'));
+});
+
+// ---- Marketing Agent ----
+
+test('marketing agent flags a low-converting, high-volume campaign for review', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const campaign = await h.marketing.createCampaign({ companyId: 'c1', name: 'Underperformer', channel: 'digital', budget: 5000, startDate: '2026-01-01' });
+  await h.marketing.updateStatus(campaign.id, 'c1', 'active');
+  for (let i = 0; i < 10; i++) {
+    await h.crm.createLead({ companyId: 'c1', fullName: `Lead ${i}`, phone: `010${i}`, sourceId: campaign.id });
+  }
+  const decision = await h.ai.decide('marketing', 'c1', campaign.id, 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.match(decision.reasoning, /conversion/i);
+});
+
+test('marketing agent reports no_action for a healthy or non-active campaign', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const campaign = await h.marketing.createCampaign({ companyId: 'c1', name: 'Planned Campaign', channel: 'digital', budget: 1000, startDate: '2026-01-01' });
+  const decision = await h.ai.decide('marketing', 'c1', campaign.id, 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+// ---- Finance Agent ----
+
+test('finance agent recommends a collections follow-up for an overdue payment line', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const overdueDate = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+  const line = await h.scheduleLines.save({
+    id: 'line-1', companyId: 'c1', contractId: 'contract-1', sourceTemplateId: 'tpl-1', sourceTemplateVersion: 1,
+    sequence: 1, label: 'Installment 1', dueDate: overdueDate, amount: 10000, amountPaid: 0, status: 'overdue',
+  });
+  const decision = await h.ai.decide('finance', 'c1', line.id, 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.match(decision.reasoning, /overdue/i);
+});
+
+test('finance agent reports no_action for a payment line that is not overdue', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const line = await h.scheduleLines.save({
+    id: 'line-2', companyId: 'c1', contractId: 'contract-1', sourceTemplateId: 'tpl-1', sourceTemplateVersion: 1,
+    sequence: 1, label: 'Installment 1', dueDate: new Date().toISOString(), amount: 10000, amountPaid: 0, status: 'upcoming',
+  });
+  const decision = await h.ai.decide('finance', 'c1', line.id, 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+// ---- Support / Customer Service Agent ----
+
+async function seedUnit(h: ReturnType<typeof freshHarness>, companyId = 'c1'): Promise<Unit> {
+  return h.units.save({
+    id: 'unit-1', companyId, projectId: 'project-1', code: 'A-101', unitType: 'apartment',
+    areaSqm: 100, listPrice: 1000000, status: 'available', createdAt: new Date().toISOString(),
+  });
+}
+
+test('support agent flags an urgent unassigned ticket for prompt assignment', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const unit = await seedUnit(h);
+  const ticket = await h.operations.createTicket({ companyId: 'c1', unitId: unit.id, title: 'Burst pipe', priority: 'urgent', reportedByUserId: 'human-1' });
+  const decision = await h.ai.decide('support', 'c1', ticket.id, 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.equal(decision.confidence, 90);
+});
+
+test('support agent reports no_action for a low-priority assigned ticket', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const unit = await seedUnit(h);
+  const ticket = await h.operations.createTicket({ companyId: 'c1', unitId: unit.id, title: 'Squeaky door', priority: 'low', reportedByUserId: 'human-1' });
+  await h.operations.assignTicket(ticket.id, 'c1', 'human-1');
+  const decision = await h.ai.decide('support', 'c1', ticket.id, 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+// ---- HR Agent ----
+
+test('hr agent recommends a reminder for a leave request pending too long', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.employees.save({ id: 'emp-1', companyId: 'c1', fullName: 'Test Employee', email: 'e@c1.com', title: 'Agent', status: 'active', createdAt: new Date().toISOString() });
+  const leave = await h.hr.requestLeave({ companyId: 'c1', employeeId: 'emp-1', type: 'annual', startDate: '2026-03-01', endDate: '2026-03-05' });
+  // Back-date requestedAt directly via the repository (HrService has no
+  // "back-date a request" API — this only simulates the passage of time).
+  await h.leaveRequests.save({ ...leave, requestedAt: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString() });
+
+  const decision = await h.ai.decide('hr', 'c1', leave.id, 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.match(decision.reasoning, /pending/i);
+});
+
+test('hr agent reports no_action for a leave request still within the normal review window', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.employees.save({ id: 'emp-1', companyId: 'c1', fullName: 'Test Employee', email: 'e@c1.com', title: 'Agent', status: 'active', createdAt: new Date().toISOString() });
+  const leave = await h.hr.requestLeave({ companyId: 'c1', employeeId: 'emp-1', type: 'annual', startDate: '2026-03-01', endDate: '2026-03-05' });
+  const decision = await h.ai.decide('hr', 'c1', leave.id, 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+// ---- Execution history / monitoring ----
+
+test('listAgentDecisions and getAgentStats reflect decisions across agents', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT, EDIT_LEAD_GRANT]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Stats Lead', phone: '0100' });
+  await h.crm.updateStatus(lead.id, 'contacted');
+  await h.crm.updateStatus(lead.id, 'qualified');
+  await h.ai.decide('sales', 'c1', lead.id, 'human-1'); // escalates (qualified lead)
+
+  const campaign = await h.marketing.createCampaign({ companyId: 'c1', name: 'Stats Campaign', channel: 'digital', budget: 100, startDate: '2026-01-01' });
+  await h.ai.decide('marketing', 'c1', campaign.id, 'human-1'); // no_action (planned, not active)
+
+  const decisions = await h.ai.listAgentDecisions('c1');
+  assert.equal(decisions.length, 2);
+  const salesOnly = await h.ai.listAgentDecisions('c1', 'sales');
+  assert.equal(salesOnly.length, 1);
+
+  const stats = await h.ai.getAgentStats('c1');
+  assert.equal(stats.sales!.escalated, 1);
+  assert.equal(stats.marketing!.noAction, 1);
+  assert.equal(stats.finance!.total, 0);
+});
+
+test('getAgentDecision rejects a decision belonging to a different company (cross-tenant)', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Tenant Lead', phone: '0100' });
+  const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+  await assert.rejects(() => h.ai.getAgentDecision(decision.id, 'c2'));
 });
