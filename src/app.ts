@@ -21,9 +21,12 @@ import type {
   User,
   UserRole,
 } from './domain/types.js';
+import type { DatabaseSync } from 'node:sqlite';
 import { InMemoryRepository, type Repository } from './infra/repository.js';
+import { SqliteRepository } from './infra/sqlite-repository.js';
 import { HttpServer, type RequestContext } from './infra/http-server.js';
 import { SlidingWindowRateLimiter } from './infra/rate-limiter.js';
+import { paginate } from './infra/pagination.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
@@ -40,6 +43,8 @@ import { PaymentPlansService } from './modules/payment-plans/payment-plans.servi
 import { SalesService } from './modules/sales/sales.service.js';
 import { FinanceService } from './modules/finance/finance.service.js';
 import { BrokersService } from './modules/brokers/brokers.service.js';
+import { RoleManagementService } from './modules/permissions/role-management.service.js';
+import { OnboardingService } from './modules/onboarding/onboarding.service.js';
 
 export interface AppOptions {
   nodeEnv: string;
@@ -47,6 +52,10 @@ export interface AppOptions {
   allowedOrigins: string[];
   staticDir?: string;
   seed?: boolean;
+  /** Omit (or pass undefined) for in-memory storage — used by the test suite
+   * for fast, isolated runs. Pass an open node:sqlite database for real,
+   * on-disk persistence (what src/main.ts does at runtime). */
+  db?: DatabaseSync;
 }
 
 export interface Application {
@@ -63,34 +72,39 @@ export interface Application {
     finance: FinanceService;
     brokers: BrokersService;
     auditLog: AuditLog;
+    roleManagement: RoleManagementService;
+    onboarding: OnboardingService;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
 
-function buildRepos() {
+function buildRepos(db?: DatabaseSync) {
+  function repo<T extends { id: string }>(table: string): Repository<T> {
+    return db ? new SqliteRepository<T>(db, table) : new InMemoryRepository<T>();
+  }
   return {
-    companies: new InMemoryRepository<Company>(),
-    employees: new InMemoryRepository<Employee>(),
-    users: new InMemoryRepository<User>(),
-    roles: new InMemoryRepository<Role>(),
-    grants: new InMemoryRepository<PermissionGrant>(),
-    userRoles: new InMemoryRepository<UserRole>(),
-    overrides: new InMemoryRepository<import('./domain/types.js').PermissionOverride>(),
-    leads: new InMemoryRepository<Lead>(),
-    units: new InMemoryRepository<Unit>(),
-    unitHolds: new InMemoryRepository<UnitHold>(),
-    reservations: new InMemoryRepository<Reservation>(),
-    templates: new InMemoryRepository<PaymentPlanTemplate>(),
-    scheduleLines: new InMemoryRepository<PaymentScheduleLine>(),
-    opportunities: new InMemoryRepository<Opportunity>(),
-    contracts: new InMemoryRepository<Contract>(),
-    payments: new InMemoryRepository<Payment>(),
-    receipts: new InMemoryRepository<Receipt>(),
-    brokerCompanies: new InMemoryRepository<BrokerCompany>(),
-    brokerLeads: new InMemoryRepository<BrokerLead>(),
-    commissionRules: new InMemoryRepository<CommissionRule>(),
-    commissions: new InMemoryRepository<Commission>(),
-    auditEntries: new InMemoryRepository<AuditLogEntry>(),
+    companies: repo<Company>('companies'),
+    employees: repo<Employee>('employees'),
+    users: repo<User>('users'),
+    roles: repo<Role>('roles'),
+    grants: repo<PermissionGrant>('permission_grants'),
+    userRoles: repo<UserRole>('user_roles'),
+    overrides: repo<import('./domain/types.js').PermissionOverride>('permission_overrides'),
+    leads: repo<Lead>('leads'),
+    units: repo<Unit>('units'),
+    unitHolds: repo<UnitHold>('unit_holds'),
+    reservations: repo<Reservation>('reservations'),
+    templates: repo<PaymentPlanTemplate>('payment_plan_templates'),
+    scheduleLines: repo<PaymentScheduleLine>('payment_schedule_lines'),
+    opportunities: repo<Opportunity>('opportunities'),
+    contracts: repo<Contract>('contracts'),
+    payments: repo<Payment>('payments'),
+    receipts: repo<Receipt>('receipts'),
+    brokerCompanies: repo<BrokerCompany>('broker_companies'),
+    brokerLeads: repo<BrokerLead>('broker_leads'),
+    commissionRules: repo<CommissionRule>('commission_rules'),
+    commissions: repo<Commission>('commissions'),
+    auditEntries: repo<AuditLogEntry>('audit_entries'),
   };
 }
 
@@ -152,7 +166,7 @@ export async function assertProductionSafety(options: AppOptions): Promise<void>
 export async function buildApplication(options: AppOptions): Promise<Application> {
   await assertProductionSafety(options);
 
-  const repos = buildRepos();
+  const repos = buildRepos(options.db);
 
   const rbac = new RbacEvaluator({
     users: repos.users,
@@ -171,6 +185,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines);
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
+  const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
+  const onboarding = new OnboardingService(organization, auth, roleManagement);
 
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
   if (options.seed !== false) {
@@ -227,7 +243,26 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const body = parseJsonBody<{ companyId: string; email: string; password: string }>(ctx.body);
     if (!body.companyId?.trim()) throw new ValidationError('companyId is required');
     const { token, user } = await auth.login({ companyId: body.companyId, email: body.email, password: body.password });
-    return { status: 200, body: { token, userId: user.id, userType: user.userType } };
+    return { status: 200, body: { token, userId: user.id, userType: user.userType, companyId: user.companyId } };
+  });
+
+  // Self-service tenant signup: creates the company, the founding employee,
+  // the user account, and an unrestricted "Owner" role for that user in one
+  // step — the real-users onboarding path (as opposed to the four fixed
+  // demo accounts and low-level /api/auth/register + /api/organization/*).
+  httpServer.post('/api/auth/signup', async (ctx) => {
+    const body = parseJsonBody<{ companyName: string; fullName: string; email: string; password: string; locale?: 'en' | 'ar' }>(ctx.body);
+    const result = await onboarding.signupNewCompany(body);
+    return {
+      status: 201,
+      body: {
+        token: result.token,
+        userId: result.user.id,
+        userType: result.user.userType,
+        companyId: result.company.id,
+        companyName: result.company.name,
+      },
+    };
   });
 
   // ---- Organization ----
@@ -274,7 +309,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       // record's subject — so 'own' resolves against the employee's own user.
       ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
     }));
-    return { status: 200, body: filtered };
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   // ---- Permission Manifest ----
@@ -282,6 +317,114 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const manifest = await buildPermissionManifest(rbac, actor.userId);
     return { status: 200, body: manifest };
+  });
+
+  httpServer.get('/api/me', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const user = await repos.users.findById(actor.userId);
+    if (!user) throw new NotFoundError('user not found');
+    const employee = user.employeeId ? await repos.employees.findById(user.employeeId) : undefined;
+    return {
+      status: 200,
+      body: { id: user.id, email: user.email, userType: user.userType, companyId: user.companyId, locale: user.locale, employee },
+    };
+  });
+
+  // ---- Roles & permission management ----
+  httpServer.post('/api/roles', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'role'))) {
+      throw new ForbiddenError('missing create:role permission');
+    }
+    const body = parseJsonBody<{ name: string }>(ctx.body);
+    const role = await roleManagement.createRole(actor.companyId, body.name);
+    return { status: 201, body: role };
+  });
+
+  httpServer.get('/api/roles', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'role'))) {
+      throw new ForbiddenError('missing view:role permission');
+    }
+    const roles = await roleManagement.listRoles(actor.companyId);
+    return { status: 200, body: paginate(roles, ctx.query) };
+  });
+
+  httpServer.get('/api/roles/:roleId/grants', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'role'))) {
+      throw new ForbiddenError('missing view:role permission');
+    }
+    const role = await roleManagement.getRole(ctx.params.roleId!);
+    if (!role || role.companyId !== actor.companyId) throw new NotFoundError('role not found');
+    const grants = await roleManagement.listGrants(role.id);
+    return { status: 200, body: grants };
+  });
+
+  httpServer.post('/api/roles/:roleId/grants', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'role'))) {
+      throw new ForbiddenError('missing edit:role permission');
+    }
+    const body = parseJsonBody<{ action: PermissionGrant['action']; resource: PermissionGrant['resource']; scope: PermissionGrant['scope']; sensitivity?: PermissionGrant['sensitivity'] }>(ctx.body);
+    const grant = await roleManagement.addGrant(actor.companyId, ctx.params.roleId!, body);
+    return { status: 201, body: grant };
+  });
+
+  httpServer.delete('/api/roles/:roleId/grants/:grantId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'role'))) {
+      throw new ForbiddenError('missing edit:role permission');
+    }
+    await roleManagement.removeGrant(actor.companyId, ctx.params.roleId!, ctx.params.grantId!);
+    return { status: 204 };
+  });
+
+  // ---- Users & role assignment ----
+  httpServer.get('/api/users', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'employee'))) {
+      throw new ForbiddenError('missing view:employee permission');
+    }
+    const users = await repos.users.findAll((u) => u.companyId === actor.companyId);
+    const mapped = users.map((u) => ({ id: u.id, email: u.email, userType: u.userType, employeeId: u.employeeId }));
+    return { status: 200, body: paginate(mapped, ctx.query) };
+  });
+
+  httpServer.get('/api/users/:userId/roles', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const targetUser = await repos.users.findById(ctx.params.userId!);
+    if (!targetUser || targetUser.companyId !== actor.companyId) throw new NotFoundError('user not found');
+    if (actor.userId !== targetUser.id && !(await rbac.can(actor.userId, 'view', 'role'))) {
+      throw new ForbiddenError('missing view:role permission');
+    }
+    const userRoles = await roleManagement.listUserRoles(targetUser.id);
+    return { status: 200, body: userRoles };
+  });
+
+  httpServer.post('/api/users/:userId/roles', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'assign', 'role'))) {
+      throw new ForbiddenError('missing assign:role permission');
+    }
+    const targetUser = await repos.users.findById(ctx.params.userId!);
+    if (!targetUser || targetUser.companyId !== actor.companyId) throw new NotFoundError('user not found');
+    const body = parseJsonBody<{ roleId: string; expiresAt?: string }>(ctx.body);
+    const role = await roleManagement.getRole(body.roleId);
+    if (!role || role.companyId !== actor.companyId) throw new NotFoundError('role not found');
+    const userRole = await roleManagement.assignRole(targetUser.id, body.roleId, body.expiresAt);
+    return { status: 201, body: userRole };
+  });
+
+  httpServer.delete('/api/users/:userId/roles/:userRoleId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'assign', 'role'))) {
+      throw new ForbiddenError('missing assign:role permission');
+    }
+    const targetUser = await repos.users.findById(ctx.params.userId!);
+    if (!targetUser || targetUser.companyId !== actor.companyId) throw new NotFoundError('user not found');
+    await roleManagement.revokeUserRole(targetUser.id, ctx.params.userRoleId!);
+    return { status: 204 };
   });
 
   // ---- Payment Plan Templates ----
@@ -300,7 +443,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'payment_plan_template');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:payment_plan_template permission' } };
     const templates = await paymentPlans.listTemplates(actor.companyId);
-    return { status: 200, body: templates };
+    return { status: 200, body: paginate(templates, ctx.query) };
   });
 
   httpServer.post('/api/contracts/:contractId/payment-schedule/preview', async (ctx) => {
@@ -356,7 +499,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:unit permission' } };
     const projectId = ctx.query.get('projectId') ?? undefined;
     const units = await inventory.listUnits(actor.companyId, projectId);
-    return { status: 200, body: units };
+    return { status: 200, body: paginate(units, ctx.query) };
   });
 
   httpServer.post('/api/inventory/units/:unitId/hold', async (ctx) => {
@@ -394,7 +537,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'lead');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:lead permission' } };
     const leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
-    return { status: 200, body: leads };
+    return { status: 200, body: paginate(leads, ctx.query) };
   });
 
   httpServer.patch('/api/crm/leads/:leadId/status', async (ctx) => {
@@ -432,7 +575,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:opportunity permission' } };
     const all = await sales.listOpportunities(actor.companyId);
     const filtered = await filterByListScope(all, scope, (o) => employeeScopeKeys(o.ownerEmployeeUserId));
-    return { status: 200, body: filtered };
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/sales/opportunities/:opportunityId/reserve-unit', async (ctx) => {
@@ -477,6 +620,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 201, body: contract };
   });
 
+  httpServer.post('/api/sales/contracts/:contractId/cancel', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'contract'))) {
+      throw new ForbiddenError('missing edit:contract permission');
+    }
+    const contract = await sales.cancelContract(ctx.params.contractId!);
+    return { status: 200, body: contract };
+  });
+
   // ---- Finance ----
   httpServer.post('/api/finance/payments', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -507,6 +659,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
 
   // ---- Brokers ----
+  httpServer.get('/api/brokers/companies', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'broker_company'))) {
+      throw new ForbiddenError('missing view:broker_company permission');
+    }
+    const companies = await brokers.listBrokerCompanies(actor.companyId);
+    return { status: 200, body: paginate(companies, ctx.query) };
+  });
+
   httpServer.post('/api/brokers/companies', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'broker_company'))) {
@@ -543,6 +704,23 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 201, body: brokerLead };
   });
 
+  httpServer.get('/api/brokers/leads', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const all = await brokers.listBrokerLeads(actor.companyId);
+    // A broker_user only ever sees their own broker company's submissions
+    // (mirrors the broker hard-wall in the RBAC evaluator); internal staff
+    // reviewing the quarantine queue need view:broker_company instead.
+    if (actor.userType === 'broker_user') {
+      const user = await repos.users.findById(actor.userId);
+      const own = all.filter((bl) => bl.brokerCompanyId === user?.brokerCompanyId);
+      return { status: 200, body: paginate(own, ctx.query) };
+    }
+    if (!(await rbac.can(actor.userId, 'view', 'broker_company'))) {
+      throw new ForbiddenError('missing view:broker_company permission');
+    }
+    return { status: 200, body: paginate(all, ctx.query) };
+  });
+
   httpServer.post('/api/brokers/leads/:brokerLeadId/approve', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
@@ -559,7 +737,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:audit_log permission');
     }
     const entries = await auditLog.listForCompany(actor.companyId);
-    return { status: 200, body: entries };
+    return { status: 200, body: paginate(entries, ctx.query) };
   });
 
   // ---- Health / dev-only ----
@@ -575,7 +753,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   return {
     httpServer,
     repos,
-    services: { rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog },
+    services: { rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding },
     seedResult,
   };
 }

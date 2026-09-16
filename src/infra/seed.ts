@@ -27,6 +27,13 @@ export interface SeedResult {
   demoUsers: { label: string; userId: string; email: string }[];
 }
 
+const DEMO_LABELS: Record<string, string> = {
+  'ceo@demo.local': 'CEO',
+  'sales.manager@demo.local': 'Sales Manager',
+  'sales.agent@demo.local': 'Sales Agent',
+  'finance@demo.local': 'Finance',
+};
+
 const ALL_RESOURCES: ResourceName[] = [
   'employee',
   'lead',
@@ -37,15 +44,33 @@ const ALL_RESOURCES: ResourceName[] = [
   'contract',
   'broker_company',
   'audit_log',
+  'role',
 ];
 
 /**
- * The only roles that function are these four hardcoded demo roles, tied to
- * fixed demo userIds — there is no role-management API to create custom
- * roles or assign one to a newly self-registered user (documented gap).
+ * Four demo accounts (CEO / Sales Manager / Sales Agent / Finance) used by
+ * the manual `x-demo-user` dev header. Real self-service tenants and their
+ * own roles are created through POST /api/auth/signup instead (see
+ * modules/organization + modules/permissions role-management routes in
+ * app.ts) — this seed only ever provisions the fixed demo company.
+ *
+ * Idempotent: with persistent storage, main.ts calls this on every boot, so
+ * it skips seeding if the demo company already exists on disk.
  */
 export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   const companyId = 'company-demo';
+
+  const existing = await repos.companies.findById(companyId);
+  if (existing) {
+    const demoUsers = await repos.users.findAll((u) => u.companyId === companyId);
+    return {
+      companyId,
+      demoUsers: demoUsers
+        .map((u) => ({ label: DEMO_LABELS[u.email] ?? u.email, userId: u.id, email: u.email }))
+        .sort((a, b) => a.email.localeCompare(b.email)),
+    };
+  }
+
   await repos.companies.save({ id: companyId, companyId, name: 'Demo Real Estate Co', createdAt: new Date().toISOString() });
 
   const ceoEmployee: Employee = {
@@ -165,6 +190,8 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
       await addGrant(ceoRole.id, action, resource, 'company');
     }
   }
+  await addGrant(ceoRole.id, 'assign', 'role', 'company');
+  await addGrant(ceoRole.id, 'delete', 'role', 'company');
 
   // Sales Manager: department-scoped visibility over CRM/Sales/Inventory,
   // plus the ability to see their department's roster.

@@ -106,4 +106,11 @@ export class AuthService {
     );
     return { token, user: updated };
   }
+
+  /** Issues a fresh token for a user outside the login flow — used by
+   * signup, where a newly created account should start authenticated
+   * without a separate login round-trip. */
+  issueTokenForUser(user: User): string {
+    return signToken({ sub: user.id, companyId: user.companyId, userType: user.userType }, this.tokenSecret);
+  }
 }

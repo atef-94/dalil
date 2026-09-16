@@ -132,4 +132,21 @@ export class SalesService {
   async getContract(id: string): Promise<Contract | undefined> {
     return this.contracts.findById(id);
   }
+
+  /** Closes a documented gap: contract lifecycle previously only ever
+   * reached 'signed'. Cancelling releases the unit back onto the market and
+   * marks the reservation cancelled — it does not touch any already-recorded
+   * payments, which stay on file against the cancelled contract. */
+  async cancelContract(contractId: string): Promise<Contract> {
+    const contract = await this.contracts.findById(contractId);
+    if (!contract) throw new NotFoundError('contract not found');
+    if (contract.status !== 'signed') {
+      throw new SalesError(`only a signed contract can be cancelled (current status: ${contract.status})`);
+    }
+    const updated: Contract = { ...contract, status: 'cancelled' };
+    await this.contracts.save(updated);
+    await this.inventory.markAvailable(contract.unitId);
+    await this.inventory.markReservationCancelled(contract.reservationId);
+    return updated;
+  }
 }

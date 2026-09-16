@@ -5,7 +5,7 @@ import { HttpError } from './errors.js';
 import { logRequest, logServerError } from './logger.js';
 import { SlidingWindowRateLimiter } from './rate-limiter.js';
 
-export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'HEAD' | 'OPTIONS';
+export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
 
 export interface RequestContext {
   method: HttpMethod;
@@ -64,6 +64,9 @@ export class HttpServer {
   }
   patch(path: string, handler: RouteHandler): void {
     this.register('PATCH', path, handler);
+  }
+  delete(path: string, handler: RouteHandler): void {
+    this.register('DELETE', path, handler);
   }
 
   private matchRoute(method: HttpMethod, path: string): { route: Route; params: Record<string, string> } | undefined {
@@ -127,7 +130,7 @@ export class HttpServer {
     const { allowedOrigins } = this.options;
     if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,HEAD,OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,HEAD,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-demo-user');
       res.setHeader('Vary', 'Origin');
     }

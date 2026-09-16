@@ -1,8 +1,8 @@
 import type { ActionName, ResourceName } from '../../domain/types.js';
 import type { RbacEvaluator } from './rbac.evaluator.js';
 
-const ACTIONS: ActionName[] = ['view', 'create', 'edit', 'delete', 'approve', 'export', 'assign', 'transfer', 'unmask'];
-const RESOURCES: ResourceName[] = [
+export const ACTIONS: ActionName[] = ['view', 'create', 'edit', 'delete', 'approve', 'export', 'assign', 'transfer', 'unmask'];
+export const RESOURCES: ResourceName[] = [
   'employee',
   'lead',
   'opportunity',
@@ -12,6 +12,7 @@ const RESOURCES: ResourceName[] = [
   'contract',
   'broker_company',
   'audit_log',
+  'role',
 ];
 
 export interface PermissionManifestEntry {

@@ -56,7 +56,8 @@ export type ResourceName =
   | 'payment_schedule'
   | 'contract'
   | 'broker_company'
-  | 'audit_log';
+  | 'audit_log'
+  | 'role';
 
 export type ActionName =
   | 'view'

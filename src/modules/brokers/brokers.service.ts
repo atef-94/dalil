@@ -39,6 +39,10 @@ export class BrokersService {
     return this.brokerCompanies.save(brokerCompany);
   }
 
+  async listBrokerCompanies(companyId: string): Promise<BrokerCompany[]> {
+    return this.brokerCompanies.findAll((bc) => bc.companyId === companyId);
+  }
+
   async approveBrokerCompany(id: string): Promise<BrokerCompany> {
     const company = await this.brokerCompanies.findById(id);
     if (!company) throw new NotFoundError('broker company not found');

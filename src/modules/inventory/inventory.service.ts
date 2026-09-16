@@ -130,6 +130,14 @@ export class InventoryService {
     return this.units.save({ ...unit, status: 'contracted' });
   }
 
+  /** Releases a unit back onto the market — used when the contract that
+   * had contracted it is cancelled. */
+  async markAvailable(unitId: string): Promise<Unit> {
+    const unit = await this.units.findById(unitId);
+    if (!unit) throw new NotFoundError('unit not found');
+    return this.units.save({ ...unit, status: 'available' });
+  }
+
   async getReservation(id: string): Promise<Reservation | undefined> {
     return this.reservations.findById(id);
   }
@@ -138,5 +146,11 @@ export class InventoryService {
     const reservation = await this.reservations.findById(id);
     if (!reservation) throw new NotFoundError('reservation not found');
     return this.reservations.save({ ...reservation, status: 'converted' });
+  }
+
+  async markReservationCancelled(id: string): Promise<Reservation> {
+    const reservation = await this.reservations.findById(id);
+    if (!reservation) throw new NotFoundError('reservation not found');
+    return this.reservations.save({ ...reservation, status: 'cancelled' });
   }
 }

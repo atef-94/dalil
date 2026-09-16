@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { buildApplication } from './app.js';
+import { openDatabase } from './infra/sqlite-repository.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -10,11 +12,17 @@ async function main(): Promise<void> {
   const tokenSecret = process.env.TOKEN_SECRET ?? 'dev-secret';
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
+  const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = openDatabase(dbPath);
+  process.stdout.write(`persistent storage: ${dbPath}\n`);
+
   const { httpServer, services } = await buildApplication({
     nodeEnv,
     tokenSecret,
     allowedOrigins,
     staticDir: join(__dirname, '..', 'public'),
+    db,
   });
 
   const server = httpServer.listen(port);
@@ -39,6 +47,7 @@ async function main(): Promise<void> {
     httpServer
       .close()
       .then(() => {
+        db.close();
         clearTimeout(forceExit);
         process.exit(0);
       })
