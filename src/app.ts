@@ -56,6 +56,9 @@ export interface AppOptions {
    * for fast, isolated runs. Pass an open node:sqlite database for real,
    * on-disk persistence (what src/main.ts does at runtime). */
   db?: DatabaseSync;
+  rateLimitWindowMs?: number;
+  rateLimitMax?: number;
+  authRateLimitMax?: number;
 }
 
 export interface Application {
@@ -157,8 +160,10 @@ export async function assertProductionSafety(options: AppOptions): Promise<void>
     if (!options.tokenSecret || options.tokenSecret === 'dev-secret') {
       throw new Error('refusing to boot in production without a real TOKEN_SECRET');
     }
-    if (!process.env.DATABASE_URL) {
-      process.stderr.write('WARNING: DATABASE_URL is not set — this build has no real database.\n');
+    if (!options.db) {
+      process.stderr.write('WARNING: no persistent database configured — data will not survive a restart.\n');
+    } else if (!process.env.DATABASE_URL) {
+      process.stderr.write('INFO: DATABASE_URL is not set — running on SQLite (see SQLITE_PATH), not yet migrated to Postgres.\n');
     }
   }
 }
@@ -200,8 +205,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
   }
 
-  const globalRateLimiter = new SlidingWindowRateLimiter(60_000, 300);
-  const authRateLimiter = new SlidingWindowRateLimiter(60_000, 20);
+  const globalRateLimiter = new SlidingWindowRateLimiter(options.rateLimitWindowMs ?? 60_000, options.rateLimitMax ?? 300);
+  const authRateLimiter = new SlidingWindowRateLimiter(options.rateLimitWindowMs ?? 60_000, options.authRateLimitMax ?? 20);
   const httpServer = new HttpServer({
     staticDir: options.staticDir,
     allowedOrigins: options.allowedOrigins,

@@ -23,6 +23,9 @@ async function main(): Promise<void> {
     allowedOrigins,
     staticDir: join(__dirname, '..', 'public'),
     db,
+    rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS ? Number(process.env.RATE_LIMIT_WINDOW_MS) : undefined,
+    rateLimitMax: process.env.RATE_LIMIT_MAX ? Number(process.env.RATE_LIMIT_MAX) : undefined,
+    authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
   });
 
   const server = httpServer.listen(port);

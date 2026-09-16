@@ -1,4 +1,8 @@
 services:
+  # The app's actual persistence today is the SQLite file below (mounted via
+  # app-data). Postgres here is for the future prisma/schema.prisma
+  # migration — the app does not connect to it yet, so DATABASE_URL below is
+  # informational only until that migration happens.
   db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -14,16 +18,18 @@ services:
   app:
     build: .
     restart: unless-stopped
-    depends_on:
-      - db
     environment:
       NODE_ENV: production
       PORT: 3000
       TOKEN_SECRET: ${TOKEN_SECRET}
+      SQLITE_PATH: /app/data/active-os.db
       DATABASE_URL: postgres://active_os:${POSTGRES_PASSWORD:-change-me}@db:5432/active_os
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
     ports:
       - '3000:3000'
+    volumes:
+      - app-data:/app/data
 
 volumes:
   db-data:
+  app-data:
