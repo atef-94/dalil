@@ -72,11 +72,11 @@ export class InventoryService {
     }
   }
 
-  async holdUnit(unitId: string, byUserId: string): Promise<UnitHold> {
+  async holdUnit(unitId: string, byUserId: string, companyId: string): Promise<UnitHold> {
     return this.mutex.runExclusive(unitId, async () => {
       await this.sweepExpiredHolds(unitId);
       const unit = await this.units.findById(unitId);
-      if (!unit) throw new NotFoundError('unit not found');
+      if (!unit || unit.companyId !== companyId) throw new NotFoundError('unit not found');
       if (unit.status !== 'available') {
         throw new InventoryError(`unit is not available (current status: ${unit.status})`);
       }
@@ -99,11 +99,11 @@ export class InventoryService {
    * Mutex-protected + live-race-tested: only one of N concurrent reserve
    * calls against the same unit can ever win.
    */
-  async reserveUnit(unitId: string, clientId: string, opportunityId?: string): Promise<Reservation> {
+  async reserveUnit(unitId: string, clientId: string, companyId: string, opportunityId?: string): Promise<Reservation> {
     return this.mutex.runExclusive(unitId, async () => {
       await this.sweepExpiredHolds(unitId);
       const unit = await this.units.findById(unitId);
-      if (!unit) throw new NotFoundError('unit not found');
+      if (!unit || unit.companyId !== companyId) throw new NotFoundError('unit not found');
       if (unit.status !== 'available' && unit.status !== 'held') {
         throw new InventoryError(`unit is not reservable (current status: ${unit.status})`);
       }

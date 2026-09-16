@@ -87,9 +87,9 @@ export class OrganizationService {
     return false;
   }
 
-  async reassignManager(employeeId: string, newManagerEmployeeId: string): Promise<Employee> {
+  async reassignManager(employeeId: string, newManagerEmployeeId: string, companyId: string): Promise<Employee> {
     const employee = await this.employees.findById(employeeId);
-    if (!employee) throw new NotFoundError('employee not found');
+    if (!employee || employee.companyId !== companyId) throw new NotFoundError('employee not found');
 
     if (newManagerEmployeeId === employeeId) {
       throw new OrgValidationError('an employee cannot manage themselves');
@@ -106,9 +106,9 @@ export class OrganizationService {
     return this.employees.save(updated);
   }
 
-  async terminate(employeeId: string): Promise<Employee> {
+  async terminate(employeeId: string, companyId: string): Promise<Employee> {
     const employee = await this.employees.findById(employeeId);
-    if (!employee) throw new NotFoundError('employee not found');
+    if (!employee || employee.companyId !== companyId) throw new NotFoundError('employee not found');
     const updated: Employee = { ...employee, status: 'terminated', terminatedAt: new Date().toISOString() };
     return this.employees.save(updated);
   }

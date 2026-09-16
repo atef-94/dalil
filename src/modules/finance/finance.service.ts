@@ -32,7 +32,7 @@ export class FinanceService {
     if (!(input.amount > 0)) throw new ValidationError('amount must be positive');
 
     const line = await this.scheduleLines.findById(input.paymentScheduleLineId);
-    if (!line || line.contractId !== input.contractId) {
+    if (!line || line.contractId !== input.contractId || line.companyId !== input.companyId) {
       throw new NotFoundError('payment schedule line not found for this contract');
     }
     if (line.status === 'paid') {
@@ -76,8 +76,8 @@ export class FinanceService {
     return { payment, receipt, line: updatedLine };
   }
 
-  async getBalance(contractId: string): Promise<Balance> {
-    const lines = await this.scheduleLines.findAll((l) => l.contractId === contractId);
+  async getBalance(contractId: string, companyId: string): Promise<Balance> {
+    const lines = await this.scheduleLines.findAll((l) => l.contractId === contractId && l.companyId === companyId);
     const totalDue = lines.reduce((sum, l) => sum + l.amount, 0);
     const totalPaid = lines.reduce((sum, l) => sum + l.amountPaid, 0);
     return {

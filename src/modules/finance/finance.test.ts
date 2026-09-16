@@ -69,10 +69,18 @@ test('getBalance sums outstanding across all lines for a contract', async () => 
   await seedLine(lines, { id: 'line-1', amount: 1000 });
   await seedLine(lines, { id: 'line-2', amount: 2000, sequence: 1 });
   await svc.recordPayment({ companyId: 'c1', contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 1000, method: 'cash', recordedByUserId: 'u1' });
-  const balance = await svc.getBalance('contract-1');
+  const balance = await svc.getBalance('contract-1', 'c1');
   assert.equal(balance.totalDue, 3000);
   assert.equal(balance.totalPaid, 1000);
   assert.equal(balance.outstanding, 2000);
+});
+
+test('recordPayment rejects a schedule line belonging to a different company (cross-tenant IDOR)', async () => {
+  const { svc, lines } = freshService();
+  await seedLine(lines);
+  await assert.rejects(() =>
+    svc.recordPayment({ companyId: 'c2', contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 500, method: 'cash', recordedByUserId: 'u1' }),
+  );
 });
 
 test('sweepOverdue moves a past-due upcoming line to overdue', async () => {

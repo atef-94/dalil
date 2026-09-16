@@ -17,7 +17,7 @@ test('a direct circular reporting chain is rejected (A tries to manage their own
   const svc = freshService();
   const manager = await svc.createEmployee({ companyId: 'c1', fullName: 'Manager', email: 'mgr@c1.com', title: 'Manager' });
   const report = await svc.createEmployee({ companyId: 'c1', fullName: 'Report', email: 'report@c1.com', title: 'Agent', managerEmployeeId: manager.id });
-  await assert.rejects(() => svc.reassignManager(manager.id, report.id));
+  await assert.rejects(() => svc.reassignManager(manager.id, report.id, 'c1'));
 });
 
 test('an indirect circular reporting chain (A -> B -> C -> A) is rejected', async () => {
@@ -25,7 +25,7 @@ test('an indirect circular reporting chain (A -> B -> C -> A) is rejected', asyn
   const a = await svc.createEmployee({ companyId: 'c1', fullName: 'A', email: 'a@c1.com', title: 'Exec' });
   const b = await svc.createEmployee({ companyId: 'c1', fullName: 'B', email: 'b@c1.com', title: 'Mgr', managerEmployeeId: a.id });
   const c = await svc.createEmployee({ companyId: 'c1', fullName: 'C', email: 'c@c1.com', title: 'Agent', managerEmployeeId: b.id });
-  await assert.rejects(() => svc.reassignManager(a.id, c.id));
+  await assert.rejects(() => svc.reassignManager(a.id, c.id, 'c1'));
 });
 
 test('a valid manager reassignment succeeds', async () => {
@@ -33,16 +33,29 @@ test('a valid manager reassignment succeeds', async () => {
   const managerOne = await svc.createEmployee({ companyId: 'c1', fullName: 'Manager One', email: 'm1@c1.com', title: 'Manager' });
   const managerTwo = await svc.createEmployee({ companyId: 'c1', fullName: 'Manager Two', email: 'm2@c1.com', title: 'Manager' });
   const employee = await svc.createEmployee({ companyId: 'c1', fullName: 'Employee', email: 'e@c1.com', title: 'Agent', managerEmployeeId: managerOne.id });
-  const updated = await svc.reassignManager(employee.id, managerTwo.id);
+  const updated = await svc.reassignManager(employee.id, managerTwo.id, 'c1');
   assert.equal(updated.managerEmployeeId, managerTwo.id);
+});
+
+test('reassignManager rejects an employee belonging to a different company', async () => {
+  const svc = freshService();
+  const managerOne = await svc.createEmployee({ companyId: 'c1', fullName: 'Manager One', email: 'm1@c1.com', title: 'Manager' });
+  const employee = await svc.createEmployee({ companyId: 'c1', fullName: 'Employee', email: 'e@c1.com', title: 'Agent', managerEmployeeId: managerOne.id });
+  await assert.rejects(() => svc.reassignManager(employee.id, managerOne.id, 'c2'));
 });
 
 test('terminating an employee sets status and terminatedAt', async () => {
   const svc = freshService();
   const employee = await svc.createEmployee({ companyId: 'c1', fullName: 'Employee', email: 'e@c1.com', title: 'Agent' });
-  const terminated = await svc.terminate(employee.id);
+  const terminated = await svc.terminate(employee.id, 'c1');
   assert.equal(terminated.status, 'terminated');
   assert.ok(terminated.terminatedAt);
+});
+
+test('terminate rejects an employee belonging to a different company', async () => {
+  const svc = freshService();
+  const employee = await svc.createEmployee({ companyId: 'c1', fullName: 'Employee', email: 'e@c1.com', title: 'Agent' });
+  await assert.rejects(() => svc.terminate(employee.id, 'c2'));
 });
 
 test('listEmployees only returns employees for the requested company (multi-tenant isolation)', async () => {
