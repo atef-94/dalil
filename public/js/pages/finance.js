@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, selectInput, confirmModal } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderFinance(container) {
@@ -32,7 +32,20 @@ export async function renderFinance(container) {
   const contractSelect = selectInput([]);
   const balanceOutput = el('div');
   const scheduleSlot = el('div');
+  const contractActionsSlot = el('div');
   const loadBalanceBtn = el('button', {}, 'Load balance & schedule');
+
+  async function cancelSelectedContract() {
+    if (!contractSelect.value) return;
+    if (!(await confirmModal('Cancel this contract? The unit is released back onto the market and the reservation is cancelled. Already-recorded payments stay on file.', { confirmLabel: 'Cancel contract', danger: true }))) return;
+    try {
+      await api.post(`/api/sales/contracts/${contractSelect.value}/cancel`, {});
+      toast('Contract cancelled.', 'success');
+      await load();
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    }
+  }
 
   const recordAmount = el('input', { type: 'number', placeholder: 'Amount' });
   const recordMethod = selectInput(['cash', 'transfer', 'card', 'cheque'].map((m) => ({ value: m, label: m })));
@@ -70,13 +83,22 @@ export async function renderFinance(container) {
   async function loadContractDetail() {
     clear(balanceOutput);
     clear(scheduleSlot);
+    clear(contractActionsSlot);
     clear(recordLineSelect);
     if (!contractSelect.value) return;
     try {
-      const [balance, lines] = await Promise.all([
+      const [contract, balance, lines] = await Promise.all([
+        api.get(`/api/sales/contracts/${contractSelect.value}`),
         api.get(`/api/finance/contracts/${contractSelect.value}/balance`),
         api.get(`/api/contracts/${contractSelect.value}/payment-schedule`),
       ]);
+      if (contract.status === 'signed') {
+        const cancelBtn = el('button', { class: 'danger' }, 'Cancel contract');
+        cancelBtn.addEventListener('click', cancelSelectedContract);
+        contractActionsSlot.appendChild(cancelBtn);
+      } else {
+        contractActionsSlot.appendChild(statusBadge(contract.status));
+      }
       balanceOutput.appendChild(el('div', { class: 'stat-grid' }, [
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.totalDue).toLocaleString()), el('div', { class: 'label' }, 'Total due')]),
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.totalPaid).toLocaleString()), el('div', { class: 'label' }, 'Total paid')]),
@@ -108,6 +130,7 @@ export async function renderFinance(container) {
   container.appendChild(el('div', { class: 'card' }, [
     el('h3', { style: 'margin-top:0' }, 'Contract balance & schedule'),
     el('div', { class: 'form-row' }, [el('div', {}, [el('label', {}, 'Contract'), contractSelect]), el('div', { style: 'align-self:flex-end' }, loadBalanceBtn)]),
+    contractActionsSlot,
     balanceOutput,
     scheduleSlot,
   ]));
