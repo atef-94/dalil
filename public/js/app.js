@@ -22,6 +22,8 @@ import { renderMarketing } from './pages/marketing.js';
 import { renderCommunication } from './pages/communication.js';
 import { renderAnalytics } from './pages/analytics.js';
 import { renderPortal } from './pages/portal.js';
+import { renderAutomation } from './pages/automation.js';
+import { renderAi } from './pages/ai.js';
 
 const NAV = [
   { path: '/dashboard', labelKey: 'nav_dashboard', render: renderDashboard },
@@ -37,6 +39,8 @@ const NAV = [
   { path: '/purchasing', labelKey: 'nav_purchasing', render: renderPurchasing },
   { path: '/communication', labelKey: 'nav_communication', render: renderCommunication },
   { path: '/analytics', labelKey: 'nav_analytics', render: renderAnalytics },
+  { path: '/automation', labelKey: 'nav_automation', render: renderAutomation },
+  { path: '/ai', labelKey: 'nav_ai', render: renderAi },
   { path: '/employees', labelKey: 'nav_employees', render: renderEmployees },
   { path: '/hr', labelKey: 'nav_hr', render: renderHr },
   { path: '/roles', labelKey: 'nav_roles', render: renderRoles },

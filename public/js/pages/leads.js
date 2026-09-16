@@ -84,6 +84,22 @@ export async function renderLeads(container) {
     }
   }
 
+  async function askAi(lead) {
+    try {
+      const request = await api.post(`/api/crm/leads/${lead.id}/suggest-next-action`, {});
+      if (request.status === 'executed') {
+        toast(`AI executed: ${request.reasoning}`, 'success');
+        await load();
+      } else if (request.status === 'pending_approval') {
+        toast(`AI suggests: ${request.reasoning} — awaiting approval on the AI page.`, 'info');
+      } else {
+        toast(`AI suggests: ${request.reasoning}`, 'info');
+      }
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   async function grantPortalAccess(lead) {
     const result = await formModal({
       title: `Grant customer portal access to ${lead.fullName}`,
@@ -124,6 +140,11 @@ export async function renderLeads(container) {
               const lostBtn = el('button', {}, 'Mark lost');
               lostBtn.addEventListener('click', () => markLost(l));
               actions.appendChild(lostBtn);
+            }
+            if (l.status !== 'lost' && l.status !== 'opportunity') {
+              const aiBtn = el('button', {}, 'Ask AI');
+              aiBtn.addEventListener('click', () => askAi(l));
+              actions.appendChild(aiBtn);
             }
             if (l.status !== 'lost') {
               // Portal access is tied to the lead record itself, not to

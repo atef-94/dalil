@@ -10,6 +10,7 @@ async function main(): Promise<void> {
   const nodeEnv = process.env.NODE_ENV ?? 'development';
   const port = Number(process.env.PORT ?? 3000);
   const tokenSecret = process.env.TOKEN_SECRET ?? 'dev-secret';
+  const secretStoreKey = process.env.SECRET_STORE_KEY ?? tokenSecret;
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
   const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
@@ -20,6 +21,7 @@ async function main(): Promise<void> {
   const { httpServer, services } = await buildApplication({
     nodeEnv,
     tokenSecret,
+    secretStoreKey,
     allowedOrigins,
     staticDir: join(__dirname, '..', 'public'),
     db,
@@ -32,9 +34,18 @@ async function main(): Promise<void> {
   process.stdout.write(`ACTIVE Operating System listening on :${port} (${nodeEnv})\n`);
 
   const sweepInterval = setInterval(() => {
-    void services.finance.sweepOverdue();
+    void services.sweepOverdueAndEmit();
   }, 60_000);
   sweepInterval.unref();
+
+  // Scheduled/recurring workflow trigger tick — checks every minute for any
+  // active `scheduled` workflow whose interval has elapsed (each workflow
+  // tracks its own lastScheduledRunAt, so this can run as often as we like
+  // without duplicating work — see AutomationService.runDueScheduledWorkflows).
+  const scheduledWorkflowInterval = setInterval(() => {
+    void services.automation.runDueScheduledWorkflows();
+  }, 60_000);
+  scheduledWorkflowInterval.unref();
 
   let shuttingDown = false;
   const shutdown = (signal: string) => {
@@ -42,6 +53,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     process.stdout.write(`received ${signal}, shutting down gracefully\n`);
     clearInterval(sweepInterval);
+    clearInterval(scheduledWorkflowInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');
       process.exit(1);

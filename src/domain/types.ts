@@ -85,7 +85,13 @@ export type ResourceName =
   | 'campaign'
   | 'message'
   | 'analytics'
-  | 'portal_access';
+  | 'portal_access'
+  | 'workflow'
+  | 'workflow_run'
+  | 'approval'
+  | 'secret'
+  | 'task'
+  | 'ai_action';
 
 export type ActionName =
   | 'view'
@@ -503,5 +509,214 @@ export interface Customer {
   fullName: string;
   phone: string;
   email?: string;
+  createdAt: string;
+}
+
+// ---- Tasks (reminders / follow-ups) ----
+
+export type TaskStatus = 'open' | 'done' | 'cancelled';
+
+export interface Task {
+  id: string;
+  companyId: string;
+  title: string;
+  description?: string;
+  dueAt?: string;
+  assignedToUserId?: string;
+  relatedResource?: MessageRelatedResource;
+  relatedResourceId?: string;
+  status: TaskStatus;
+  createdByUserId: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+// ---- Automation Engine ----
+
+export type TriggerType = 'event' | 'scheduled' | 'webhook';
+
+/**
+ * The catalogue of domain events the engine can react to. Emitted from
+ * app.ts route handlers right after the underlying service call succeeds
+ * (never from inside the services themselves, to keep every existing
+ * service's public API and tests untouched) — see EventBus.
+ */
+export type DomainEventType =
+  | 'lead.created'
+  | 'lead.status_changed'
+  | 'opportunity.created'
+  | 'contract.signed'
+  | 'contract.cancelled'
+  | 'payment.recorded'
+  | 'payment.overdue_swept'
+  | 'maintenance_ticket.created'
+  | 'maintenance_ticket.status_changed'
+  | 'leave_request.created'
+  | 'leave_request.decided'
+  | 'purchase_order.created'
+  | 'purchase_order.status_changed'
+  | 'legal_document.status_changed'
+  | 'campaign.status_changed'
+  | 'broker_lead.submitted'
+  | 'employee.created';
+
+export type ConditionOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'exists';
+
+export interface WorkflowCondition {
+  field: string; // dot-path into the trigger payload, e.g. "lead.status"
+  operator: ConditionOperator;
+  value?: unknown;
+}
+
+export type AutomationActionType =
+  | 'create_task'
+  | 'send_message'
+  | 'create_lead'
+  | 'update_lead_status'
+  | 'assign_lead_owner'
+  | 'update_campaign_status'
+  | 'webhook_call'
+  | 'require_approval';
+
+export interface WorkflowActionConfig {
+  type: AutomationActionType;
+  /** Action-specific parameters. String values may reference the trigger
+   * payload with `{{path.to.field}}` templating, resolved at execution
+   * time — see automation.service.ts `resolveTemplate`. */
+  params: Record<string, unknown>;
+}
+
+export interface WorkflowStepDefinition {
+  id: string;
+  name: string;
+  /** All conditions must pass (AND) for this step's action to run;
+   * otherwise the step is skipped and the run moves to the next step —
+   * this is how branching is expressed (define multiple steps, each
+   * gated on a different condition, off the same trigger). */
+  conditions?: WorkflowCondition[];
+  action: WorkflowActionConfig;
+  onFailure?: 'stop' | 'continue';
+  maxRetries?: number;
+}
+
+export interface WorkflowTriggerConfig {
+  type: TriggerType;
+  eventType?: DomainEventType; // required when type === 'event'
+  intervalMinutes?: number; // required when type === 'scheduled'
+  webhookSlug?: string; // required when type === 'webhook'
+}
+
+export type WorkflowStatus = 'active' | 'paused' | 'archived';
+
+export interface WorkflowDefinition {
+  id: string;
+  companyId: string;
+  name: string;
+  description?: string;
+  trigger: WorkflowTriggerConfig;
+  steps: WorkflowStepDefinition[];
+  status: WorkflowStatus;
+  createdByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  lastScheduledRunAt?: string;
+}
+
+export type WorkflowRunStatus = 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
+export type WorkflowRunInitiator = 'system' | 'user' | 'ai';
+
+export interface WorkflowRun {
+  id: string;
+  companyId: string;
+  workflowId: string;
+  status: WorkflowRunStatus;
+  triggerEventType?: string;
+  triggerPayload: Record<string, unknown>;
+  /** Deduplicates re-delivery of the same trigger (a retried event, a
+   * repeated webhook call, a scheduler tick that overlaps a prior one) —
+   * a run is only ever created once per (workflowId, idempotencyKey). */
+  idempotencyKey: string;
+  currentStepIndex: number;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  initiatedBy: WorkflowRunInitiator;
+  initiatedByUserId?: string;
+}
+
+export type StepRunStatus = 'succeeded' | 'failed' | 'skipped' | 'waiting_approval';
+
+export interface WorkflowStepRun {
+  id: string;
+  companyId: string;
+  runId: string;
+  stepId: string;
+  status: StepRunStatus;
+  attempts: number;
+  output?: Record<string, unknown>;
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+
+export interface ApprovalRequest {
+  id: string;
+  companyId: string;
+  runId: string;
+  stepId: string;
+  reason: string;
+  status: ApprovalStatus;
+  decidedByUserId?: string;
+  decidedAt?: string;
+  createdAt: string;
+}
+
+/** Encrypted-at-rest credential store for outbound webhook_call actions
+ * (bearer tokens, API keys, etc.) — see infra/secret-store.ts. Never
+ * returned in plaintext by any list/get route. */
+export interface Secret {
+  id: string;
+  companyId: string;
+  key: string; // unique per company, e.g. "zapier_webhook_token"
+  encryptedValue: string;
+  iv: string;
+  authTag: string;
+  createdByUserId: string;
+  createdAt: string;
+}
+
+// ---- AI Execution Layer ----
+
+/** How far the AI Agent may go for a given action type, per company.
+ * Missing an entry for an action type defaults to 'require_approval' —
+ * the engine never auto-executes an AI action the company hasn't
+ * explicitly opted into. */
+export type AiAutonomyLevel = 'suggest_only' | 'require_approval' | 'auto_execute';
+
+export interface AiPolicy {
+  id: string;
+  companyId: string;
+  actionType: AutomationActionType;
+  autonomyLevel: AiAutonomyLevel;
+  updatedByUserId: string;
+  updatedAt: string;
+}
+
+export type AiActionStatus = 'suggested' | 'pending_approval' | 'executed' | 'denied_permission' | 'denied_policy';
+
+/** The full audit trail of every action the AI Agent has proposed, for
+ * every human it acted on behalf of, whatever the outcome. */
+export interface AiActionRequest {
+  id: string;
+  companyId: string;
+  requestedByUserId: string;
+  actionType: AutomationActionType;
+  params: Record<string, unknown>;
+  reasoning?: string;
+  status: AiActionStatus;
+  runId?: string;
+  approvalRequestId?: string;
   createdAt: string;
 }

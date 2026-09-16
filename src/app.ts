@@ -1,4 +1,7 @@
 import type {
+  AiActionRequest,
+  AiPolicy,
+  ApprovalRequest,
   AuditLogEntry,
   Branch,
   BrokerCompany,
@@ -26,11 +29,16 @@ import type {
   Receipt,
   Reservation,
   Role,
+  Secret,
+  Task,
   Unit,
   UnitHold,
   User,
   UserRole,
   Vendor,
+  WorkflowDefinition,
+  WorkflowRun,
+  WorkflowStepRun,
 } from './domain/types.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { InMemoryRepository, type Repository } from './infra/repository.js';
@@ -42,6 +50,7 @@ import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
 import { seedDemoData } from './infra/seed.js';
+import { EventBus, type DomainEvent } from './infra/event-bus.js';
 
 import { RbacEvaluator } from './modules/permissions/rbac.evaluator.js';
 import { buildPermissionManifest } from './modules/permissions/manifest.builder.js';
@@ -65,6 +74,9 @@ import { CommunicationService } from './modules/communication/communication.serv
 import { AnalyticsService } from './modules/analytics/analytics.service.js';
 import { LeadScoringService } from './modules/ai/lead-scoring.service.js';
 import { PortalService } from './modules/portal/portal.service.js';
+import { TaskService } from './modules/tasks/task.service.js';
+import { AutomationService, type WorkflowStepInput } from './modules/automation/automation.service.js';
+import { AiAgentService } from './modules/ai/ai-agent.service.js';
 
 export interface AppOptions {
   nodeEnv: string;
@@ -79,6 +91,11 @@ export interface AppOptions {
   rateLimitWindowMs?: number;
   rateLimitMax?: number;
   authRateLimitMax?: number;
+  /** Key used to encrypt automation webhook/API credentials at rest (see
+   * infra/security.ts encryptSecret). Falls back to tokenSecret when unset —
+   * fine for dev, but production should set SECRET_STORE_KEY separately so
+   * rotating one secret never invalidates the other. */
+  secretStoreKey?: string;
 }
 
 export interface Application {
@@ -106,6 +123,17 @@ export interface Application {
     analytics: AnalyticsService;
     leadScoring: LeadScoringService;
     portal: PortalService;
+    tasks: TaskService;
+    automation: AutomationService;
+    eventBus: EventBus;
+    aiAgent: AiAgentService;
+    /** Sweeps overdue payment schedule lines AND emits one
+     * `payment.overdue_swept` domain event per swept line — use this
+     * instead of `finance.sweepOverdue()` wherever the sweep should also
+     * feed the Automation Engine (the HTTP route and main.ts's tick both
+     * do). `finance.sweepOverdue()` itself stays event-free for existing
+     * callers/tests that only care about the count. */
+    sweepOverdueAndEmit: () => Promise<number>;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -148,6 +176,14 @@ function buildRepos(db?: DatabaseSync) {
     campaigns: repo<Campaign>('campaigns'),
     messages: repo<Message>('messages'),
     customers: repo<Customer>('customers'),
+    tasks: repo<Task>('tasks'),
+    workflows: repo<WorkflowDefinition>('workflows'),
+    workflowRuns: repo<WorkflowRun>('workflow_runs'),
+    workflowStepRuns: repo<WorkflowStepRun>('workflow_step_runs'),
+    approvals: repo<ApprovalRequest>('approval_requests'),
+    secrets: repo<Secret>('secrets'),
+    aiActionRequests: repo<AiActionRequest>('ai_action_requests'),
+    aiPolicies: repo<AiPolicy>('ai_policies'),
   };
 }
 
@@ -241,6 +277,33 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions);
   const leadScoring = new LeadScoringService(repos.leads);
   const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth);
+  const tasks = new TaskService(repos.tasks);
+  const eventBus = new EventBus();
+  const automation = new AutomationService(
+    { workflows: repos.workflows, runs: repos.workflowRuns, stepRuns: repos.workflowStepRuns, approvals: repos.approvals, secrets: repos.secrets },
+    rbac,
+    tasks,
+    communication,
+    crm,
+    marketing,
+    auditLog,
+    options.secretStoreKey ?? options.tokenSecret,
+  );
+  // The engine is the sole subscriber today: every domain event emitted
+  // from a route handler below is offered to every active event-triggered
+  // workflow. EventBus.emit() never throws — a broken workflow can never
+  // take down the request that triggered it.
+  eventBus.subscribe(async (event: DomainEvent) => {
+    await automation.handleEvent(event);
+  });
+  const aiAgent = new AiAgentService(
+    { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals },
+    rbac,
+    automation,
+    crm,
+    leadScoring,
+    auditLog,
+  );
 
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
   if (options.seed !== false) {
@@ -265,6 +328,38 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
 
   const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv);
+
+  // Fires every event-triggered workflow synchronously (so an automation's
+  // side effects, e.g. a created task, are visible by the time the request
+  // that triggered them returns — this system has no async job queue or
+  // websocket push, so that's the only way the UI ever sees them promptly).
+  // EventBus.emit() already can't throw (each handler is try/caught
+  // internally), but this wrapper is a second, defense-in-depth guarantee
+  // that a broken workflow can never break the API response that triggered
+  // it.
+  const emitEvent = async (event: DomainEvent): Promise<void> => {
+    try {
+      await eventBus.emit(event);
+    } catch (err) {
+      process.stderr.write(`automation event emission failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  };
+
+  // Shared by the manual sweep route below and main.ts's periodic tick, so
+  // both paths emit the same `payment.overdue_swept` event per line instead
+  // of duplicating the sweep-then-emit logic.
+  const sweepOverdueAndEmit = async (): Promise<number> => {
+    const swept = await finance.sweepOverdueDetailed();
+    for (const line of swept) {
+      await emitEvent({
+        companyId: line.companyId,
+        type: 'payment.overdue_swept',
+        payload: { ...line },
+        dedupeKey: `payment.overdue_swept:${line.id}`,
+      });
+    }
+    return swept.length;
+  };
 
   const employeeScopeKeys = async (ownerUserId: string | undefined): Promise<ScopeOwnerKeys> => {
     if (!ownerUserId) return {};
@@ -347,6 +442,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }>(ctx.body);
     const employee = await organization.createEmployee({ companyId: actor.companyId, ...body });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'employee', resourceId: employee.id });
+    await emitEvent({ companyId: actor.companyId, type: 'employee.created', payload: { ...employee }, actorUserId: actor.userId, dedupeKey: `employee.created:${employee.id}` });
     return { status: 201, body: employee };
   });
 
@@ -682,6 +778,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const body = parseJsonBody<{ fullName: string; phone: string; email?: string; sourceId?: string }>(ctx.body);
     const lead = await crm.createLead({ companyId: actor.companyId, ownerEmployeeUserId: actor.userId, ...body });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
+    await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
   });
 
@@ -708,6 +805,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ status: Lead['status']; lostReason?: string }>(ctx.body);
     const updated = await crm.updateStatus(ctx.params.leadId!, body.status, body.lostReason);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'lead.status_changed',
+      payload: { ...updated },
+      actorUserId: actor.userId,
+      dedupeKey: `lead.status_changed:${updated.id}:${updated.status}`,
+    });
     return { status: 200, body: updated };
   });
 
@@ -719,6 +823,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ leadId: string }>(ctx.body);
     const opportunity = await sales.createOpportunity({ companyId: actor.companyId, leadId: body.leadId, ownerEmployeeUserId: actor.userId });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'opportunity.created',
+      payload: { ...opportunity },
+      actorUserId: actor.userId,
+      dedupeKey: `opportunity.created:${opportunity.id}`,
+    });
     return { status: 201, body: opportunity };
   });
 
@@ -790,6 +901,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       escalationPercentPerYear: body.escalationPercentPerYear,
     });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id });
+    await emitEvent({ companyId: actor.companyId, type: 'contract.signed', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.signed:${contract.id}` });
     return { status: 201, body: contract };
   });
 
@@ -800,6 +912,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const contract = await sales.cancelContract(ctx.params.contractId!, actor.companyId);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'contract', resourceId: contract.id, metadata: { cancelled: true } });
+    await emitEvent({ companyId: actor.companyId, type: 'contract.cancelled', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.cancelled:${contract.id}` });
     return { status: 200, body: contract };
   });
 
@@ -812,6 +925,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const body = parseJsonBody<{ contractId: string; paymentScheduleLineId: string; amount: number; method: Payment['method'] }>(ctx.body);
     const result = await finance.recordPayment({ companyId: actor.companyId, recordedByUserId: actor.userId, ...body });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'payment_schedule', resourceId: result.line.id, metadata: { amount: body.amount } });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'payment.recorded',
+      payload: { ...result },
+      actorUserId: actor.userId,
+      dedupeKey: `payment.recorded:${result.payment.id}`,
+    });
     return { status: 201, body: result };
   });
 
@@ -829,7 +949,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
       throw new ForbiddenError('missing edit:payment_schedule permission');
     }
-    const count = await finance.sweepOverdue();
+    const count = await sweepOverdueAndEmit();
     return { status: 200, body: { swept: count } };
   });
 
@@ -884,6 +1004,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       brokerCompanyId: user.brokerCompanyId,
       submittedByUserId: actor.userId,
       ...body,
+    });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'broker_lead.submitted',
+      payload: { ...brokerLead },
+      actorUserId: actor.userId,
+      dedupeKey: `broker_lead.submitted:${brokerLead.id}`,
     });
     return { status: 201, body: brokerLead };
   });
@@ -972,6 +1099,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ employeeId: string; type: LeaveRequest['type']; startDate: string; endDate: string; reason?: string }>(ctx.body);
     const leaveRequest = await hr.requestLeave({ companyId: actor.companyId, ...body });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'leave_request.created',
+      payload: { ...leaveRequest },
+      actorUserId: actor.userId,
+      dedupeKey: `leave_request.created:${leaveRequest.id}`,
+    });
     return { status: 201, body: leaveRequest };
   });
 
@@ -998,6 +1132,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:leave_request permission');
     }
     const leaveRequest = await hr.approveLeave(ctx.params.leaveRequestId!, actor.companyId, actor.userId);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'leave_request.decided',
+      payload: { ...leaveRequest },
+      actorUserId: actor.userId,
+      dedupeKey: `leave_request.decided:${leaveRequest.id}`,
+    });
     return { status: 200, body: leaveRequest };
   });
 
@@ -1007,6 +1148,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:leave_request permission');
     }
     const leaveRequest = await hr.rejectLeave(ctx.params.leaveRequestId!, actor.companyId, actor.userId);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'leave_request.decided',
+      payload: { ...leaveRequest },
+      actorUserId: actor.userId,
+      dedupeKey: `leave_request.decided:${leaveRequest.id}`,
+    });
     return { status: 200, body: leaveRequest };
   });
 
@@ -1026,6 +1174,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ unitId: string; title: string; description?: string; priority: MaintenanceTicket['priority'] }>(ctx.body);
     const ticket = await operations.createTicket({ companyId: actor.companyId, reportedByUserId: actor.userId, ...body });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'maintenance_ticket.created',
+      payload: { ...ticket },
+      actorUserId: actor.userId,
+      dedupeKey: `maintenance_ticket.created:${ticket.id}`,
+    });
     return { status: 201, body: ticket };
   });
 
@@ -1056,6 +1211,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ status: MaintenanceTicket['status'] }>(ctx.body);
     const ticket = await operations.updateStatus(ctx.params.ticketId!, actor.companyId, body.status);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'maintenance_ticket.status_changed',
+      payload: { ...ticket },
+      actorUserId: actor.userId,
+      dedupeKey: `maintenance_ticket.status_changed:${ticket.id}:${ticket.status}`,
+    });
     return { status: 200, body: ticket };
   });
 
@@ -1088,6 +1250,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:legal_document permission');
     }
     const document = await legal.markReceived(ctx.params.documentId!, actor.companyId);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'legal_document.status_changed',
+      payload: { ...document },
+      actorUserId: actor.userId,
+      dedupeKey: `legal_document.status_changed:${document.id}:${document.status}`,
+    });
     return { status: 200, body: document };
   });
 
@@ -1097,6 +1266,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:legal_document permission');
     }
     const document = await legal.verifyDocument(ctx.params.documentId!, actor.companyId);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'legal_document.status_changed',
+      payload: { ...document },
+      actorUserId: actor.userId,
+      dedupeKey: `legal_document.status_changed:${document.id}:${document.status}`,
+    });
     return { status: 200, body: document };
   });
 
@@ -1107,6 +1283,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ notes?: string }>(ctx.body);
     const document = await legal.rejectDocument(ctx.params.documentId!, actor.companyId, body.notes);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'legal_document.status_changed',
+      payload: { ...document },
+      actorUserId: actor.userId,
+      dedupeKey: `legal_document.status_changed:${document.id}:${document.status}`,
+    });
     return { status: 200, body: document };
   });
 
@@ -1146,6 +1329,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ vendorId: string; projectId?: string; description: string; amount: number }>(ctx.body);
     const order = await purchasing.createPurchaseOrder({ companyId: actor.companyId, createdByUserId: actor.userId, ...body });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'purchase_order.created',
+      payload: { ...order },
+      actorUserId: actor.userId,
+      dedupeKey: `purchase_order.created:${order.id}`,
+    });
     return { status: 201, body: order };
   });
 
@@ -1164,6 +1354,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:purchase_order permission');
     }
     const order = await purchasing.approvePurchaseOrder(ctx.params.orderId!, actor.companyId);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'purchase_order.status_changed',
+      payload: { ...order },
+      actorUserId: actor.userId,
+      dedupeKey: `purchase_order.status_changed:${order.id}:${order.status}`,
+    });
     return { status: 200, body: order };
   });
 
@@ -1173,6 +1370,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:purchase_order permission');
     }
     const order = await purchasing.fulfillPurchaseOrder(ctx.params.orderId!, actor.companyId);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'purchase_order.status_changed',
+      payload: { ...order },
+      actorUserId: actor.userId,
+      dedupeKey: `purchase_order.status_changed:${order.id}:${order.status}`,
+    });
     return { status: 200, body: order };
   });
 
@@ -1182,6 +1386,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:purchase_order permission');
     }
     const order = await purchasing.cancelPurchaseOrder(ctx.params.orderId!, actor.companyId);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'purchase_order.status_changed',
+      payload: { ...order },
+      actorUserId: actor.userId,
+      dedupeKey: `purchase_order.status_changed:${order.id}:${order.status}`,
+    });
     return { status: 200, body: order };
   });
 
@@ -1212,6 +1423,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ status: Campaign['status'] }>(ctx.body);
     const campaign = await marketing.updateStatus(ctx.params.campaignId!, actor.companyId, body.status);
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'campaign.status_changed',
+      payload: { ...campaign },
+      actorUserId: actor.userId,
+      dedupeKey: `campaign.status_changed:${campaign.id}:${campaign.status}`,
+    });
     return { status: 200, body: campaign };
   });
 
@@ -1362,6 +1580,317 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: schedule };
   });
 
+  // ---- Tasks (generic tasks/reminders/follow-ups; also the target of the
+  // Automation Engine's create_task action) ----
+  httpServer.post('/api/tasks', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'task'))) {
+      throw new ForbiddenError('missing create:task permission');
+    }
+    const body = parseJsonBody<{
+      title: string;
+      description?: string;
+      dueAt?: string;
+      assignedToUserId?: string;
+      relatedResource?: Task['relatedResource'];
+      relatedResourceId?: string;
+    }>(ctx.body);
+    const task = await tasks.createTask({ companyId: actor.companyId, createdByUserId: actor.userId, ...body });
+    return { status: 201, body: task };
+  });
+
+  httpServer.get('/api/tasks', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'task'))) {
+      throw new ForbiddenError('missing view:task permission');
+    }
+    const list = await tasks.listForCompany(actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.get('/api/tasks/my', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const list = await tasks.listForUser(actor.userId, actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.post('/api/tasks/:taskId/complete', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
+      throw new ForbiddenError('missing edit:task permission');
+    }
+    const task = await tasks.completeTask(ctx.params.taskId!, actor.companyId);
+    return { status: 200, body: task };
+  });
+
+  httpServer.post('/api/tasks/:taskId/cancel', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
+      throw new ForbiddenError('missing edit:task permission');
+    }
+    const task = await tasks.cancelTask(ctx.params.taskId!, actor.companyId);
+    return { status: 200, body: task };
+  });
+
+  // ---- Automation Engine: workflows ----
+  httpServer.post('/api/automation/workflows', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'workflow'))) {
+      throw new ForbiddenError('missing create:workflow permission');
+    }
+    const body = parseJsonBody<{
+      name: string;
+      description?: string;
+      trigger: WorkflowDefinition['trigger'];
+      steps: WorkflowStepInput[];
+    }>(ctx.body);
+    const workflow = await automation.createWorkflow({ companyId: actor.companyId, createdByUserId: actor.userId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'workflow', resourceId: workflow.id });
+    return { status: 201, body: workflow };
+  });
+
+  httpServer.get('/api/automation/workflows', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'workflow'))) {
+      throw new ForbiddenError('missing view:workflow permission');
+    }
+    const list = await automation.listWorkflows(actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.get('/api/automation/templates', async (ctx) => {
+    await actorOf(ctx); // any authenticated user may read the built-in catalogue
+    return { status: 200, body: automation.listTemplates() };
+  });
+
+  httpServer.get('/api/automation/workflows/:workflowId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'workflow'))) {
+      throw new ForbiddenError('missing view:workflow permission');
+    }
+    const workflow = await automation.getWorkflow(ctx.params.workflowId!, actor.companyId);
+    return { status: 200, body: workflow };
+  });
+
+  httpServer.patch('/api/automation/workflows/:workflowId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'workflow'))) {
+      throw new ForbiddenError('missing edit:workflow permission');
+    }
+    const body = parseJsonBody<{ name?: string; description?: string; steps?: WorkflowStepInput[] }>(ctx.body);
+    const workflow = await automation.updateWorkflow(ctx.params.workflowId!, actor.companyId, body);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'workflow', resourceId: workflow.id });
+    return { status: 200, body: workflow };
+  });
+
+  httpServer.post('/api/automation/workflows/:workflowId/status', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'workflow'))) {
+      throw new ForbiddenError('missing edit:workflow permission');
+    }
+    const body = parseJsonBody<{ status: WorkflowDefinition['status'] }>(ctx.body);
+    const workflow = await automation.setWorkflowStatus(ctx.params.workflowId!, actor.companyId, body.status);
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'workflow',
+      resourceId: workflow.id,
+      metadata: { status: body.status },
+    });
+    return { status: 200, body: workflow };
+  });
+
+  // ---- Automation Engine: run history & execution monitoring ----
+  httpServer.get('/api/automation/workflows/:workflowId/runs', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'workflow_run'))) {
+      throw new ForbiddenError('missing view:workflow_run permission');
+    }
+    const list = await automation.listRuns(ctx.params.workflowId!, actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.get('/api/automation/runs/:runId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'workflow_run'))) {
+      throw new ForbiddenError('missing view:workflow_run permission');
+    }
+    const run = await automation.getRun(ctx.params.runId!, actor.companyId);
+    return { status: 200, body: run };
+  });
+
+  httpServer.get('/api/automation/runs/:runId/steps', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'workflow_run'))) {
+      throw new ForbiddenError('missing view:workflow_run permission');
+    }
+    const steps = await automation.listStepRuns(ctx.params.runId!, actor.companyId);
+    return { status: 200, body: steps };
+  });
+
+  // ---- Automation Engine: approvals ----
+  httpServer.get('/api/automation/approvals', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'approval'))) {
+      throw new ForbiddenError('missing view:approval permission');
+    }
+    const status = ctx.query.get('status') as ApprovalRequest['status'] | null;
+    const list = await automation.listApprovals(actor.companyId, status ?? undefined);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.post('/api/automation/approvals/:approvalId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const run = await automation.approveStep(ctx.params.approvalId!, actor.companyId, actor.userId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'approval', resourceId: ctx.params.approvalId! });
+    return { status: 200, body: run };
+  });
+
+  httpServer.post('/api/automation/approvals/:approvalId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const body = ctx.body && typeof ctx.body === 'object' ? (ctx.body as { reason?: string }) : {};
+    const run = await automation.rejectStep(ctx.params.approvalId!, actor.companyId, actor.userId, body.reason);
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'approve',
+      resource: 'approval',
+      resourceId: ctx.params.approvalId!,
+      metadata: { rejected: true },
+    });
+    return { status: 200, body: run };
+  });
+
+  // ---- Automation Engine: secrets (encrypted-at-rest credentials for
+  // webhook_call actions — never returned in plaintext by any route) ----
+  httpServer.post('/api/automation/secrets', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'secret'))) {
+      throw new ForbiddenError('missing create:secret permission');
+    }
+    const body = parseJsonBody<{ key: string; value: string }>(ctx.body);
+    const secret = await automation.setSecret(actor.companyId, body.key, body.value, actor.userId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'secret', resourceId: secret.id });
+    return { status: 201, body: secret };
+  });
+
+  httpServer.get('/api/automation/secrets', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'secret'))) {
+      throw new ForbiddenError('missing view:secret permission');
+    }
+    const list = await automation.listSecrets(actor.companyId);
+    return { status: 200, body: list };
+  });
+
+  httpServer.delete('/api/automation/secrets/:secretId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'delete', 'secret'))) {
+      throw new ForbiddenError('missing delete:secret permission');
+    }
+    await automation.deleteSecret(ctx.params.secretId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'secret', resourceId: ctx.params.secretId! });
+    return { status: 204 };
+  });
+
+  // ---- Automation Engine: inbound webhook receiver. Intentionally
+  // unauthenticated (external services can't hold ACTIVE credentials) — the
+  // companyId + unguessable slug in the URL is the credential, the same
+  // model Zapier/Make webhook URLs use. Only a workflow with an *active*
+  // webhook trigger matching that exact slug will ever fire. ----
+  httpServer.post('/api/automation/webhooks/:companyId/:slug', async (ctx) => {
+    const idempotencyHeader = ctx.headers['idempotency-key'];
+    const idempotencyKey = typeof idempotencyHeader === 'string' ? idempotencyHeader : undefined;
+    const payload = ctx.body && typeof ctx.body === 'object' ? (ctx.body as Record<string, unknown>) : {};
+    const run = await automation.receiveWebhook(ctx.params.companyId!, ctx.params.slug!, payload, idempotencyKey);
+    return { status: 202, body: { runId: run.id, status: run.status } };
+  });
+
+  // ---- AI Execution Layer ----
+  httpServer.post('/api/ai/actions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_action'))) {
+      throw new ForbiddenError('missing create:ai_action permission');
+    }
+    const body = parseJsonBody<{ actionType: AiActionRequest['actionType']; params: Record<string, unknown>; reasoning?: string }>(ctx.body);
+    const request = await aiAgent.requestAction({ companyId: actor.companyId, requestedByUserId: actor.userId, ...body });
+    return { status: 201, body: request };
+  });
+
+  httpServer.get('/api/ai/actions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const list = await aiAgent.listActionRequests(actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.get('/api/ai/actions/:actionId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const request = await aiAgent.getActionRequest(ctx.params.actionId!, actor.companyId);
+    return { status: 200, body: request };
+  });
+
+  httpServer.post('/api/ai/actions/:approvalId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const request = await aiAgent.approveAction(ctx.params.approvalId!, actor.companyId, actor.userId);
+    return { status: 200, body: request };
+  });
+
+  httpServer.post('/api/ai/actions/:approvalId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const body = ctx.body && typeof ctx.body === 'object' ? (ctx.body as { reason?: string }) : {};
+    const request = await aiAgent.rejectAction(ctx.params.approvalId!, actor.companyId, actor.userId, body.reason);
+    return { status: 200, body: request };
+  });
+
+  // ---- AI Execution Layer: policies (per-company, per-action-type
+  // autonomy — defaults to require_approval when no policy is set) ----
+  httpServer.get('/api/ai/policies', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const list = await aiAgent.listPolicies(actor.companyId);
+    return { status: 200, body: list };
+  });
+
+  httpServer.post('/api/ai/policies', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'ai_action'))) {
+      throw new ForbiddenError('missing edit:ai_action permission');
+    }
+    const body = parseJsonBody<{ actionType: AiPolicy['actionType']; autonomyLevel: AiPolicy['autonomyLevel'] }>(ctx.body);
+    const policy = await aiAgent.setPolicy(actor.companyId, body.actionType, body.autonomyLevel, actor.userId);
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'ai_action',
+      resourceId: policy.id,
+      metadata: { actionType: policy.actionType, autonomyLevel: policy.autonomyLevel },
+    });
+    return { status: 200, body: policy };
+  });
+
+  // AI's deterministic "what should happen next" suggestion for a lead —
+  // reuses the existing rule-based LeadScoringService, then routes the
+  // suggestion through the same permission/policy/approval/audit pipeline
+  // as any other AI action (see AiAgentService.suggestNextAction).
+  httpServer.post('/api/crm/leads/:leadId/suggest-next-action', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_action'))) {
+      throw new ForbiddenError('missing create:ai_action permission');
+    }
+    const request = await aiAgent.suggestNextAction(ctx.params.leadId!, actor.companyId, actor.userId);
+    return { status: 201, body: request };
+  });
+
   // ---- Audit ----
   httpServer.get('/api/audit-log', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -1388,6 +1917,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
+      tasks, automation, eventBus, sweepOverdueAndEmit, aiAgent,
     },
     seedResult,
   };

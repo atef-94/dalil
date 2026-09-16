@@ -90,12 +90,23 @@ export class FinanceService {
 
   /** Never touches lines already marked 'paid'. Safe to call repeatedly. */
   async sweepOverdue(now = new Date()): Promise<number> {
+    const swept = await this.sweepOverdueDetailed(now);
+    return swept.length;
+  }
+
+  /** Same sweep as sweepOverdue(), but returns the lines it actually
+   * flipped to 'overdue' — used by app.ts/main.ts to emit one
+   * `payment.overdue_swept` domain event per line so the Automation Engine
+   * can react (e.g. notify finance). A line that's already overdue is
+   * never a candidate again, so each line only ever fires this once. */
+  async sweepOverdueDetailed(now = new Date()): Promise<PaymentScheduleLine[]> {
     const candidates = await this.scheduleLines.findAll(
       (l) => l.status !== 'paid' && l.status !== 'overdue' && Date.parse(l.dueDate) < now.getTime(),
     );
+    const swept: PaymentScheduleLine[] = [];
     for (const line of candidates) {
-      await this.scheduleLines.save({ ...line, status: 'overdue' });
+      swept.push(await this.scheduleLines.save({ ...line, status: 'overdue' }));
     }
-    return candidates.length;
+    return swept;
   }
 }

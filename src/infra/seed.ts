@@ -57,6 +57,12 @@ const ALL_RESOURCES: ResourceName[] = [
   'message',
   'analytics',
   'portal_access',
+  'workflow',
+  'workflow_run',
+  'approval',
+  'secret',
+  'task',
+  'ai_action',
 ];
 
 /**

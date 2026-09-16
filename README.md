@@ -83,8 +83,70 @@ Real users should use the signup/login screen instead.
 | Analytics (sales funnel, pipeline, collections aging, inventory occupancy, broker performance) | Implemented |
 | AI (rule-based lead priority scoring, 0–100 with shown factors) | Implemented — deterministic scoring, not a trained ML/LLM model (none is configured in this environment) |
 | Customer Portal (customer_user accounts scoped to their own contracts/schedule) | Implemented |
+| Tasks (generic tasks/reminders/follow-ups) | Implemented |
+| Automation Engine (event/scheduled/webhook triggers, conditions/branching, retries, approvals, run history, workflow templates, encrypted secrets) | Implemented, production-capable — see below |
+| AI Execution Layer (AI Agent takes real actions — create leads/tasks, update lead status, assign owners, send messages, update campaigns, call webhooks — through the same permission/policy/approval/audit pipeline as the Automation Engine) | Implemented |
 | Frontend SPA | Implemented — staff app shell plus a separate scoped portal shell for customer_user accounts; verified end-to-end in a real browser |
 | Persistent storage | Implemented (SQLite) — Postgres/Prisma remains a future migration |
+
+### Automation Engine + AI Execution Layer
+
+`src/modules/automation/automation.service.ts` is ACTIVE's native workflow
+engine — a from-scratch build (no automation/workflow/scheduler/queue
+infrastructure existed before this phase). It supports:
+
+- **Triggers**: domain events (`lead.created`, `contract.signed`, `payment.overdue_swept`,
+  and 13 others — emitted from `app.ts` route handlers via `src/infra/event-bus.ts`
+  right after the underlying mutation already succeeded, so an automation
+  failure can never break the primary API response), scheduled/recurring
+  (per-workflow interval, ticked every minute from `main.ts`), and inbound
+  webhooks (`POST /api/automation/webhooks/:companyId/:slug`, public —
+  the URL's slug is the credential, the same model Zapier/Make use).
+- **Conditions and branching**: each step is independently gated by
+  AND-combined conditions against the trigger payload (dot-path field,
+  8 operators); a step whose conditions fail is skipped, not blocking —
+  branching is multiple steps off the same trigger, each condition-gated
+  differently.
+- **Actions**: `create_task`, `create_lead`, `send_message`,
+  `update_lead_status`, `assign_lead_owner`, `update_campaign_status`,
+  `webhook_call` (with encrypted-secret bearer-token injection), and
+  `require_approval` (pauses the run and creates an `ApprovalRequest` until
+  a human with `approve:approval` decides it).
+- **Retry/failure handling**: per-step `maxRetries` with `onFailure:
+  'stop'|'continue'`.
+- **Idempotency**: every run carries a dedup key (derived from event
+  type+payload, a scheduled interval bucket, or a webhook idempotency
+  header/payload hash) — a duplicate trigger delivery is guaranteed to
+  create at most one run per workflow.
+- **RBAC enforcement**: a workflow always executes as its creator; every
+  single step re-checks that user's live RBAC grant before running, every
+  single run — a workflow can never do more than its creator is currently
+  authorized to do, and a permission revoke takes effect on the very next
+  run.
+- **Audit trail**: every step execution is recorded (`WorkflowStepRun`,
+  with attempts/output/error) and written to the existing `AuditLog`.
+- **Templates**: `GET /api/automation/templates` returns 4 built-in
+  starting points (new-lead welcome task, qualified-lead reassignment
+  approval, overdue-payment notice, weekly campaign review reminder).
+
+The **AI Execution Layer** (`src/modules/ai/ai-agent.service.ts`) is not
+limited to analysis/recommendations — it takes real actions on a human's
+behalf. Every request goes through the same four-stage pipeline, no
+exceptions: **permission** (does the requesting human hold the RBAC grant
+this action needs?) → **policy** (`AiPolicy.autonomyLevel` — `suggest_only`
+/ `require_approval` / `auto_execute`, defaulting to `require_approval`
+when a company hasn't set one) → **approval** (if policy requires it, the
+action pauses as a real `ApprovalRequest` — the same entity/table the
+Automation Engine's workflow approvals use) → **audit** (every request,
+whatever the outcome, is persisted as an `AiActionRequest` and written to
+`AuditLog` with an `executedByAI: true` marker). It never has its own
+execution path: `AutomationService.executeActionDirect()` dispatches
+through the exact same `executeAction()` switch a workflow step uses, so
+an AI-requested action and a workflow-triggered one are indistinguishable
+to the executor and get identical RBAC enforcement. `suggestNextAction()`
+builds a concrete, explainable "next best action" for a lead from the
+existing rule-based `LeadScoringService` (no external LLM/ML dependency in
+this deployment) — surfaced as an "Ask AI" button on the Leads page.
 
 ## Known gaps (stated honestly, not silently dropped)
 
@@ -119,6 +181,23 @@ Real users should use the signup/login screen instead.
   ML/LLM-backed scorer later.
 - The Customer Portal has no self-service signup — a staff member with
   `create:portal_access` grants access per lead from the Leads page.
+- **No content/CMS entity exists yet**, so "schedule and publish approved
+  content" (one of the AI capabilities requested in scope) isn't directly
+  automatable — `webhook_call` is the documented escape hatch (e.g. trigger
+  an external CMS/Zapier publish step) until a content entity is built.
+- The Automation Engine's action set covers CRM/Sales lead mutations, tasks,
+  messaging, campaigns, and generic webhooks — it does not yet expose
+  Finance/Payments, Contract, HR, Operations, Legal, or Purchasing state
+  transitions as automatable action types (those modules are event
+  *sources* — 9 of the 16 domain events come from them — but not yet action
+  *targets*). Extending `AutomationActionType` and `executeAction()`'s
+  switch is the intended path (see `automation.service.ts`) and follows the
+  exact same pattern the CRM/Marketing/Task actions already use.
+- The Automation Engine executes step-by-step synchronously within the
+  triggering request/tick (no external job queue) — correct and simple for
+  this deployment's scale, but a slow `webhook_call` step delays the run
+  (and, for event triggers, the API response of the route that fired it)
+  until it resolves or times out.
 
 ## Development
 
@@ -147,7 +226,7 @@ the `x-demo-user` bypass is rejected, and data survives a process restart.
 ## Testing
 
 ```bash
-npm run test              # 207 automated unit/integration tests (node:test)
+npm run test              # 258 automated unit/integration tests (node:test)
 node scripts/e2e-smoke.mjs   # real-browser E2E smoke test (Playwright)
 ```
 
@@ -174,11 +253,12 @@ docker compose up -d app   # SQLite persists to the app-data volume
 **Deployment ready** for a single-instance deployment: real persistent
 storage, real self-service signup connected to real RBAC, a working
 frontend (staff app + a separate scoped customer portal) verified
-end-to-end in a real browser, 207 passing automated tests, and every
+end-to-end in a real browser, 258 passing automated tests, and every
 module named in the original scope — CRM, Sales, Inventory, Payment Plans,
 Finance, Brokers, Organization (incl. Branches/Departments/Projects), HR,
 Operations, Legal, Purchasing, Marketing, Communication, Analytics, AI
-lead scoring, and the Customer Portal — is real and working, not stubbed.
+lead scoring, Tasks, the native Automation Engine, the AI Execution Layer,
+and the Customer Portal — is real and working, not stubbed.
 **Not yet "enterprise production ready"**: no horizontal scaling (the
 in-memory concurrency mutex and rate limiter are per-process), no
 Postgres/Prisma migration executed, no external integrations (email/

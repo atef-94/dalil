@@ -1,4 +1,4 @@
-import { randomBytes, scryptSync, timingSafeEqual, createHmac } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
 
 const SCRYPT_KEYLEN = 64;
 const TOKEN_TTL_SECONDS = 15 * 60; // 15-minute token TTL
@@ -66,4 +66,43 @@ export function verifyToken(token: string, secret: string): TokenPayload {
     throw new Error('token expired');
   }
   return payload;
+}
+
+// ---- Symmetric encryption at rest (AES-256-GCM) for stored secrets
+// (automation webhook/API credentials) — never used for passwords, which
+// stay scrypt-hashed and one-way above. The key is derived once from the
+// server's encryption secret so callers never handle raw key bytes. ----
+
+function deriveEncryptionKey(secret: string): Buffer {
+  // A fixed, non-secret salt is fine here: this KDF's job is only to turn
+  // an arbitrary-length secret string into a 32-byte AES-256 key, not to
+  // defend against a leaked secret (the secret itself is the real defense,
+  // same threat model as TOKEN_SECRET for signToken above).
+  return scryptSync(secret, 'active-os-secret-store-v1', 32);
+}
+
+export interface EncryptedPayload {
+  encryptedValue: string; // hex
+  iv: string; // hex
+  authTag: string; // hex
+}
+
+export function encryptSecret(plaintext: string, secret: string): EncryptedPayload {
+  const key = deriveEncryptionKey(secret);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  return {
+    encryptedValue: encrypted.toString('hex'),
+    iv: iv.toString('hex'),
+    authTag: cipher.getAuthTag().toString('hex'),
+  };
+}
+
+export function decryptSecret(payload: EncryptedPayload, secret: string): string {
+  const key = deriveEncryptionKey(secret);
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(payload.iv, 'hex'));
+  decipher.setAuthTag(Buffer.from(payload.authTag, 'hex'));
+  const decrypted = Buffer.concat([decipher.update(Buffer.from(payload.encryptedValue, 'hex')), decipher.final()]);
+  return decrypted.toString('utf8');
 }

@@ -25,6 +25,12 @@ export const RESOURCES: ResourceName[] = [
   'message',
   'analytics',
   'portal_access',
+  'workflow',
+  'workflow_run',
+  'approval',
+  'secret',
+  'task',
+  'ai_action',
 ];
 
 export interface PermissionManifestEntry {
