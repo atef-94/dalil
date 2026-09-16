@@ -1,0 +1,581 @@
+import type {
+  AuditLogEntry,
+  BrokerCompany,
+  BrokerLead,
+  Commission,
+  CommissionRule,
+  Company,
+  Contract,
+  Employee,
+  Lead,
+  Opportunity,
+  Payment,
+  PaymentPlanTemplate,
+  PaymentScheduleLine,
+  PermissionGrant,
+  Receipt,
+  Reservation,
+  Role,
+  Unit,
+  UnitHold,
+  User,
+  UserRole,
+} from './domain/types.js';
+import { InMemoryRepository, type Repository } from './infra/repository.js';
+import { HttpServer, type RequestContext } from './infra/http-server.js';
+import { SlidingWindowRateLimiter } from './infra/rate-limiter.js';
+import { AuditLog } from './infra/audit-log.js';
+import { verifyToken } from './infra/security.js';
+import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
+import { seedDemoData } from './infra/seed.js';
+
+import { RbacEvaluator } from './modules/permissions/rbac.evaluator.js';
+import { buildPermissionManifest } from './modules/permissions/manifest.builder.js';
+import { filterByListScope, type ScopeOwnerKeys } from './modules/permissions/scope-filter.js';
+import { OrganizationService } from './modules/organization/organization.service.js';
+import { AuthService } from './modules/auth/auth.service.js';
+import { CrmService } from './modules/crm/crm.service.js';
+import { InventoryService } from './modules/inventory/inventory.service.js';
+import { PaymentPlansService } from './modules/payment-plans/payment-plans.service.js';
+import { SalesService } from './modules/sales/sales.service.js';
+import { FinanceService } from './modules/finance/finance.service.js';
+import { BrokersService } from './modules/brokers/brokers.service.js';
+
+export interface AppOptions {
+  nodeEnv: string;
+  tokenSecret: string;
+  allowedOrigins: string[];
+  staticDir?: string;
+  seed?: boolean;
+}
+
+export interface Application {
+  httpServer: HttpServer;
+  repos: ReturnType<typeof buildRepos>;
+  services: {
+    rbac: RbacEvaluator;
+    organization: OrganizationService;
+    auth: AuthService;
+    crm: CrmService;
+    inventory: InventoryService;
+    paymentPlans: PaymentPlansService;
+    sales: SalesService;
+    finance: FinanceService;
+    brokers: BrokersService;
+    auditLog: AuditLog;
+  };
+  seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
+}
+
+function buildRepos() {
+  return {
+    companies: new InMemoryRepository<Company>(),
+    employees: new InMemoryRepository<Employee>(),
+    users: new InMemoryRepository<User>(),
+    roles: new InMemoryRepository<Role>(),
+    grants: new InMemoryRepository<PermissionGrant>(),
+    userRoles: new InMemoryRepository<UserRole>(),
+    overrides: new InMemoryRepository<import('./domain/types.js').PermissionOverride>(),
+    leads: new InMemoryRepository<Lead>(),
+    units: new InMemoryRepository<Unit>(),
+    unitHolds: new InMemoryRepository<UnitHold>(),
+    reservations: new InMemoryRepository<Reservation>(),
+    templates: new InMemoryRepository<PaymentPlanTemplate>(),
+    scheduleLines: new InMemoryRepository<PaymentScheduleLine>(),
+    opportunities: new InMemoryRepository<Opportunity>(),
+    contracts: new InMemoryRepository<Contract>(),
+    payments: new InMemoryRepository<Payment>(),
+    receipts: new InMemoryRepository<Receipt>(),
+    brokerCompanies: new InMemoryRepository<BrokerCompany>(),
+    brokerLeads: new InMemoryRepository<BrokerLead>(),
+    commissionRules: new InMemoryRepository<CommissionRule>(),
+    commissions: new InMemoryRepository<Commission>(),
+    auditEntries: new InMemoryRepository<AuditLogEntry>(),
+  };
+}
+
+interface Actor {
+  userId: string;
+  companyId: string;
+  userType: string;
+}
+
+async function resolveActor(
+  ctx: RequestContext,
+  users: Repository<User>,
+  tokenSecret: string,
+  nodeEnv: string,
+): Promise<Actor> {
+  const authHeader = ctx.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice('Bearer '.length);
+    try {
+      const payload = verifyToken(token, tokenSecret);
+      return { userId: payload.sub, companyId: payload.companyId, userType: payload.userType };
+    } catch {
+      throw new TokenError('invalid or expired token');
+    }
+  }
+
+  // Demo bypass header — real login is not yet connected to real RBAC for
+  // every account, so the manual test console authenticates this way. Never
+  // honored in production: this is the fix for a previously-unfixed gap
+  // where this bypass would have kept functioning under NODE_ENV=production.
+  const demoUserHeader = ctx.headers['x-demo-user'];
+  if (nodeEnv !== 'production' && typeof demoUserHeader === 'string' && demoUserHeader.length > 0) {
+    const user = await users.findById(demoUserHeader);
+    if (!user) throw new TokenError('unknown x-demo-user id');
+    return { userId: user.id, companyId: user.companyId, userType: user.userType };
+  }
+
+  throw new TokenError('authentication required');
+}
+
+function parseJsonBody<T>(body: unknown): T {
+  if (body === undefined || body === null || typeof body !== 'object') {
+    throw new ValidationError('a JSON request body is required');
+  }
+  return body as T;
+}
+
+export async function assertProductionSafety(options: AppOptions): Promise<void> {
+  if (options.nodeEnv === 'production') {
+    if (!options.tokenSecret || options.tokenSecret === 'dev-secret') {
+      throw new Error('refusing to boot in production without a real TOKEN_SECRET');
+    }
+    if (!process.env.DATABASE_URL) {
+      process.stderr.write('WARNING: DATABASE_URL is not set — this build has no real database.\n');
+    }
+  }
+}
+
+export async function buildApplication(options: AppOptions): Promise<Application> {
+  await assertProductionSafety(options);
+
+  const repos = buildRepos();
+
+  const rbac = new RbacEvaluator({
+    users: repos.users,
+    employees: repos.employees,
+    roles: repos.roles,
+    grants: repos.grants,
+    userRoles: repos.userRoles,
+    overrides: repos.overrides,
+  });
+  const auditLog = new AuditLog(repos.auditEntries);
+  const organization = new OrganizationService(repos.companies, repos.employees);
+  const auth = new AuthService(repos.users, options.tokenSecret);
+  const crm = new CrmService(repos.leads);
+  const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations);
+  const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
+  const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
+  const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines);
+  const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
+
+  let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
+  if (options.seed !== false) {
+    seedResult = await seedDemoData({
+      companies: repos.companies,
+      employees: repos.employees,
+      users: repos.users,
+      roles: repos.roles,
+      grants: repos.grants,
+      userRoles: repos.userRoles,
+    });
+  }
+
+  const globalRateLimiter = new SlidingWindowRateLimiter(60_000, 300);
+  const authRateLimiter = new SlidingWindowRateLimiter(60_000, 20);
+  const httpServer = new HttpServer({
+    staticDir: options.staticDir,
+    allowedOrigins: options.allowedOrigins,
+    nodeEnv: options.nodeEnv,
+    globalRateLimiter,
+    authRateLimiter,
+  });
+
+  const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv);
+
+  const employeeScopeKeys = async (ownerUserId: string | undefined): Promise<ScopeOwnerKeys> => {
+    if (!ownerUserId) return {};
+    const user = await repos.users.findById(ownerUserId);
+    if (!user?.employeeId) return { ownerUserId };
+    const employee = await repos.employees.findById(user.employeeId);
+    return {
+      ownerUserId,
+      departmentId: employee?.departmentId,
+      branchId: employee?.branchId,
+      managerEmployeeId: employee?.managerEmployeeId,
+    };
+  };
+
+  // ---- Auth ----
+  httpServer.post('/api/auth/register', async (ctx) => {
+    const body = parseJsonBody<{ companyId: string; email: string; password: string; userType: string; locale: 'en' | 'ar' }>(ctx.body);
+    if (!body.companyId?.trim()) throw new ValidationError('companyId is required');
+    const user = await auth.register({
+      companyId: body.companyId,
+      email: body.email,
+      password: body.password,
+      userType: body.userType as User['userType'],
+      locale: body.locale ?? 'en',
+    });
+    return { status: 201, body: { id: user.id, email: user.email, userType: user.userType } };
+  });
+
+  httpServer.post('/api/auth/login', async (ctx) => {
+    const body = parseJsonBody<{ companyId: string; email: string; password: string }>(ctx.body);
+    if (!body.companyId?.trim()) throw new ValidationError('companyId is required');
+    const { token, user } = await auth.login({ companyId: body.companyId, email: body.email, password: body.password });
+    return { status: 200, body: { token, userId: user.id, userType: user.userType } };
+  });
+
+  // ---- Organization ----
+  httpServer.post('/api/organization/companies', async (ctx) => {
+    // Intentionally public: creating a company is tenant signup — there is
+    // no user or role to gate it behind before the first company exists.
+    const body = parseJsonBody<{ name: string }>(ctx.body);
+    const company = await organization.createCompany({ name: body.name });
+    return { status: 201, body: company };
+  });
+
+  httpServer.post('/api/organization/employees', async (ctx) => {
+    const actor = await actorOf(ctx);
+    // Fixed gap: this previously required only a valid token, never
+    // checking create:employee. Any authenticated user could create
+    // employee records regardless of grants.
+    if (!(await rbac.can(actor.userId, 'create', 'employee'))) {
+      throw new ForbiddenError('missing create:employee permission');
+    }
+    const body = parseJsonBody<{
+      fullName: string;
+      email: string;
+      title: string;
+      departmentId?: string;
+      branchId?: string;
+      teamId?: string;
+      managerEmployeeId?: string;
+    }>(ctx.body);
+    const employee = await organization.createEmployee({ companyId: actor.companyId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'employee', resourceId: employee.id });
+    return { status: 201, body: employee };
+  });
+
+  httpServer.get('/api/organization/employees', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'employee');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:employee permission' } };
+    const all = await organization.listEmployees(actor.companyId);
+    const filtered = await filterByListScope(all, scope, async (e) => ({
+      departmentId: e.departmentId,
+      branchId: e.branchId,
+      managerEmployeeId: e.managerEmployeeId,
+      // employees don't have a distinct "owner user" — the employee IS the
+      // record's subject — so 'own' resolves against the employee's own user.
+      ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
+    }));
+    return { status: 200, body: filtered };
+  });
+
+  // ---- Permission Manifest ----
+  httpServer.get('/api/me/manifest', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const manifest = await buildPermissionManifest(rbac, actor.userId);
+    return { status: 200, body: manifest };
+  });
+
+  // ---- Payment Plan Templates ----
+  httpServer.post('/api/payment-plan-templates', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'payment_plan_template'))) {
+      throw new ForbiddenError('missing create:payment_plan_template permission');
+    }
+    const body = parseJsonBody<Parameters<PaymentPlansService['createTemplate']>[0]>(ctx.body);
+    const template = await paymentPlans.createTemplate({ ...body, companyId: actor.companyId });
+    return { status: 201, body: template };
+  });
+
+  httpServer.get('/api/payment-plan-templates', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'payment_plan_template');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:payment_plan_template permission' } };
+    const templates = await paymentPlans.listTemplates(actor.companyId);
+    return { status: 200, body: templates };
+  });
+
+  httpServer.post('/api/contracts/:contractId/payment-schedule/preview', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'payment_plan_template'))) {
+      throw new ForbiddenError('missing view:payment_plan_template permission');
+    }
+    const body = parseJsonBody<{ templateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number }>(ctx.body);
+    const lines = await paymentPlans.previewSchedule(body.templateId, body.totalPrice, body.discountPercent, body.escalationPercentPerYear);
+    return { status: 200, body: lines };
+  });
+
+  httpServer.post('/api/contracts/:contractId/payment-schedule/generate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'payment_plan_template'))) {
+      throw new ForbiddenError('missing create:payment_plan_template permission');
+    }
+    const body = parseJsonBody<{ templateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number }>(ctx.body);
+    const lines = await paymentPlans.generateForContract(
+      ctx.params.contractId!,
+      actor.companyId,
+      body.templateId,
+      body.totalPrice,
+      body.discountPercent,
+      body.escalationPercentPerYear,
+    );
+    return { status: 201, body: lines };
+  });
+
+  httpServer.get('/api/contracts/:contractId/payment-schedule', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'payment_schedule'))) {
+      throw new ForbiddenError('missing view:payment_schedule permission');
+    }
+    const lines = await paymentPlans.getScheduleForContract(ctx.params.contractId!);
+    return { status: 200, body: lines };
+  });
+
+  // ---- Inventory ----
+  httpServer.post('/api/inventory/units', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ projectId: string; code: string; unitType: string; areaSqm: number; listPrice: number }>(ctx.body);
+    const unit = await inventory.createUnit({ companyId: actor.companyId, ...body });
+    return { status: 201, body: unit };
+  });
+
+  httpServer.get('/api/inventory/units', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'unit');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:unit permission' } };
+    const projectId = ctx.query.get('projectId') ?? undefined;
+    const units = await inventory.listUnits(actor.companyId, projectId);
+    return { status: 200, body: units };
+  });
+
+  httpServer.post('/api/inventory/units/:unitId/hold', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {
+      throw new ForbiddenError('missing edit:unit permission');
+    }
+    const hold = await inventory.holdUnit(ctx.params.unitId!, actor.userId);
+    return { status: 201, body: hold };
+  });
+
+  httpServer.post('/api/inventory/units/:unitId/reserve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {
+      throw new ForbiddenError('missing edit:unit permission');
+    }
+    const body = parseJsonBody<{ clientId: string; opportunityId?: string }>(ctx.body);
+    const reservation = await inventory.reserveUnit(ctx.params.unitId!, body.clientId, body.opportunityId);
+    return { status: 201, body: reservation };
+  });
+
+  // ---- CRM ----
+  httpServer.post('/api/crm/leads', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const body = parseJsonBody<{ fullName: string; phone: string; email?: string; sourceId?: string }>(ctx.body);
+    const lead = await crm.createLead({ companyId: actor.companyId, ownerEmployeeUserId: actor.userId, ...body });
+    return { status: 201, body: lead };
+  });
+
+  httpServer.get('/api/crm/leads', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'lead');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:lead permission' } };
+    const leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
+    return { status: 200, body: leads };
+  });
+
+  httpServer.patch('/api/crm/leads/:leadId/status', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'edit', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
+    const body = parseJsonBody<{ status: Lead['status']; lostReason?: string }>(ctx.body);
+    const updated = await crm.updateStatus(ctx.params.leadId!, body.status, body.lostReason);
+    return { status: 200, body: updated };
+  });
+
+  // ---- Sales ----
+  httpServer.post('/api/sales/opportunities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'opportunity'))) {
+      throw new ForbiddenError('missing create:opportunity permission');
+    }
+    const body = parseJsonBody<{ leadId: string }>(ctx.body);
+    const opportunity = await sales.createOpportunity({ companyId: actor.companyId, leadId: body.leadId, ownerEmployeeUserId: actor.userId });
+    return { status: 201, body: opportunity };
+  });
+
+  httpServer.get('/api/sales/opportunities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'opportunity');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:opportunity permission' } };
+    const all = await sales.listOpportunities(actor.companyId);
+    const filtered = await filterByListScope(all, scope, (o) => employeeScopeKeys(o.ownerEmployeeUserId));
+    return { status: 200, body: filtered };
+  });
+
+  httpServer.post('/api/sales/opportunities/:opportunityId/reserve-unit', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const opportunity = await sales.getOpportunity(ctx.params.opportunityId!);
+    if (!opportunity || opportunity.companyId !== actor.companyId) throw new NotFoundError('opportunity not found');
+    const ownerKeys = await employeeScopeKeys(opportunity.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'create', 'opportunity', {
+      companyId: opportunity.companyId,
+      ownerUserId: opportunity.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing create:opportunity permission for this opportunity');
+    const body = parseJsonBody<{ unitId: string }>(ctx.body);
+    const reservation = await sales.reserveUnitForOpportunity(ctx.params.opportunityId!, body.unitId);
+    return { status: 201, body: reservation };
+  });
+
+  httpServer.post('/api/sales/contracts', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'contract'))) {
+      throw new ForbiddenError('missing create:contract permission');
+    }
+    const body = parseJsonBody<{
+      reservationId: string;
+      paymentPlanTemplateId: string;
+      totalPrice: number;
+      discountPercent?: number;
+      escalationPercentPerYear?: number;
+    }>(ctx.body);
+    const contract = await sales.signContract({
+      companyId: actor.companyId,
+      reservationId: body.reservationId,
+      creditedEmployeeUserId: actor.userId,
+      paymentPlanTemplateId: body.paymentPlanTemplateId,
+      totalPrice: body.totalPrice,
+      discountPercent: body.discountPercent,
+      escalationPercentPerYear: body.escalationPercentPerYear,
+    });
+    return { status: 201, body: contract };
+  });
+
+  // ---- Finance ----
+  httpServer.post('/api/finance/payments', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const body = parseJsonBody<{ contractId: string; paymentScheduleLineId: string; amount: number; method: Payment['method'] }>(ctx.body);
+    const result = await finance.recordPayment({ companyId: actor.companyId, recordedByUserId: actor.userId, ...body });
+    return { status: 201, body: result };
+  });
+
+  httpServer.get('/api/finance/contracts/:contractId/balance', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'payment_schedule'))) {
+      throw new ForbiddenError('missing view:payment_schedule permission');
+    }
+    const balance = await finance.getBalance(ctx.params.contractId!);
+    return { status: 200, body: balance };
+  });
+
+  httpServer.post('/api/finance/sweep-overdue', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const count = await finance.sweepOverdue();
+    return { status: 200, body: { swept: count } };
+  });
+
+  // ---- Brokers ----
+  httpServer.post('/api/brokers/companies', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'broker_company'))) {
+      throw new ForbiddenError('missing create:broker_company permission');
+    }
+    const body = parseJsonBody<{ name: string }>(ctx.body);
+    const brokerCompany = await brokers.registerBrokerCompany({ companyId: actor.companyId, name: body.name });
+    return { status: 201, body: brokerCompany };
+  });
+
+  httpServer.post('/api/brokers/companies/:brokerCompanyId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'broker_company'))) {
+      throw new ForbiddenError('missing approve:broker_company permission');
+    }
+    const brokerCompany = await brokers.approveBrokerCompany(ctx.params.brokerCompanyId!);
+    return { status: 200, body: brokerCompany };
+  });
+
+  httpServer.post('/api/brokers/leads', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (actor.userType !== 'broker_user') {
+      throw new ForbiddenError('only broker_user accounts may submit broker leads');
+    }
+    const user = await repos.users.findById(actor.userId);
+    if (!user?.brokerCompanyId) throw new ForbiddenError('this account is not linked to a broker company');
+    const body = parseJsonBody<{ fullName: string; phone: string; email?: string }>(ctx.body);
+    const brokerLead = await brokers.submitBrokerLead({
+      companyId: actor.companyId,
+      brokerCompanyId: user.brokerCompanyId,
+      submittedByUserId: actor.userId,
+      ...body,
+    });
+    return { status: 201, body: brokerLead };
+  });
+
+  httpServer.post('/api/brokers/leads/:brokerLeadId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const brokerLead = await brokers.approveBrokerLead(ctx.params.brokerLeadId!, actor.userId);
+    return { status: 200, body: brokerLead };
+  });
+
+  // ---- Audit ----
+  httpServer.get('/api/audit-log', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'audit_log'))) {
+      throw new ForbiddenError('missing view:audit_log permission');
+    }
+    const entries = await auditLog.listForCompany(actor.companyId);
+    return { status: 200, body: entries };
+  });
+
+  // ---- Health / dev-only ----
+  httpServer.get('/health', async () => ({ status: 200, body: { status: 'ok' } }));
+
+  httpServer.get('/api/seed-info', async () => {
+    if (options.nodeEnv === 'production') {
+      throw new HttpError(404, 'not found');
+    }
+    return { status: 200, body: seedResult ?? { seeded: false } };
+  });
+
+  return {
+    httpServer,
+    repos,
+    services: { rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog },
+    seedResult,
+  };
+}
