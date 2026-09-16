@@ -14,6 +14,14 @@ import { renderTemplates } from './pages/templates.js';
 import { renderFinance } from './pages/finance.js';
 import { renderBrokers } from './pages/brokers.js';
 import { renderAudit } from './pages/audit.js';
+import { renderHr } from './pages/hr.js';
+import { renderOperations } from './pages/operations.js';
+import { renderLegal } from './pages/legal.js';
+import { renderPurchasing } from './pages/purchasing.js';
+import { renderMarketing } from './pages/marketing.js';
+import { renderCommunication } from './pages/communication.js';
+import { renderAnalytics } from './pages/analytics.js';
+import { renderPortal } from './pages/portal.js';
 
 const NAV = [
   { path: '/dashboard', labelKey: 'nav_dashboard', render: renderDashboard },
@@ -23,7 +31,14 @@ const NAV = [
   { path: '/templates', labelKey: 'nav_templates', render: renderTemplates },
   { path: '/finance', labelKey: 'nav_finance', render: renderFinance },
   { path: '/brokers', labelKey: 'nav_brokers', render: renderBrokers },
+  { path: '/marketing', labelKey: 'nav_marketing', render: renderMarketing },
+  { path: '/operations', labelKey: 'nav_operations', render: renderOperations },
+  { path: '/legal', labelKey: 'nav_legal', render: renderLegal },
+  { path: '/purchasing', labelKey: 'nav_purchasing', render: renderPurchasing },
+  { path: '/communication', labelKey: 'nav_communication', render: renderCommunication },
+  { path: '/analytics', labelKey: 'nav_analytics', render: renderAnalytics },
   { path: '/employees', labelKey: 'nav_employees', render: renderEmployees },
+  { path: '/hr', labelKey: 'nav_hr', render: renderHr },
   { path: '/roles', labelKey: 'nav_roles', render: renderRoles },
   { path: '/audit', labelKey: 'nav_audit', render: renderAudit },
 ];
@@ -40,8 +55,11 @@ async function showApp() {
   const locale = getLocale();
   applyLocale(locale);
 
+  const isCustomer = session.me?.userType === 'customer_user';
+  const activeNav = isCustomer ? [] : NAV;
+
   const navLinks = {};
-  const nav = el('nav', {}, NAV.map((item) => {
+  const nav = el('nav', {}, activeNav.map((item) => {
     const a = el('a', { href: `#${item.path}` }, t(locale, item.labelKey));
     navLinks[item.path] = a;
     return a;
@@ -77,6 +95,14 @@ async function showApp() {
     ]),
   ]);
   root.appendChild(shell);
+
+  if (isCustomer) {
+    // The customer portal is a single scoped view — no multi-page nav, no
+    // access to any staff route or data outside this account's own
+    // contracts (enforced server-side by /api/portal/*, not just hidden here).
+    await renderPortal(content);
+    return;
+  }
 
   NAV.forEach((item) => registerRoute(item.path, item.render));
 

@@ -1,10 +1,13 @@
 # ACTIVE Operating System
 
-A connected real estate operating layer — CRM, Sales, Inventory, Payment
-Plans, Finance/Collections, Brokers, Organization, Auth, default-deny RBAC,
-and a real product frontend — unifying what is usually a fragmented stack of
-point solutions. It is a real, working web application: sign up, log in, and
-use it.
+A full real-estate **operating system**, not just a CRM: CRM, Sales,
+Inventory, Payment Plans, Finance/Collections, Brokers, Organization
+(Branches/Departments), HR, Operations (maintenance), Legal (contract
+documents), Purchasing (vendors/POs), Marketing (campaigns), Communication
+(internal messaging), Analytics, a rule-based AI lead-scoring engine, a
+Customer Portal, Auth, default-deny RBAC, and a real product frontend —
+unifying what is usually a fragmented stack of point solutions. It is a
+real, working web application: sign up, log in, and use it.
 
 ## Why this exists / provenance
 
@@ -63,17 +66,25 @@ Real users should use the signup/login screen instead.
 |---|---|
 | Auth + self-service signup | Implemented |
 | RBAC (evaluator + role-management API) | Implemented |
-| Organization (Company/Employee) | Partially implemented — no Branch/Department/Team CRUD |
+| Organization (Company/Employee/Branch/Department) | Implemented — no Team CRUD |
 | Multi-tenancy | Implemented (application layer; verified isolated for both demo and real signed-up tenants) |
 | CRM (Leads) | Implemented — no Activities/Notes/Follow-ups |
 | Sales (Opportunities/Contracts, incl. cancel) | Implemented, concurrency-proven |
-| Inventory (Units) | Implemented, concurrency-proven — no Project/Building/Floor entities |
+| Inventory (Units, Projects) | Implemented, concurrency-proven — no Building/Floor entities |
 | Payment Plans | Implemented, most thoroughly tested |
 | Finance/Collections | Implemented |
 | Brokers (quarantine gate + commissions) | Implemented |
-| Frontend SPA | Implemented — verified end-to-end in a real browser |
+| HR (leave requests: request/approve/reject/cancel) | Implemented — no attendance/payroll |
+| Operations (maintenance tickets on units) | Implemented |
+| Legal (contract document tracking: pending → received → verified/rejected) | Implemented — documents are metadata records, not file uploads |
+| Purchasing (vendors + purchase orders: draft → approved → fulfilled) | Implemented |
+| Marketing (campaigns + lead-source attribution/conversion) | Implemented |
+| Communication (internal message/notification log) | Implemented — logged only, no real email/WhatsApp/SMS gateway |
+| Analytics (sales funnel, pipeline, collections aging, inventory occupancy, broker performance) | Implemented |
+| AI (rule-based lead priority scoring, 0–100 with shown factors) | Implemented — deterministic scoring, not a trained ML/LLM model (none is configured in this environment) |
+| Customer Portal (customer_user accounts scoped to their own contracts/schedule) | Implemented |
+| Frontend SPA | Implemented — staff app shell plus a separate scoped portal shell for customer_user accounts; verified end-to-end in a real browser |
 | Persistent storage | Implemented (SQLite) — Postgres/Prisma remains a future migration |
-| Marketing, Communication, Customer Portal, Analytics, AI, HR, Legal, Operations, Purchasing | Not implemented |
 
 ## Known gaps (stated honestly, not silently dropped)
 
@@ -89,13 +100,25 @@ Real users should use the signup/login screen instead.
   `terminated` exist as states but no endpoint sets them.
   `PaymentScheduleLine.status` never passes through `due` (only
   `upcoming` → `overdue` → `paid`, via the sweep).
-  No `Project`, `Client`, `Branch`, `Department`, `Team` entities exist —
-  `projectId`/`departmentId`/`branchId` are plain string fields.
+  No `Team` entity exists yet (Branch/Department/Project do). `Unit.projectId`
+  deliberately stays a free-form string rather than a validated FK, for
+  backward compatibility with data/UI predating the `Project` entity.
 - No restricted-tier audit-log field masking; audit logging covers the
   significant mutating actions (leads, contracts, payments, role
   assignment, employee creation, broker-lead approval) but not every single
-  endpoint.
+  endpoint, and not yet the newer modules (HR, Operations, Legal,
+  Purchasing, Marketing, Communication).
 - No external integrations (WhatsApp, ad platforms, payment gateways, MLS).
+  Communication logs messages with an intended channel (`email`/`whatsapp`/
+  `sms`) but never actually sends through a real provider.
+- Legal documents are metadata records (name, type, status, notes) — there
+  is no file upload/storage backing them yet.
+- The AI module is intentionally a transparent, rule-based scorer, not a
+  trained model — no LLM/ML API is configured in this environment. Its
+  single `scoreLead` method is designed as a drop-in point for a real
+  ML/LLM-backed scorer later.
+- The Customer Portal has no self-service signup — a staff member with
+  `create:portal_access` grants access per lead from the Leads page.
 
 ## Development
 
@@ -124,7 +147,7 @@ the `x-demo-user` bypass is rejected, and data survives a process restart.
 ## Testing
 
 ```bash
-npm run test              # 112 automated unit/integration tests (node:test)
+npm run test              # 207 automated unit/integration tests (node:test)
 node scripts/e2e-smoke.mjs   # real-browser E2E smoke test (Playwright)
 ```
 
@@ -150,9 +173,15 @@ docker compose up -d app   # SQLite persists to the app-data volume
 
 **Deployment ready** for a single-instance deployment: real persistent
 storage, real self-service signup connected to real RBAC, a working
-frontend verified end-to-end in a real browser, 112 passing automated
-tests. **Not yet "enterprise production ready"**: no horizontal scaling
-(the in-memory concurrency mutex and rate limiter are per-process), no
-Postgres/Prisma migration executed, several modules (Marketing,
-Communication, Analytics, AI, HR, Legal, Operations, Purchasing) remain
-entirely unbuilt, and audit-log field masking is not implemented.
+frontend (staff app + a separate scoped customer portal) verified
+end-to-end in a real browser, 207 passing automated tests, and every
+module named in the original scope — CRM, Sales, Inventory, Payment Plans,
+Finance, Brokers, Organization (incl. Branches/Departments/Projects), HR,
+Operations, Legal, Purchasing, Marketing, Communication, Analytics, AI
+lead scoring, and the Customer Portal — is real and working, not stubbed.
+**Not yet "enterprise production ready"**: no horizontal scaling (the
+in-memory concurrency mutex and rate limiter are per-process), no
+Postgres/Prisma migration executed, no external integrations (email/
+WhatsApp/SMS gateways, payment gateways, MLS), no file storage backing
+Legal documents, and audit-log field masking / full endpoint coverage is
+not implemented.

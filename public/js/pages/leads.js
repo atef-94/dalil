@@ -84,6 +84,24 @@ export async function renderLeads(container) {
     }
   }
 
+  async function grantPortalAccess(lead) {
+    const result = await formModal({
+      title: `Grant customer portal access to ${lead.fullName}`,
+      fields: [
+        { key: 'email', label: 'Login email', type: 'text', placeholder: lead.email || 'client@example.com' },
+        { key: 'password', label: 'Temporary password', type: 'text', placeholder: 'At least 8 characters' },
+      ],
+      submitLabel: 'Grant access',
+    });
+    if (!result || !result.email.trim() || !result.password.trim()) return;
+    try {
+      await api.post('/api/portal/grant-access', { leadId: lead.id, email: result.email.trim(), password: result.password });
+      toast('Portal access granted — share the login details with the client.', 'success');
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   async function load() {
     clear(listSlot);
     listSlot.appendChild(loadingState());
@@ -106,6 +124,16 @@ export async function renderLeads(container) {
               const lostBtn = el('button', {}, 'Mark lost');
               lostBtn.addEventListener('click', () => markLost(l));
               actions.appendChild(lostBtn);
+            }
+            if (l.status !== 'lost') {
+              // Portal access is tied to the lead record itself, not to
+              // whether a Sales Opportunity happens to exist for it yet
+              // (those are independent state machines) — so this is
+              // available for any active lead, not just ones already
+              // converted.
+              const portalBtn = el('button', {}, 'Grant portal access');
+              portalBtn.addEventListener('click', () => grantPortalAccess(l));
+              actions.appendChild(portalBtn);
             }
             return actions;
           } },
