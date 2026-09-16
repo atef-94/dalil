@@ -221,3 +221,27 @@ test('previewSchedule rejects a template belonging to a different company (cross
 
   await assert.rejects(() => paymentPlans.previewSchedule(template.id, 'other-company', 500_000));
 });
+
+test('generateForContract does not leak an already-generated schedule to a different company reusing the same contractId (idempotency-bypass IDOR)', async () => {
+  const app = await freshApp();
+  const { paymentPlans } = app.services;
+  const companyId = app.seedResult!.companyId;
+
+  const template = await paymentPlans.createTemplate({
+    companyId,
+    name: 'Owner Schedule Plan',
+    downPaymentType: 'percentage',
+    downPaymentValue: 15,
+    frequency: 'monthly',
+    termMonths: 6,
+    fees: [],
+  });
+
+  const ownerLines = await paymentPlans.generateForContract('shared-contract-id', companyId, template.id, 500_000);
+  assert.ok(ownerLines.length > 0);
+
+  // A different company reusing the same contractId must never see the
+  // owner's already-generated lines, even though the idempotency check
+  // would otherwise short-circuit on contractId alone.
+  await assert.rejects(() => paymentPlans.generateForContract('shared-contract-id', 'other-company', template.id, 500_000));
+});

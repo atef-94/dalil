@@ -86,12 +86,13 @@ export class SalesService {
    */
   async signContract(input: SignContractInput): Promise<Contract> {
     return this.signMutex.runExclusive(input.reservationId, async () => {
+      const reservation = await this.inventory.getReservation(input.reservationId);
+      if (!reservation || reservation.companyId !== input.companyId) throw new NotFoundError('reservation not found');
+
       if (await this.contractExistsForReservation(input.reservationId)) {
         throw new SalesError('this reservation already has a signed contract');
       }
 
-      const reservation = await this.inventory.getReservation(input.reservationId);
-      if (!reservation || reservation.companyId !== input.companyId) throw new NotFoundError('reservation not found');
       if (reservation.status !== 'active') {
         throw new SalesError(`reservation is not active (current status: ${reservation.status})`);
       }

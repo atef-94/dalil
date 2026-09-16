@@ -88,7 +88,7 @@ export class PaymentPlansService {
     discountPercent?: number,
     escalationPercentPerYear?: number,
   ): Promise<PaymentScheduleLine[]> {
-    const existing = await this.scheduleLines.findAll((l) => l.contractId === contractId);
+    const existing = await this.scheduleLines.findAll((l) => l.contractId === contractId && l.companyId === companyId);
     if (existing.length > 0) {
       return existing.sort((a, b) => a.sequence - b.sequence);
     }

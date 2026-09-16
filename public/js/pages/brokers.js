@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderBrokers(container) {
@@ -48,6 +48,19 @@ export async function renderBrokers(container) {
     }
   }
 
+  async function suspendCompany(bc, btn) {
+    if (!(await confirmModal(`Suspend ${bc.name}? They will no longer be able to submit leads.`, { confirmLabel: 'Suspend', danger: true }))) return;
+    btn.disabled = true;
+    try {
+      await api.post(`/api/brokers/companies/${bc.id}/suspend`, {});
+      toast('Broker company suspended.', 'success');
+      await load();
+    } catch (err) {
+      btn.disabled = false;
+      errorSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   async function approveLead(bl, btn) {
     try {
       await api.post(`/api/brokers/leads/${bl.id}/approve`, {});
@@ -72,10 +85,17 @@ export async function renderBrokers(container) {
           { label: 'Name', key: 'name' },
           { label: 'Status', render: (bc) => statusBadge(bc.status) },
           { label: '', render: (bc) => {
-            if (bc.status !== 'pending') return '';
-            const btn = el('button', {}, 'Approve');
-            btn.addEventListener('click', () => { btn.disabled = true; approveCompany(bc, btn); });
-            return btn;
+            if (bc.status === 'pending') {
+              const btn = el('button', {}, 'Approve');
+              btn.addEventListener('click', () => { btn.disabled = true; approveCompany(bc, btn); });
+              return btn;
+            }
+            if (bc.status === 'approved') {
+              const btn = el('button', { class: 'danger' }, 'Suspend');
+              btn.addEventListener('click', () => suspendCompany(bc, btn));
+              return btn;
+            }
+            return '';
           } },
         ],
         page.items,

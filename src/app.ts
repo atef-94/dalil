@@ -319,9 +319,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
 
   httpServer.post('/api/organization/employees/:employeeId/reassign-manager', async (ctx) => {
     const actor = await actorOf(ctx);
-    if (!(await rbac.can(actor.userId, 'edit', 'employee'))) {
-      throw new ForbiddenError('missing edit:employee permission');
-    }
+    const target = await organization.getEmployee(ctx.params.employeeId!);
+    if (!target || target.companyId !== actor.companyId) throw new NotFoundError('employee not found');
+    const targetOwnerUserId = (await repos.users.findAll((u) => u.employeeId === target.id))[0]?.id;
+    const allowed = await rbac.can(actor.userId, 'edit', 'employee', {
+      companyId: target.companyId,
+      ownerUserId: targetOwnerUserId,
+      departmentId: target.departmentId,
+      branchId: target.branchId,
+      managerEmployeeId: target.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:employee permission for this employee');
     const body = parseJsonBody<{ newManagerEmployeeId: string }>(ctx.body);
     const employee = await organization.reassignManager(ctx.params.employeeId!, body.newManagerEmployeeId, actor.companyId);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'employee', resourceId: employee.id });
@@ -330,9 +338,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
 
   httpServer.post('/api/organization/employees/:employeeId/terminate', async (ctx) => {
     const actor = await actorOf(ctx);
-    if (!(await rbac.can(actor.userId, 'delete', 'employee'))) {
-      throw new ForbiddenError('missing delete:employee permission');
-    }
+    const target = await organization.getEmployee(ctx.params.employeeId!);
+    if (!target || target.companyId !== actor.companyId) throw new NotFoundError('employee not found');
+    const targetOwnerUserId = (await repos.users.findAll((u) => u.employeeId === target.id))[0]?.id;
+    const allowed = await rbac.can(actor.userId, 'delete', 'employee', {
+      companyId: target.companyId,
+      ownerUserId: targetOwnerUserId,
+      departmentId: target.departmentId,
+      branchId: target.branchId,
+      managerEmployeeId: target.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing delete:employee permission for this employee');
     const employee = await organization.terminate(ctx.params.employeeId!, actor.companyId);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'employee', resourceId: employee.id });
     return { status: 200, body: employee };
@@ -488,6 +504,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'payment_plan_template'))) {
       throw new ForbiddenError('missing create:payment_plan_template permission');
     }
+    const contract = await sales.getContract(ctx.params.contractId!);
+    if (!contract || contract.companyId !== actor.companyId) throw new NotFoundError('contract not found');
     const body = parseJsonBody<{ templateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number }>(ctx.body);
     const lines = await paymentPlans.generateForContract(
       ctx.params.contractId!,
