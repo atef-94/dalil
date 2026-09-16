@@ -36,6 +36,10 @@ export function errorBanner(message) {
   return el('div', { class: 'error-banner' }, message);
 }
 
+export function loadingState(message = 'Loading…') {
+  return el('div', { class: 'empty-state' }, message);
+}
+
 export function badge(text, color = '') {
   return el('span', { class: `badge ${color}` }, text);
 }
@@ -84,6 +88,93 @@ export function paginationControls(page, onChange) {
   ]);
 }
 
-export function confirmAction(message) {
-  return window.confirm(message);
+// ---- Modal system (replaces window.prompt/confirm with real in-app UI) ----
+
+function openModalShell(titleText, bodyNode) {
+  const overlay = el('div', { class: 'modal-overlay' });
+  const card = el('div', { class: 'modal-card', role: 'dialog', 'aria-modal': 'true' }, [
+    el('h3', { class: 'modal-title' }, titleText),
+    bodyNode,
+  ]);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+
+  function close() {
+    overlay.remove();
+    document.removeEventListener('keydown', onKeydown);
+  }
+  function onKeydown(e) {
+    if (e.key === 'Escape') close();
+  }
+  document.addEventListener('keydown', onKeydown);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+
+  return { overlay, card, close };
+}
+
+/** Promise-based replacement for window.confirm — styled, keyboard/overlay
+ * dismissible, never blocks the whole browser tab. */
+export function confirmModal(message, { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const body = el('div', {}, [
+      el('p', { style: 'margin:0 0 18px' }, message),
+    ]);
+    const { close } = openModalShell('Please confirm', body);
+    const cancelBtn = el('button', {}, cancelLabel);
+    const confirmBtn = el('button', { class: danger ? 'danger' : 'primary' }, confirmLabel);
+    cancelBtn.addEventListener('click', () => { close(); resolve(false); });
+    confirmBtn.addEventListener('click', () => { close(); resolve(true); });
+    body.appendChild(el('div', { class: 'form-actions', style: 'justify-content:flex-end' }, [cancelBtn, confirmBtn]));
+    confirmBtn.focus();
+  });
+}
+
+/**
+ * Promise-based replacement for window.prompt (and for chaining several
+ * prompts) — a single form with typed fields. Resolves with
+ * {[fieldKey]: value} or null if dismissed/cancelled.
+ *
+ * fields: { key, label, type: 'text'|'number'|'select'|'textarea',
+ *           options?: [{value,label}], placeholder?, value? }[]
+ */
+export function formModal({ title, fields, submitLabel = 'Submit', cancelLabel = 'Cancel' }) {
+  return new Promise((resolve) => {
+    const inputs = {};
+    const body = el('div', {});
+    for (const f of fields) {
+      let input;
+      if (f.type === 'select') {
+        input = selectInput(f.options || [], {});
+        if (f.value !== undefined) input.value = f.value;
+      } else if (f.type === 'textarea') {
+        input = el('textarea', { rows: 3, placeholder: f.placeholder || '' });
+        if (f.value !== undefined) input.value = f.value;
+      } else {
+        input = el('input', { type: f.type || 'text', placeholder: f.placeholder || '', value: f.value ?? '' });
+      }
+      inputs[f.key] = input;
+      body.appendChild(field(f.label, input));
+    }
+
+    const { close } = openModalShell(title, body);
+    const cancelBtn = el('button', {}, cancelLabel);
+    const submitBtn = el('button', { class: 'primary' }, submitLabel);
+    cancelBtn.addEventListener('click', () => { close(); resolve(null); });
+    function submit() {
+      const values = {};
+      for (const [key, input] of Object.entries(inputs)) values[key] = input.value;
+      close();
+      resolve(values);
+    }
+    submitBtn.addEventListener('click', submit);
+    body.appendChild(el('div', { class: 'form-actions', style: 'justify-content:flex-end' }, [cancelBtn, submitBtn]));
+
+    const firstInput = Object.values(inputs)[0];
+    firstInput?.focus?.();
+    firstInput?.addEventListener?.('keydown', (e) => {
+      if (e.key === 'Enter' && fields.length === 1) submit();
+    });
+  });
 }

@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, paginationControls } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, formModal, loadingState } from '../ui.js';
 import { api } from '../api.js';
 
 const NEXT_STATUS = { new: 'contacted', contacted: 'qualified', qualified: 'opportunity' };
@@ -22,6 +22,7 @@ export async function renderLeads(container) {
       errorSlot.appendChild(errorBanner('Full name and phone are required.'));
       return;
     }
+    createBtn.disabled = true;
     try {
       await api.post('/api/crm/leads', {
         fullName: nameInput.value.trim(),
@@ -34,6 +35,8 @@ export async function renderLeads(container) {
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      createBtn.disabled = false;
     }
   });
 
@@ -51,7 +54,7 @@ export async function renderLeads(container) {
   const listSlot = el('div');
   container.appendChild(listSlot);
 
-  async function advance(lead) {
+  async function advance(lead, btn) {
     const next = NEXT_STATUS[lead.status];
     if (!next) return;
     try {
@@ -59,13 +62,19 @@ export async function renderLeads(container) {
       toast(`Lead moved to "${next}".`, 'success');
       await load();
     } catch (err) {
+      btn.disabled = false;
       errorSlot.appendChild(errorBanner(err.message));
     }
   }
 
   async function markLost(lead) {
-    const reason = window.prompt('Reason for marking this lead lost:');
-    if (!reason) return;
+    const result = await formModal({
+      title: `Mark "${lead.fullName}" as lost`,
+      fields: [{ key: 'reason', label: 'Reason', type: 'textarea', placeholder: 'e.g. went with a competitor' }],
+      submitLabel: 'Mark lost',
+    });
+    if (!result || !result.reason.trim()) return;
+    const reason = result.reason.trim();
     try {
       await api.patch(`/api/crm/leads/${lead.id}/status`, { status: 'lost', lostReason: reason });
       toast('Lead marked lost.', 'success');
@@ -77,8 +86,10 @@ export async function renderLeads(container) {
 
   async function load() {
     clear(listSlot);
+    listSlot.appendChild(loadingState());
     try {
       const page = await api.get('/api/crm/leads', { limit: 20, offset });
+      clear(listSlot);
       listSlot.append(table(
         [
           { label: 'Name', key: 'fullName' },
@@ -88,7 +99,7 @@ export async function renderLeads(container) {
             const actions = el('div', { style: 'display:flex;gap:6px' });
             if (NEXT_STATUS[l.status]) {
               const btn = el('button', {}, `→ ${NEXT_STATUS[l.status]}`);
-              btn.addEventListener('click', () => advance(l));
+              btn.addEventListener('click', () => { btn.disabled = true; advance(l, btn); });
               actions.appendChild(btn);
             }
             if (l.status !== 'lost' && l.status !== 'opportunity') {

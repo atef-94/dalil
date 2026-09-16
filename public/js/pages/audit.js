@@ -1,4 +1,4 @@
-import { el, clear, table, errorBanner, paginationControls } from '../ui.js';
+import { el, clear, table, errorBanner, paginationControls, loadingState } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderAudit(container) {
@@ -10,8 +10,10 @@ export async function renderAudit(container) {
 
   async function load() {
     clear(listSlot);
+    listSlot.appendChild(loadingState());
     try {
       const page = await api.get('/api/audit-log', { limit: 25, offset });
+      clear(listSlot);
       listSlot.append(table(
         [
           { label: 'When', render: (e) => new Date(e.createdAt).toLocaleString() },

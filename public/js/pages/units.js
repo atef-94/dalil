@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, paginationControls } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, loadingState } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderUnits(container) {
@@ -17,6 +17,11 @@ export async function renderUnits(container) {
 
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
+    if (!projectInput.value.trim() || !codeInput.value.trim() || !typeInput.value.trim() || !(Number(areaInput.value) > 0) || !(Number(priceInput.value) > 0)) {
+      errorSlot.appendChild(errorBanner('Fill in project, code, type, and a positive area and price.'));
+      return;
+    }
+    createBtn.disabled = true;
     try {
       await api.post('/api/inventory/units', {
         projectId: projectInput.value.trim(),
@@ -30,6 +35,8 @@ export async function renderUnits(container) {
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      createBtn.disabled = false;
     }
   });
 
@@ -48,20 +55,23 @@ export async function renderUnits(container) {
   const listSlot = el('div');
   container.appendChild(listSlot);
 
-  async function hold(unit) {
+  async function hold(unit, btn) {
     try {
       await api.post(`/api/inventory/units/${unit.id}/hold`, {});
       toast('Unit held for 15 minutes.', 'success');
       await load();
     } catch (err) {
+      btn.disabled = false;
       errorSlot.appendChild(errorBanner(err.message));
     }
   }
 
   async function load() {
     clear(listSlot);
+    listSlot.appendChild(loadingState());
     try {
       const page = await api.get('/api/inventory/units', { limit: 20, offset });
+      clear(listSlot);
       listSlot.append(table(
         [
           { label: 'Code', key: 'code' },
@@ -73,7 +83,10 @@ export async function renderUnits(container) {
           { label: '', render: (u) => {
             if (u.status !== 'available') return '';
             const btn = el('button', {}, 'Hold');
-            btn.addEventListener('click', () => hold(u));
+            btn.addEventListener('click', () => {
+              btn.disabled = true;
+              hold(u, btn);
+            });
             return btn;
           } },
         ],

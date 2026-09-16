@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, selectInput, loadingState } from '../ui.js';
 import { api } from '../api.js';
 
 const FREQUENCIES = ['monthly', 'quarterly', 'semiannual', 'annual', 'custom'];
@@ -18,6 +18,11 @@ export async function renderTemplates(container) {
 
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
+    if (!nameInput.value.trim() || !(Number(dpValueInput.value) >= 0) || !(Number(termInput.value) > 0)) {
+      errorSlot.appendChild(errorBanner('Enter a name, a down payment value, and a positive term.'));
+      return;
+    }
+    createBtn.disabled = true;
     try {
       await api.post('/api/payment-plan-templates', {
         name: nameInput.value.trim(),
@@ -32,6 +37,8 @@ export async function renderTemplates(container) {
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      createBtn.disabled = false;
     }
   });
 
@@ -53,7 +60,11 @@ export async function renderTemplates(container) {
   const previewBtn = el('button', {}, 'Preview schedule');
   const previewOutput = el('pre', { style: 'white-space:pre-wrap;font-size:12px;background:var(--bg);padding:10px;border-radius:6px;max-height:280px;overflow:auto' }, '—');
   previewBtn.addEventListener('click', async () => {
-    if (!previewTemplateSelect.value) return;
+    if (!previewTemplateSelect.value || !(Number(previewPriceInput.value) > 0)) {
+      previewOutput.textContent = 'Choose a template and enter a positive total price.';
+      return;
+    }
+    previewBtn.disabled = true;
     try {
       const lines = await api.post('/api/contracts/preview/payment-schedule/preview', {
         templateId: previewTemplateSelect.value,
@@ -62,6 +73,8 @@ export async function renderTemplates(container) {
       previewOutput.textContent = lines.map((l) => `${l.label.padEnd(16)} ${new Date(l.dueDate).toLocaleDateString()}  ${Number(l.amount).toLocaleString()}`).join('\n');
     } catch (err) {
       previewOutput.textContent = err.message;
+    } finally {
+      previewBtn.disabled = false;
     }
   });
   container.appendChild(el('div', { class: 'card' }, [
@@ -79,10 +92,12 @@ export async function renderTemplates(container) {
 
   async function load() {
     clear(listSlot);
+    listSlot.appendChild(loadingState());
     try {
       const page = await api.get('/api/payment-plan-templates', { limit: 100 });
       clear(previewTemplateSelect);
       page.items.forEach((tpl) => previewTemplateSelect.appendChild(el('option', { value: tpl.id }, tpl.name)));
+      clear(listSlot);
       listSlot.appendChild(table(
         [
           { label: 'Name', key: 'name' },
