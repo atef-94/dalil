@@ -3,19 +3,26 @@ import type {
   Branch,
   BrokerCompany,
   BrokerLead,
+  Campaign,
   Commission,
   CommissionRule,
   Company,
   Contract,
+  Customer,
   Department,
   Employee,
   Lead,
+  LeaveRequest,
+  LegalDocument,
+  MaintenanceTicket,
+  Message,
   Opportunity,
   Payment,
   PaymentPlanTemplate,
   PaymentScheduleLine,
   PermissionGrant,
   Project,
+  PurchaseOrder,
   Receipt,
   Reservation,
   Role,
@@ -23,6 +30,7 @@ import type {
   UnitHold,
   User,
   UserRole,
+  Vendor,
 } from './domain/types.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { InMemoryRepository, type Repository } from './infra/repository.js';
@@ -48,6 +56,15 @@ import { FinanceService } from './modules/finance/finance.service.js';
 import { BrokersService } from './modules/brokers/brokers.service.js';
 import { RoleManagementService } from './modules/permissions/role-management.service.js';
 import { OnboardingService } from './modules/onboarding/onboarding.service.js';
+import { HrService } from './modules/hr/hr.service.js';
+import { OperationsService } from './modules/operations/operations.service.js';
+import { LegalService } from './modules/legal/legal.service.js';
+import { PurchasingService } from './modules/purchasing/purchasing.service.js';
+import { MarketingService } from './modules/marketing/marketing.service.js';
+import { CommunicationService } from './modules/communication/communication.service.js';
+import { AnalyticsService } from './modules/analytics/analytics.service.js';
+import { LeadScoringService } from './modules/ai/lead-scoring.service.js';
+import { PortalService } from './modules/portal/portal.service.js';
 
 export interface AppOptions {
   nodeEnv: string;
@@ -80,6 +97,15 @@ export interface Application {
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
+    hr: HrService;
+    operations: OperationsService;
+    legal: LegalService;
+    purchasing: PurchasingService;
+    marketing: MarketingService;
+    communication: CommunicationService;
+    analytics: AnalyticsService;
+    leadScoring: LeadScoringService;
+    portal: PortalService;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -114,6 +140,14 @@ function buildRepos(db?: DatabaseSync) {
     commissionRules: repo<CommissionRule>('commission_rules'),
     commissions: repo<Commission>('commissions'),
     auditEntries: repo<AuditLogEntry>('audit_entries'),
+    leaveRequests: repo<LeaveRequest>('leave_requests'),
+    maintenanceTickets: repo<MaintenanceTicket>('maintenance_tickets'),
+    legalDocuments: repo<LegalDocument>('legal_documents'),
+    vendors: repo<Vendor>('vendors'),
+    purchaseOrders: repo<PurchaseOrder>('purchase_orders'),
+    campaigns: repo<Campaign>('campaigns'),
+    messages: repo<Message>('messages'),
+    customers: repo<Customer>('customers'),
   };
 }
 
@@ -198,6 +232,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
   const onboarding = new OnboardingService(organization, auth, roleManagement);
+  const hr = new HrService(repos.leaveRequests, repos.employees);
+  const operations = new OperationsService(repos.maintenanceTickets, repos.units);
+  const legal = new LegalService(repos.legalDocuments, repos.contracts);
+  const purchasing = new PurchasingService(repos.vendors, repos.purchaseOrders);
+  const marketing = new MarketingService(repos.campaigns, repos.leads);
+  const communication = new CommunicationService(repos.messages);
+  const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions);
+  const leadScoring = new LeadScoringService(repos.leads);
+  const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth);
 
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
   if (options.seed !== false) {
@@ -921,6 +964,404 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: commission };
   });
 
+  // ---- HR: leave requests ----
+  httpServer.post('/api/hr/leave-requests', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'leave_request'))) {
+      throw new ForbiddenError('missing create:leave_request permission');
+    }
+    const body = parseJsonBody<{ employeeId: string; type: LeaveRequest['type']; startDate: string; endDate: string; reason?: string }>(ctx.body);
+    const leaveRequest = await hr.requestLeave({ companyId: actor.companyId, ...body });
+    return { status: 201, body: leaveRequest };
+  });
+
+  httpServer.get('/api/hr/leave-requests', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'leave_request'))) {
+      throw new ForbiddenError('missing view:leave_request permission');
+    }
+    const requests = await hr.listForCompany(actor.companyId);
+    return { status: 200, body: paginate(requests, ctx.query) };
+  });
+
+  httpServer.get('/api/hr/my-leave-requests', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const user = await repos.users.findById(actor.userId);
+    if (!user?.employeeId) return { status: 200, body: paginate([], ctx.query) };
+    const requests = await hr.listForEmployee(user.employeeId, actor.companyId);
+    return { status: 200, body: paginate(requests, ctx.query) };
+  });
+
+  httpServer.post('/api/hr/leave-requests/:leaveRequestId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'leave_request'))) {
+      throw new ForbiddenError('missing approve:leave_request permission');
+    }
+    const leaveRequest = await hr.approveLeave(ctx.params.leaveRequestId!, actor.companyId, actor.userId);
+    return { status: 200, body: leaveRequest };
+  });
+
+  httpServer.post('/api/hr/leave-requests/:leaveRequestId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'leave_request'))) {
+      throw new ForbiddenError('missing approve:leave_request permission');
+    }
+    const leaveRequest = await hr.rejectLeave(ctx.params.leaveRequestId!, actor.companyId, actor.userId);
+    return { status: 200, body: leaveRequest };
+  });
+
+  httpServer.post('/api/hr/leave-requests/:leaveRequestId/cancel', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const user = await repos.users.findById(actor.userId);
+    if (!user?.employeeId) throw new ForbiddenError('this account is not linked to an employee record');
+    const leaveRequest = await hr.cancelLeave(ctx.params.leaveRequestId!, actor.companyId, user.employeeId);
+    return { status: 200, body: leaveRequest };
+  });
+
+  // ---- Operations: maintenance tickets ----
+  httpServer.post('/api/operations/tickets', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'maintenance_ticket'))) {
+      throw new ForbiddenError('missing create:maintenance_ticket permission');
+    }
+    const body = parseJsonBody<{ unitId: string; title: string; description?: string; priority: MaintenanceTicket['priority'] }>(ctx.body);
+    const ticket = await operations.createTicket({ companyId: actor.companyId, reportedByUserId: actor.userId, ...body });
+    return { status: 201, body: ticket };
+  });
+
+  httpServer.get('/api/operations/tickets', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'maintenance_ticket'))) {
+      throw new ForbiddenError('missing view:maintenance_ticket permission');
+    }
+    const unitId = ctx.query.get('unitId');
+    const tickets = unitId ? await operations.listForUnit(unitId, actor.companyId) : await operations.listForCompany(actor.companyId);
+    return { status: 200, body: paginate(tickets, ctx.query) };
+  });
+
+  httpServer.post('/api/operations/tickets/:ticketId/assign', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'maintenance_ticket'))) {
+      throw new ForbiddenError('missing edit:maintenance_ticket permission');
+    }
+    const body = parseJsonBody<{ assignedToUserId: string }>(ctx.body);
+    const ticket = await operations.assignTicket(ctx.params.ticketId!, actor.companyId, body.assignedToUserId);
+    return { status: 200, body: ticket };
+  });
+
+  httpServer.post('/api/operations/tickets/:ticketId/status', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'maintenance_ticket'))) {
+      throw new ForbiddenError('missing edit:maintenance_ticket permission');
+    }
+    const body = parseJsonBody<{ status: MaintenanceTicket['status'] }>(ctx.body);
+    const ticket = await operations.updateStatus(ctx.params.ticketId!, actor.companyId, body.status);
+    return { status: 200, body: ticket };
+  });
+
+  // ---- Legal: contract documents ----
+  httpServer.post('/api/legal/documents', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'legal_document'))) {
+      throw new ForbiddenError('missing create:legal_document permission');
+    }
+    const body = parseJsonBody<{ contractId: string; type: LegalDocument['type']; name: string; notes?: string }>(ctx.body);
+    const document = await legal.addDocument({ companyId: actor.companyId, uploadedByUserId: actor.userId, ...body });
+    return { status: 201, body: document };
+  });
+
+  httpServer.get('/api/legal/documents', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'legal_document'))) {
+      throw new ForbiddenError('missing view:legal_document permission');
+    }
+    const contractId = ctx.query.get('contractId');
+    const documents = contractId
+      ? await legal.listForContract(contractId, actor.companyId)
+      : await legal.listForCompany(actor.companyId);
+    return { status: 200, body: paginate(documents, ctx.query) };
+  });
+
+  httpServer.post('/api/legal/documents/:documentId/received', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'legal_document'))) {
+      throw new ForbiddenError('missing edit:legal_document permission');
+    }
+    const document = await legal.markReceived(ctx.params.documentId!, actor.companyId);
+    return { status: 200, body: document };
+  });
+
+  httpServer.post('/api/legal/documents/:documentId/verify', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'legal_document'))) {
+      throw new ForbiddenError('missing approve:legal_document permission');
+    }
+    const document = await legal.verifyDocument(ctx.params.documentId!, actor.companyId);
+    return { status: 200, body: document };
+  });
+
+  httpServer.post('/api/legal/documents/:documentId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'legal_document'))) {
+      throw new ForbiddenError('missing edit:legal_document permission');
+    }
+    const body = parseJsonBody<{ notes?: string }>(ctx.body);
+    const document = await legal.rejectDocument(ctx.params.documentId!, actor.companyId, body.notes);
+    return { status: 200, body: document };
+  });
+
+  // ---- Purchasing: vendors & purchase orders ----
+  httpServer.post('/api/purchasing/vendors', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'vendor'))) {
+      throw new ForbiddenError('missing create:vendor permission');
+    }
+    const body = parseJsonBody<{ name: string; category: string; contactPhone?: string; contactEmail?: string }>(ctx.body);
+    const vendor = await purchasing.registerVendor({ companyId: actor.companyId, ...body });
+    return { status: 201, body: vendor };
+  });
+
+  httpServer.get('/api/purchasing/vendors', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'vendor'))) {
+      throw new ForbiddenError('missing view:vendor permission');
+    }
+    const vendors = await purchasing.listVendors(actor.companyId);
+    return { status: 200, body: paginate(vendors, ctx.query) };
+  });
+
+  httpServer.post('/api/purchasing/vendors/:vendorId/deactivate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'vendor'))) {
+      throw new ForbiddenError('missing edit:vendor permission');
+    }
+    const vendor = await purchasing.deactivateVendor(ctx.params.vendorId!, actor.companyId);
+    return { status: 200, body: vendor };
+  });
+
+  httpServer.post('/api/purchasing/purchase-orders', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'purchase_order'))) {
+      throw new ForbiddenError('missing create:purchase_order permission');
+    }
+    const body = parseJsonBody<{ vendorId: string; projectId?: string; description: string; amount: number }>(ctx.body);
+    const order = await purchasing.createPurchaseOrder({ companyId: actor.companyId, createdByUserId: actor.userId, ...body });
+    return { status: 201, body: order };
+  });
+
+  httpServer.get('/api/purchasing/purchase-orders', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'purchase_order'))) {
+      throw new ForbiddenError('missing view:purchase_order permission');
+    }
+    const orders = await purchasing.listPurchaseOrders(actor.companyId);
+    return { status: 200, body: paginate(orders, ctx.query) };
+  });
+
+  httpServer.post('/api/purchasing/purchase-orders/:orderId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'purchase_order'))) {
+      throw new ForbiddenError('missing approve:purchase_order permission');
+    }
+    const order = await purchasing.approvePurchaseOrder(ctx.params.orderId!, actor.companyId);
+    return { status: 200, body: order };
+  });
+
+  httpServer.post('/api/purchasing/purchase-orders/:orderId/fulfill', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'purchase_order'))) {
+      throw new ForbiddenError('missing edit:purchase_order permission');
+    }
+    const order = await purchasing.fulfillPurchaseOrder(ctx.params.orderId!, actor.companyId);
+    return { status: 200, body: order };
+  });
+
+  httpServer.post('/api/purchasing/purchase-orders/:orderId/cancel', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'purchase_order'))) {
+      throw new ForbiddenError('missing edit:purchase_order permission');
+    }
+    const order = await purchasing.cancelPurchaseOrder(ctx.params.orderId!, actor.companyId);
+    return { status: 200, body: order };
+  });
+
+  // ---- Marketing: campaigns ----
+  httpServer.post('/api/marketing/campaigns', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'campaign'))) {
+      throw new ForbiddenError('missing create:campaign permission');
+    }
+    const body = parseJsonBody<{ name: string; channel: Campaign['channel']; budget: number; startDate: string; endDate?: string }>(ctx.body);
+    const campaign = await marketing.createCampaign({ companyId: actor.companyId, ...body });
+    return { status: 201, body: campaign };
+  });
+
+  httpServer.get('/api/marketing/campaigns', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'campaign'))) {
+      throw new ForbiddenError('missing view:campaign permission');
+    }
+    const campaigns = await marketing.listCampaigns(actor.companyId);
+    return { status: 200, body: paginate(campaigns, ctx.query) };
+  });
+
+  httpServer.post('/api/marketing/campaigns/:campaignId/status', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'campaign'))) {
+      throw new ForbiddenError('missing edit:campaign permission');
+    }
+    const body = parseJsonBody<{ status: Campaign['status'] }>(ctx.body);
+    const campaign = await marketing.updateStatus(ctx.params.campaignId!, actor.companyId, body.status);
+    return { status: 200, body: campaign };
+  });
+
+  httpServer.get('/api/marketing/campaigns/:campaignId/performance', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'campaign'))) {
+      throw new ForbiddenError('missing view:campaign permission');
+    }
+    const performance = await marketing.campaignPerformance(ctx.params.campaignId!, actor.companyId);
+    return { status: 200, body: performance };
+  });
+
+  // ---- Communication: internal messages ----
+  httpServer.post('/api/communication/messages', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'message'))) {
+      throw new ForbiddenError('missing create:message permission');
+    }
+    const body = parseJsonBody<{
+      toUserId?: string;
+      subject: string;
+      body: string;
+      channel?: Message['channel'];
+      relatedResource?: Message['relatedResource'];
+      relatedResourceId?: string;
+    }>(ctx.body);
+    const message = await communication.sendMessage({ companyId: actor.companyId, fromUserId: actor.userId, ...body });
+    return { status: 201, body: message };
+  });
+
+  httpServer.get('/api/communication/my-messages', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const messages = await communication.listForUser(actor.userId, actor.companyId);
+    return { status: 200, body: paginate(messages, ctx.query) };
+  });
+
+  httpServer.get('/api/communication/messages', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'message'))) {
+      throw new ForbiddenError('missing view:message permission');
+    }
+    const relatedResource = ctx.query.get('relatedResource') as Message['relatedResource'] | null;
+    const relatedResourceId = ctx.query.get('relatedResourceId');
+    const messages = relatedResource && relatedResourceId
+      ? await communication.listForResource(relatedResource, relatedResourceId, actor.companyId)
+      : await communication.listForCompany(actor.companyId);
+    return { status: 200, body: paginate(messages, ctx.query) };
+  });
+
+  httpServer.post('/api/communication/messages/:messageId/read', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const message = await communication.markRead(ctx.params.messageId!, actor.companyId, actor.userId);
+    return { status: 200, body: message };
+  });
+
+  // ---- Analytics & AI lead scoring ----
+  httpServer.get('/api/analytics/sales-funnel', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.salesFunnel(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/pipeline', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.pipelineSummary(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/collections-aging', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.collectionsAging(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/inventory-occupancy', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.inventoryOccupancy(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/broker-performance', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.brokerPerformance(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/lead-scores', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await leadScoring.rankedLeads(actor.companyId) };
+  });
+
+  httpServer.get('/api/crm/leads/:leadId/score', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'lead'))) {
+      throw new ForbiddenError('missing view:lead permission');
+    }
+    return { status: 200, body: await leadScoring.scoreLead(ctx.params.leadId!, actor.companyId) };
+  });
+
+  // ---- Customer Portal ----
+  httpServer.post('/api/portal/grant-access', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'portal_access'))) {
+      throw new ForbiddenError('missing create:portal_access permission');
+    }
+    const body = parseJsonBody<{ leadId: string; email: string; password: string }>(ctx.body);
+    const { customer } = await portal.grantPortalAccess({ companyId: actor.companyId, ...body });
+    return { status: 201, body: customer };
+  });
+
+  const customerActorOf = async (ctx: RequestContext): Promise<{ actor: Actor; customerId: string }> => {
+    const actor = await actorOf(ctx);
+    if (actor.userType !== 'customer_user') throw new ForbiddenError('this endpoint is for customer portal accounts only');
+    const user = await repos.users.findById(actor.userId);
+    if (!user?.customerId) throw new ForbiddenError('this account is not linked to a customer record');
+    return { actor, customerId: user.customerId };
+  };
+
+  httpServer.get('/api/portal/me', async (ctx) => {
+    const { actor, customerId } = await customerActorOf(ctx);
+    const customer = await portal.getCustomer(customerId, actor.companyId);
+    if (!customer) throw new NotFoundError('customer not found');
+    return { status: 200, body: customer };
+  });
+
+  httpServer.get('/api/portal/contracts', async (ctx) => {
+    const { actor, customerId } = await customerActorOf(ctx);
+    const contracts = await portal.myContracts(customerId, actor.companyId);
+    return { status: 200, body: paginate(contracts, ctx.query) };
+  });
+
+  httpServer.get('/api/portal/contracts/:contractId/schedule', async (ctx) => {
+    const { actor, customerId } = await customerActorOf(ctx);
+    const schedule = await portal.myContractSchedule(customerId, actor.companyId, ctx.params.contractId!);
+    return { status: 200, body: schedule };
+  });
+
   // ---- Audit ----
   httpServer.get('/api/audit-log', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -944,7 +1385,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
   return {
     httpServer,
     repos,
-    services: { rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding },
+    services: {
+      rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
+      hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
+    },
     seedResult,
   };
 }

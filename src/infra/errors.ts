@@ -71,3 +71,23 @@ export class BrokerError extends HttpError {
   }
 }
 export class OrgValidationError extends ValidationError {}
+export class HrError extends HttpError {
+  constructor(message: string, status = 409) {
+    super(status, message);
+  }
+}
+export class OperationsError extends HttpError {
+  constructor(message: string, status = 409) {
+    super(status, message);
+  }
+}
+export class LegalError extends HttpError {
+  constructor(message: string, status = 409) {
+    super(status, message);
+  }
+}
+export class PurchasingError extends HttpError {
+  constructor(message: string, status = 409) {
+    super(status, message);
+  }
+}
