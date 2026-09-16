@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" id="html-root">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ACTIVE Operating System — Manual Test Console</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 24px; line-height: 1.5; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid #8884; padding-bottom: 4px; }
+  label { display: block; margin-top: 8px; font-size: 0.9rem; }
+  input, select, button, textarea { font: inherit; padding: 6px 8px; margin-top: 2px; }
+  select, input[type="text"], input[type="number"], textarea { width: 100%; box-sizing: border-box; }
+  button { cursor: pointer; margin-top: 10px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 0.85rem; }
+  th, td { border: 1px solid #8884; padding: 4px 8px; text-align: left; }
+  [dir="rtl"] th, [dir="rtl"] td { text-align: right; }
+  pre { background: #8881; padding: 10px; overflow: auto; font-size: 0.8rem; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 200px; }
+  .allowed { color: #1a7f37; }
+  .denied { color: #cf222e; }
+  fieldset { margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="row">
+  <h1 style="flex:1">ACTIVE Operating System — Manual Test Console</h1>
+  <div>
+    <label>Lang / اللغة
+      <select id="lang-toggle">
+        <option value="en">English</option>
+        <option value="ar">العربية</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<fieldset>
+  <legend>Demo user (x-demo-user header — dev only)</legend>
+  <label>Role
+    <select id="demo-user-select"></select>
+  </label>
+</fieldset>
+
+<h2>Permission Manifest</h2>
+<button id="load-manifest">Load manifest for selected user</button>
+<table id="manifest-table">
+  <thead><tr><th>Resource</th><th>Action</th><th>Allowed</th><th>Scope</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>Payment Plan Template</h2>
+<div class="row">
+  <div>
+    <label>Name <input id="tpl-name" type="text" value="Standard 5yr Plan" /></label>
+    <label>Down payment type
+      <select id="tpl-dp-type"><option value="percentage">Percentage</option><option value="fixed">Fixed</option></select>
+    </label>
+    <label>Down payment value <input id="tpl-dp-value" type="number" value="10" /></label>
+    <label>Frequency
+      <select id="tpl-frequency">
+        <option value="monthly">Monthly</option>
+        <option value="quarterly">Quarterly</option>
+        <option value="semiannual">Semiannual</option>
+        <option value="annual">Annual</option>
+      </select>
+    </label>
+    <label>Term (months) <input id="tpl-term" type="number" value="60" /></label>
+    <button id="create-template">Create template</button>
+  </div>
+  <div>
+    <label>Template ID <input id="preview-template-id" type="text" placeholder="paste template id" /></label>
+    <label>Total price <input id="preview-total-price" type="number" value="2000000" /></label>
+    <label>Discount % <input id="preview-discount" type="number" value="0" /></label>
+    <button id="preview-schedule">Preview schedule</button>
+  </div>
+</div>
+<pre id="schedule-output">—</pre>
+
+<h2>Raw API console</h2>
+<div class="row">
+  <div>
+    <label>Method
+      <select id="raw-method"><option>GET</option><option>POST</option><option>PATCH</option></select>
+    </label>
+  </div>
+  <div><label>Path <input id="raw-path" type="text" value="/api/me/manifest" /></label></div>
+</div>
+<label>Body (JSON)<textarea id="raw-body" rows="4">{}</textarea></label>
+<button id="raw-send">Send</button>
+<pre id="raw-output">—</pre>
+
+<script>
+(function () {
+  const demoUsers = [
+    { label: 'CEO', userId: 'user-ceo' },
+    { label: 'Sales Manager', userId: 'user-sales-manager' },
+    { label: 'Sales Agent', userId: 'user-sales-agent' },
+    { label: 'Finance', userId: 'user-finance' },
+  ];
+  const select = document.getElementById('demo-user-select');
+  for (const u of demoUsers) {
+    const opt = document.createElement('option');
+    opt.value = u.userId;
+    opt.textContent = u.label + ' (' + u.userId + ')';
+    select.appendChild(opt);
+  }
+
+  function currentUserId() {
+    return select.value || demoUsers[0].userId;
+  }
+
+  async function apiFetch(path, options) {
+    options = options || {};
+    const headers = Object.assign({ 'Content-Type': 'application/json', 'x-demo-user': currentUserId() }, options.headers || {});
+    const res = await fetch(path, Object.assign({}, options, { headers }));
+    const text = await res.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = text; }
+    return { status: res.status, body };
+  }
+
+  document.getElementById('lang-toggle').addEventListener('change', (e) => {
+    const html = document.getElementById('html-root');
+    if (e.target.value === 'ar') {
+      html.setAttribute('lang', 'ar');
+      html.setAttribute('dir', 'rtl');
+    } else {
+      html.setAttribute('lang', 'en');
+      html.setAttribute('dir', 'ltr');
+    }
+  });
+
+  document.getElementById('load-manifest').addEventListener('click', async () => {
+    const { body } = await apiFetch('/api/me/manifest');
+    const tbody = document.querySelector('#manifest-table tbody');
+    tbody.innerHTML = '';
+    if (!body.entries) return;
+    for (const entry of body.entries) {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + entry.resource + '</td>' +
+        '<td>' + entry.action + '</td>' +
+        '<td class="' + (entry.allowed ? 'allowed' : 'denied') + '">' + (entry.allowed ? 'yes' : 'no') + '</td>' +
+        '<td>' + entry.scope + '</td>';
+      tbody.appendChild(tr);
+    }
+  });
+
+  document.getElementById('create-template').addEventListener('click', async () => {
+    const payload = {
+      name: document.getElementById('tpl-name').value,
+      downPaymentType: document.getElementById('tpl-dp-type').value,
+      downPaymentValue: Number(document.getElementById('tpl-dp-value').value),
+      frequency: document.getElementById('tpl-frequency').value,
+      termMonths: Number(document.getElementById('tpl-term').value),
+      fees: [],
+    };
+    const { body } = await apiFetch('/api/payment-plan-templates', { method: 'POST', body: JSON.stringify(payload) });
+    document.getElementById('schedule-output').textContent = JSON.stringify(body, null, 2);
+    if (body.id) document.getElementById('preview-template-id').value = body.id;
+  });
+
+  document.getElementById('preview-schedule').addEventListener('click', async () => {
+    const templateId = document.getElementById('preview-template-id').value;
+    const payload = {
+      templateId,
+      totalPrice: Number(document.getElementById('preview-total-price').value),
+      discountPercent: Number(document.getElementById('preview-discount').value),
+    };
+    const { body } = await apiFetch('/api/contracts/preview/payment-schedule/preview', { method: 'POST', body: JSON.stringify(payload) });
+    document.getElementById('schedule-output').textContent = JSON.stringify(body, null, 2);
+  });
+
+  document.getElementById('raw-send').addEventListener('click', async () => {
+    const method = document.getElementById('raw-method').value;
+    const path = document.getElementById('raw-path').value;
+    const bodyText = document.getElementById('raw-body').value.trim();
+    const options = { method };
+    if (method !== 'GET' && bodyText) options.body = bodyText;
+    const { status, body } = await apiFetch(path, options);
+    document.getElementById('raw-output').textContent = 'HTTP ' + status + '\n' + JSON.stringify(body, null, 2);
+  });
+})();
+</script>
+</body>
+</html>

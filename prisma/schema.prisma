@@ -1,0 +1,212 @@
+// Hand-written, believed syntactically correct — never run through
+// `prisma validate` or connected to a real Postgres instance in this
+// environment (network to registry.npmjs.org / Ubuntu's package archives has
+// been blocked in prior sessions of this project; unverified here too).
+// Swapping InMemoryRepository<T> for a Prisma-backed Repository<T> is meant
+// to be a repository-layer change only — see src/infra/repository.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id        String   @id @default(uuid())
+  companyId String // self-referencing: companyId === id
+  name      String
+  createdAt DateTime @default(now())
+
+  employees Employee[]
+}
+
+model Branch {
+  id        String @id @default(uuid())
+  companyId String
+  name      String
+}
+
+model Department {
+  id        String @id @default(uuid())
+  companyId String
+  name      String
+}
+
+model Team {
+  id        String @id @default(uuid())
+  companyId String
+  name      String
+}
+
+model Position {
+  id        String @id @default(uuid())
+  companyId String
+  title     String
+}
+
+model Employee {
+  id                String   @id @default(uuid())
+  companyId         String
+  fullName          String
+  email             String
+  title             String
+  departmentId      String?
+  branchId          String?
+  teamId            String?
+  managerEmployeeId String?
+  status            String   @default("active")
+  createdAt         DateTime @default(now())
+  terminatedAt      DateTime?
+
+  company Company @relation(fields: [companyId], references: [id])
+  manager Employee? @relation("ReportsTo", fields: [managerEmployeeId], references: [id])
+  reports Employee[] @relation("ReportsTo")
+
+  assignmentHistory EmployeeAssignmentHistory[]
+}
+
+model EmployeeAssignmentHistory {
+  id         String   @id @default(uuid())
+  employeeId String
+  fromManagerEmployeeId String?
+  toManagerEmployeeId   String?
+  changedAt  DateTime @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+}
+
+model User {
+  id               String    @id @default(uuid())
+  companyId        String
+  email            String
+  passwordHash     String
+  userType         String
+  employeeId       String?
+  brokerEmployeeId String?
+  brokerCompanyId  String?
+  customerId       String?
+  locale           String    @default("en")
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@unique([companyId, email])
+}
+
+model Role {
+  id       String  @id @default(uuid())
+  companyId String
+  name     String
+  isSystem Boolean @default(false)
+
+  grants PermissionGrant[]
+}
+
+model PermissionGrant {
+  id          String @id @default(uuid())
+  roleId      String
+  action      String
+  resource    String
+  scope       String
+  sensitivity String @default("standard")
+
+  role Role @relation(fields: [roleId], references: [id])
+}
+
+model UserRole {
+  id        String    @id @default(uuid())
+  userId    String
+  roleId    String
+  expiresAt DateTime?
+}
+
+model PermissionOverride {
+  id        String    @id @default(uuid())
+  userId    String
+  action    String
+  resource  String
+  effect    String // 'grant' | 'revoke'
+  expiresAt DateTime?
+}
+
+model PaymentPlanTemplate {
+  id                String   @id @default(uuid())
+  companyId         String
+  projectId         String?
+  name              String
+  version           Int      @default(1)
+  downPaymentType   String
+  downPaymentValue  Float
+  frequency         String
+  customMonthInterval Int?
+  termMonths        Int
+  fees              Json
+  createdAt         DateTime @default(now())
+  archived          Boolean  @default(false)
+
+  scheduleLines PaymentScheduleLine[]
+}
+
+model PaymentScheduleLine {
+  id                     String   @id @default(uuid())
+  companyId              String
+  contractId             String
+  sourceTemplateId       String
+  sourceTemplateVersion  Int
+  sequence               Int
+  label                  String
+  dueDate                DateTime
+  amount                 Float
+  amountPaid             Float    @default(0)
+  status                 String   @default("upcoming")
+
+  sourceTemplate PaymentPlanTemplate @relation(fields: [sourceTemplateId], references: [id])
+
+  @@index([contractId])
+}
+
+model PostdatedCheque {
+  id          String   @id @default(uuid())
+  companyId   String
+  paymentId   String
+  chequeNumber String
+  bankName    String
+  dueDate     DateTime
+  status      String   @default("pending")
+}
+
+model ComplianceDocumentTemplate {
+  id        String @id @default(uuid())
+  companyId String
+  name      String
+  bodyHtml  String
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  companyId  String
+  actorUserId String
+  action     String
+  resource   String
+  resourceId String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([companyId, createdAt])
+}
+
+// Expected production concurrency strategy (never executed against a real
+// database — the in-memory KeyedMutex is a tested stand-in for a
+// single-instance deployment only):
+//
+//   BEGIN;
+//   SELECT * FROM "Reservation" WHERE id = $1 FOR UPDATE;
+//   -- idempotency check + INSERT INTO "Contract" ...
+//   COMMIT;
+//
+// combined with a unique partial index such as:
+//   CREATE UNIQUE INDEX active_reservation_per_unit
+//     ON "Reservation" (unitId) WHERE status = 'active';
