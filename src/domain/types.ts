@@ -9,6 +9,22 @@ export interface Company {
   createdAt: string;
 }
 
+export interface Branch {
+  id: string;
+  companyId: string;
+  name: string;
+  address?: string;
+  createdAt: string;
+}
+
+export interface Department {
+  id: string;
+  companyId: string;
+  name: string;
+  branchId?: string;
+  createdAt: string;
+}
+
 export type EmployeeStatus = 'active' | 'terminated';
 
 export interface Employee {
@@ -57,7 +73,19 @@ export type ResourceName =
   | 'contract'
   | 'broker_company'
   | 'audit_log'
-  | 'role';
+  | 'role'
+  | 'branch'
+  | 'department'
+  | 'project'
+  | 'leave_request'
+  | 'maintenance_ticket'
+  | 'legal_document'
+  | 'vendor'
+  | 'purchase_order'
+  | 'campaign'
+  | 'message'
+  | 'analytics'
+  | 'portal_access';
 
 export type ActionName =
   | 'view'
@@ -160,6 +188,14 @@ export interface PaymentScheduleLine {
 }
 
 // ---- Inventory ----
+
+export interface Project {
+  id: string;
+  companyId: string;
+  name: string;
+  location?: string;
+  createdAt: string;
+}
 
 export type UnitStatus = 'available' | 'held' | 'reserved' | 'contracted' | 'cancelled';
 
@@ -330,5 +366,142 @@ export interface AuditLogEntry {
   resource: string;
   resourceId: string;
   metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+// ---- HR ----
+
+export type LeaveType = 'annual' | 'sick' | 'unpaid' | 'other';
+export type LeaveRequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+
+export interface LeaveRequest {
+  id: string;
+  companyId: string;
+  employeeId: string;
+  type: LeaveType;
+  startDate: string;
+  endDate: string;
+  reason?: string;
+  status: LeaveRequestStatus;
+  requestedAt: string;
+  decidedByUserId?: string;
+  decidedAt?: string;
+}
+
+// ---- Operations ----
+
+export type MaintenancePriority = 'low' | 'medium' | 'high' | 'urgent';
+export type MaintenanceStatus = 'open' | 'in_progress' | 'resolved' | 'closed';
+
+export interface MaintenanceTicket {
+  id: string;
+  companyId: string;
+  unitId: string;
+  title: string;
+  description?: string;
+  priority: MaintenancePriority;
+  status: MaintenanceStatus;
+  reportedByUserId: string;
+  assignedToUserId?: string;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+// ---- Legal ----
+
+export type LegalDocumentType = 'title_deed' | 'power_of_attorney' | 'nda' | 'id_verification' | 'other';
+export type LegalDocumentStatus = 'pending' | 'received' | 'verified' | 'rejected';
+
+export interface LegalDocument {
+  id: string;
+  companyId: string;
+  contractId: string;
+  type: LegalDocumentType;
+  name: string;
+  status: LegalDocumentStatus;
+  notes?: string;
+  uploadedByUserId: string;
+  createdAt: string;
+  verifiedAt?: string;
+}
+
+// ---- Purchasing ----
+
+export type VendorStatus = 'active' | 'inactive';
+
+export interface Vendor {
+  id: string;
+  companyId: string;
+  name: string;
+  category: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  status: VendorStatus;
+  createdAt: string;
+}
+
+export type PurchaseOrderStatus = 'draft' | 'approved' | 'fulfilled' | 'cancelled';
+
+export interface PurchaseOrder {
+  id: string;
+  companyId: string;
+  vendorId: string;
+  projectId?: string;
+  description: string;
+  amount: number;
+  status: PurchaseOrderStatus;
+  createdByUserId: string;
+  createdAt: string;
+  approvedAt?: string;
+  fulfilledAt?: string;
+}
+
+// ---- Marketing ----
+
+export type CampaignChannel = 'digital' | 'print' | 'event' | 'referral' | 'other';
+export type CampaignStatus = 'planned' | 'active' | 'completed' | 'cancelled';
+
+export interface Campaign {
+  id: string;
+  companyId: string;
+  name: string;
+  channel: CampaignChannel;
+  budget: number;
+  startDate: string;
+  endDate?: string;
+  status: CampaignStatus;
+  createdAt: string;
+}
+
+// ---- Communication ----
+
+export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket';
+export type MessageChannel = 'internal' | 'email' | 'whatsapp' | 'sms';
+export type MessageStatus = 'sent' | 'read';
+
+export interface Message {
+  id: string;
+  companyId: string;
+  relatedResource?: MessageRelatedResource;
+  relatedResourceId?: string;
+  fromUserId: string;
+  toUserId?: string;
+  subject: string;
+  body: string;
+  channel: MessageChannel;
+  status: MessageStatus;
+  createdAt: string;
+  readAt?: string;
+}
+
+// ---- Customer Portal ----
+
+export interface Customer {
+  id: string;
+  companyId: string;
+  leadId: string;
+  fullName: string;
+  phone: string;
+  email?: string;
   createdAt: string;
 }

@@ -2,10 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { OrganizationService } from './organization.service.js';
-import type { Company, Employee } from '../../domain/types.js';
+import type { Branch, Company, Department, Employee } from '../../domain/types.js';
 
 function freshService() {
-  return new OrganizationService(new InMemoryRepository<Company>(), new InMemoryRepository<Employee>());
+  return new OrganizationService(
+    new InMemoryRepository<Company>(),
+    new InMemoryRepository<Employee>(),
+    new InMemoryRepository<Branch>(),
+    new InMemoryRepository<Department>(),
+  );
 }
 
 test('creating an employee with a manager that does not exist in the company fails', async () => {
@@ -65,4 +70,52 @@ test('listEmployees only returns employees for the requested company (multi-tena
   const c1Employees = await svc.listEmployees('c1');
   assert.equal(c1Employees.length, 1);
   assert.equal(c1Employees[0]!.email, 'e1@c1.com');
+});
+
+test('creating a branch then listing it scoped to the company', async () => {
+  const svc = freshService();
+  await svc.createBranch({ companyId: 'c1', name: 'Cairo HQ' });
+  await svc.createBranch({ companyId: 'c2', name: 'Other Co Branch' });
+  const branches = await svc.listBranches('c1');
+  assert.equal(branches.length, 1);
+  assert.equal(branches[0]!.name, 'Cairo HQ');
+});
+
+test('creating a branch rejects an empty name', async () => {
+  const svc = freshService();
+  await assert.rejects(() => svc.createBranch({ companyId: 'c1', name: '  ' }));
+});
+
+test('creating a department with a branch from a different company is rejected', async () => {
+  const svc = freshService();
+  const branch = await svc.createBranch({ companyId: 'c2', name: 'Other Co Branch' });
+  await assert.rejects(() => svc.createDepartment({ companyId: 'c1', name: 'Sales', branchId: branch.id }));
+});
+
+test('creating a department linked to a valid branch succeeds', async () => {
+  const svc = freshService();
+  const branch = await svc.createBranch({ companyId: 'c1', name: 'Cairo HQ' });
+  const department = await svc.createDepartment({ companyId: 'c1', name: 'Sales', branchId: branch.id });
+  assert.equal(department.branchId, branch.id);
+});
+
+test('creating an employee with a branchId from a different company is rejected', async () => {
+  const svc = freshService();
+  const branch = await svc.createBranch({ companyId: 'c2', name: 'Other Co Branch' });
+  await assert.rejects(() => svc.createEmployee({ companyId: 'c1', fullName: 'Bob', email: 'bob@c1.com', title: 'Agent', branchId: branch.id }));
+});
+
+test('creating an employee with a departmentId from a different company is rejected', async () => {
+  const svc = freshService();
+  const department = await svc.createDepartment({ companyId: 'c2', name: 'Other Co Dept' });
+  await assert.rejects(() => svc.createEmployee({ companyId: 'c1', fullName: 'Bob', email: 'bob@c1.com', title: 'Agent', departmentId: department.id }));
+});
+
+test('creating an employee with a valid branch and department succeeds', async () => {
+  const svc = freshService();
+  const branch = await svc.createBranch({ companyId: 'c1', name: 'Cairo HQ' });
+  const department = await svc.createDepartment({ companyId: 'c1', name: 'Sales', branchId: branch.id });
+  const employee = await svc.createEmployee({ companyId: 'c1', fullName: 'Bob', email: 'bob@c1.com', title: 'Agent', branchId: branch.id, departmentId: department.id });
+  assert.equal(employee.branchId, branch.id);
+  assert.equal(employee.departmentId, department.id);
 });

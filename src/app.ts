@@ -1,11 +1,13 @@
 import type {
   AuditLogEntry,
+  Branch,
   BrokerCompany,
   BrokerLead,
   Commission,
   CommissionRule,
   Company,
   Contract,
+  Department,
   Employee,
   Lead,
   Opportunity,
@@ -13,6 +15,7 @@ import type {
   PaymentPlanTemplate,
   PaymentScheduleLine,
   PermissionGrant,
+  Project,
   Receipt,
   Reservation,
   Role,
@@ -88,6 +91,9 @@ function buildRepos(db?: DatabaseSync) {
   return {
     companies: repo<Company>('companies'),
     employees: repo<Employee>('employees'),
+    branches: repo<Branch>('branches'),
+    departments: repo<Department>('departments'),
+    projects: repo<Project>('projects'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
@@ -182,10 +188,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
     overrides: repos.overrides,
   });
   const auditLog = new AuditLog(repos.auditEntries);
-  const organization = new OrganizationService(repos.companies, repos.employees);
+  const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
   const auth = new AuthService(repos.users, options.tokenSecret);
   const crm = new CrmService(repos.leads);
-  const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations);
+  const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines);
@@ -352,6 +358,45 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const employee = await organization.terminate(ctx.params.employeeId!, actor.companyId);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'employee', resourceId: employee.id });
     return { status: 200, body: employee };
+  });
+
+  // ---- Branches & Departments ----
+  httpServer.post('/api/organization/branches', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'branch'))) {
+      throw new ForbiddenError('missing create:branch permission');
+    }
+    const body = parseJsonBody<{ name: string; address?: string }>(ctx.body);
+    const branch = await organization.createBranch({ companyId: actor.companyId, ...body });
+    return { status: 201, body: branch };
+  });
+
+  httpServer.get('/api/organization/branches', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'branch'))) {
+      throw new ForbiddenError('missing view:branch permission');
+    }
+    const branches = await organization.listBranches(actor.companyId);
+    return { status: 200, body: paginate(branches, ctx.query) };
+  });
+
+  httpServer.post('/api/organization/departments', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'department'))) {
+      throw new ForbiddenError('missing create:department permission');
+    }
+    const body = parseJsonBody<{ name: string; branchId?: string }>(ctx.body);
+    const department = await organization.createDepartment({ companyId: actor.companyId, ...body });
+    return { status: 201, body: department };
+  });
+
+  httpServer.get('/api/organization/departments', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'department'))) {
+      throw new ForbiddenError('missing view:department permission');
+    }
+    const departments = await organization.listDepartments(actor.companyId);
+    return { status: 200, body: paginate(departments, ctx.query) };
   });
 
   // ---- Permission Manifest ----
@@ -528,6 +573,25 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
 
   // ---- Inventory ----
+  httpServer.post('/api/inventory/projects', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) {
+      throw new ForbiddenError('missing create:project permission');
+    }
+    const body = parseJsonBody<{ name: string; location?: string }>(ctx.body);
+    const project = await inventory.createProject({ companyId: actor.companyId, ...body });
+    return { status: 201, body: project };
+  });
+
+  httpServer.get('/api/inventory/projects', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) {
+      throw new ForbiddenError('missing view:project permission');
+    }
+    const projects = await inventory.listProjects(actor.companyId);
+    return { status: 200, body: paginate(projects, ctx.query) };
+  });
+
   httpServer.post('/api/inventory/units', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {

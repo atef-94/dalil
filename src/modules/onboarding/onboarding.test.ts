@@ -7,7 +7,7 @@ import { RoleManagementService } from '../permissions/role-management.service.js
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
 import { OnboardingService } from './onboarding.service.js';
 import { RESOURCES, ACTIONS } from '../permissions/manifest.builder.js';
-import type { Company, Employee, PermissionGrant, PermissionOverride, Role, User, UserRole } from '../../domain/types.js';
+import type { Branch, Company, Department, Employee, PermissionGrant, PermissionOverride, Role, User, UserRole } from '../../domain/types.js';
 
 function freshOnboarding() {
   const repos = {
@@ -18,8 +18,10 @@ function freshOnboarding() {
     grants: new InMemoryRepository<PermissionGrant>(),
     userRoles: new InMemoryRepository<UserRole>(),
     overrides: new InMemoryRepository<PermissionOverride>(),
+    branches: new InMemoryRepository<Branch>(),
+    departments: new InMemoryRepository<Department>(),
   };
-  const organization = new OrganizationService(repos.companies, repos.employees);
+  const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
   const auth = new AuthService(repos.users, 'test-secret');
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
   const rbac = new RbacEvaluator(repos);

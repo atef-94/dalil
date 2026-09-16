@@ -45,6 +45,18 @@ const ALL_RESOURCES: ResourceName[] = [
   'broker_company',
   'audit_log',
   'role',
+  'branch',
+  'department',
+  'project',
+  'leave_request',
+  'maintenance_ticket',
+  'legal_document',
+  'vendor',
+  'purchase_order',
+  'campaign',
+  'message',
+  'analytics',
+  'portal_access',
 ];
 
 /**

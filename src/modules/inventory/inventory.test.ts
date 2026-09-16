@@ -2,15 +2,40 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { InventoryService } from './inventory.service.js';
-import type { Reservation, Unit, UnitHold } from '../../domain/types.js';
+import type { Project, Reservation, Unit, UnitHold } from '../../domain/types.js';
 
 function freshService() {
-  return new InventoryService(new InMemoryRepository<Unit>(), new InMemoryRepository<UnitHold>(), new InMemoryRepository<Reservation>());
+  return new InventoryService(
+    new InMemoryRepository<Unit>(),
+    new InMemoryRepository<UnitHold>(),
+    new InMemoryRepository<Reservation>(),
+    new InMemoryRepository<Project>(),
+  );
 }
 
 test('creating a unit validates required fields', async () => {
   const svc = freshService();
   await assert.rejects(() => svc.createUnit({ companyId: 'c1', projectId: 'p1', code: '', unitType: 'apartment', areaSqm: 100, listPrice: 1000 }));
+});
+
+test('creating a project then listing it scoped to the company', async () => {
+  const svc = freshService();
+  await svc.createProject({ companyId: 'c1', name: 'Marina Towers', location: 'North Coast' });
+  await svc.createProject({ companyId: 'c2', name: 'Other Co Project' });
+  const projects = await svc.listProjects('c1');
+  assert.equal(projects.length, 1);
+  assert.equal(projects[0]!.name, 'Marina Towers');
+});
+
+test('creating a project rejects an empty name', async () => {
+  const svc = freshService();
+  await assert.rejects(() => svc.createProject({ companyId: 'c1', name: '' }));
+});
+
+test('creating a unit with a free-text projectId that does not match a real Project still succeeds (backward compatible)', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'legacy-free-text-id', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  assert.equal(unit.projectId, 'legacy-free-text-id');
 });
 
 test('duplicate unit code within the same company is rejected', async () => {
