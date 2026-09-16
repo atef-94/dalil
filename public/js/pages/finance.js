@@ -11,12 +11,16 @@ export async function renderFinance(container) {
 
   const sweepBtn = el('button', {}, 'Sweep overdue payments now');
   sweepBtn.addEventListener('click', async () => {
+    clear(errorSlot);
+    sweepBtn.disabled = true;
     try {
       const result = await api.post('/api/finance/sweep-overdue', {});
       toast(`${result.swept} schedule line(s) marked overdue.`, 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      sweepBtn.disabled = false;
     }
   });
   container.appendChild(el('div', { class: 'card' }, [
@@ -36,7 +40,16 @@ export async function renderFinance(container) {
   const recordBtn = el('button', { class: 'primary' }, 'Record payment');
 
   recordBtn.addEventListener('click', async () => {
-    if (!contractSelect.value || !recordLineSelect.value) return;
+    clear(errorSlot);
+    if (!contractSelect.value || !recordLineSelect.value) {
+      errorSlot.appendChild(errorBanner('Choose a contract and a schedule line first.'));
+      return;
+    }
+    if (!(Number(recordAmount.value) > 0)) {
+      errorSlot.appendChild(errorBanner('Enter a payment amount greater than zero.'));
+      return;
+    }
+    recordBtn.disabled = true;
     try {
       await api.post('/api/finance/payments', {
         contractId: contractSelect.value,
@@ -49,6 +62,8 @@ export async function renderFinance(container) {
       await loadContractDetail();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      recordBtn.disabled = false;
     }
   });
 

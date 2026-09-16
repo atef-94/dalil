@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, selectInput, formModal, loadingState } from '../ui.js';
 import { api } from '../api.js';
 
 // Tracks reservationId + unit price per opportunity for this browser session,
@@ -16,13 +16,20 @@ export async function renderOpportunities(container) {
   const leadSelect = selectInput([], { id: 'opp-lead-select' });
   const createBtn = el('button', { class: 'primary' }, 'Create opportunity');
   createBtn.addEventListener('click', async () => {
-    if (!leadSelect.value) return;
+    clear(errorSlot);
+    if (!leadSelect.value) {
+      errorSlot.appendChild(errorBanner('No qualified lead selected — qualify a lead in Leads first.'));
+      return;
+    }
+    createBtn.disabled = true;
     try {
       await api.post('/api/sales/opportunities', { leadId: leadSelect.value });
       toast('Opportunity created.', 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      createBtn.disabled = false;
     }
   });
   const createCard = el('div', { class: 'card' }, [
@@ -43,10 +50,18 @@ export async function renderOpportunities(container) {
         errorSlot.appendChild(errorBanner('No available units to reserve. Add one in Inventory first.'));
         return;
       }
-      const codes = available.map((u) => `${u.code} (${Number(u.listPrice).toLocaleString()})`).join(', ');
-      const chosenCode = window.prompt(`Which unit code to reserve? Available: ${codes}`);
-      const unit = available.find((u) => u.code === chosenCode?.trim());
-      if (!unit) return;
+      const result = await formModal({
+        title: 'Reserve a unit',
+        fields: [{
+          key: 'unitId',
+          label: 'Unit',
+          type: 'select',
+          options: available.map((u) => ({ value: u.id, label: `${u.code} — ${Number(u.listPrice).toLocaleString()}` })),
+        }],
+        submitLabel: 'Reserve',
+      });
+      if (!result || !result.unitId) return;
+      const unit = available.find((u) => u.id === result.unitId);
       const reservation = await api.post(`/api/sales/opportunities/${opportunity.id}/reserve-unit`, { unitId: unit.id });
       sessionReservations.set(opportunity.id, { reservationId: reservation.id, unitPrice: unit.listPrice });
       toast('Unit reserved.', 'success');
@@ -59,7 +74,7 @@ export async function renderOpportunities(container) {
   async function signContract(opportunity) {
     const cached = sessionReservations.get(opportunity.id);
     if (!cached) {
-      errorSlot.appendChild(errorBanner('Reservation not found in this session — reserve a unit for this opportunity again first.'));
+      errorSlot.appendChild(errorBanner('Reservation not found in this browser session — reserve a unit for this opportunity again first (the reservation isn’t otherwise addressable from the opportunity alone).'));
       return;
     }
     try {
@@ -68,16 +83,24 @@ export async function renderOpportunities(container) {
         errorSlot.appendChild(errorBanner('No payment plan templates exist yet. Create one in Payment Plans first.'));
         return;
       }
-      const names = templatesPage.items.map((t) => t.name).join(', ');
-      const chosenName = window.prompt(`Which payment plan template? Available: ${names}`, templatesPage.items[0].name);
-      const template = templatesPage.items.find((t) => t.name === chosenName?.trim());
-      if (!template) return;
-      const priceStr = window.prompt('Total contract price:', String(cached.unitPrice));
-      if (!priceStr) return;
+      const result = await formModal({
+        title: 'Sign contract',
+        fields: [
+          {
+            key: 'templateId',
+            label: 'Payment plan template',
+            type: 'select',
+            options: templatesPage.items.map((t) => ({ value: t.id, label: t.name })),
+          },
+          { key: 'totalPrice', label: 'Total contract price', type: 'number', value: String(cached.unitPrice) },
+        ],
+        submitLabel: 'Sign contract',
+      });
+      if (!result || !result.templateId || !result.totalPrice) return;
       const contract = await api.post('/api/sales/contracts', {
         reservationId: cached.reservationId,
-        paymentPlanTemplateId: template.id,
-        totalPrice: Number(priceStr),
+        paymentPlanTemplateId: result.templateId,
+        totalPrice: Number(result.totalPrice),
       });
       toast(`Contract signed (${contract.id.slice(0, 8)}…).`, 'success');
       await load();
@@ -88,6 +111,7 @@ export async function renderOpportunities(container) {
 
   async function load() {
     clear(listSlot);
+    listSlot.appendChild(loadingState());
     try {
       const [leadsPage, oppsPage] = await Promise.all([
         api.get('/api/crm/leads', { limit: 200 }),
@@ -100,6 +124,7 @@ export async function renderOpportunities(container) {
         leadSelect.appendChild(el('option', { value: '' }, 'No qualified leads yet'));
       }
 
+      clear(listSlot);
       listSlot.appendChild(table(
         [
           { label: 'Lead', render: (o) => leadsPage.items.find((l) => l.id === o.leadId)?.fullName ?? o.leadId },

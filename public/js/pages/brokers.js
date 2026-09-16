@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderBrokers(container) {
@@ -10,7 +10,12 @@ export async function renderBrokers(container) {
   const nameInput = el('input', { type: 'text', placeholder: 'Acme Brokerage' });
   const registerBtn = el('button', { class: 'primary' }, 'Register broker company');
   registerBtn.addEventListener('click', async () => {
-    if (!nameInput.value.trim()) return;
+    clear(errorSlot);
+    if (!nameInput.value.trim()) {
+      errorSlot.appendChild(errorBanner('Enter a broker company name.'));
+      return;
+    }
+    registerBtn.disabled = true;
     try {
       await api.post('/api/brokers/companies', { name: nameInput.value.trim() });
       nameInput.value = '';
@@ -18,6 +23,8 @@ export async function renderBrokers(container) {
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      registerBtn.disabled = false;
     }
   });
   container.appendChild(el('div', { class: 'card' }, [
@@ -30,22 +37,24 @@ export async function renderBrokers(container) {
   const leadsSlot = el('div', { class: 'card' });
   container.append(companiesSlot, leadsSlot);
 
-  async function approveCompany(bc) {
+  async function approveCompany(bc, btn) {
     try {
       await api.post(`/api/brokers/companies/${bc.id}/approve`, {});
       toast('Broker company approved.', 'success');
       await load();
     } catch (err) {
+      btn.disabled = false;
       errorSlot.appendChild(errorBanner(err.message));
     }
   }
 
-  async function approveLead(bl) {
+  async function approveLead(bl, btn) {
     try {
       await api.post(`/api/brokers/leads/${bl.id}/approve`, {});
       toast('Broker lead approved and added to the shared CRM.', 'success');
       await load();
     } catch (err) {
+      btn.disabled = false;
       errorSlot.appendChild(errorBanner(err.message));
     }
   }
@@ -53,8 +62,11 @@ export async function renderBrokers(container) {
   async function load() {
     clear(companiesSlot);
     companiesSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Broker companies'));
+    const companiesLoading = loadingState();
+    companiesSlot.appendChild(companiesLoading);
     try {
       const page = await api.get('/api/brokers/companies', { limit: 50 });
+      companiesLoading.remove();
       companiesSlot.appendChild(table(
         [
           { label: 'Name', key: 'name' },
@@ -62,7 +74,7 @@ export async function renderBrokers(container) {
           { label: '', render: (bc) => {
             if (bc.status !== 'pending') return '';
             const btn = el('button', {}, 'Approve');
-            btn.addEventListener('click', () => approveCompany(bc));
+            btn.addEventListener('click', () => { btn.disabled = true; approveCompany(bc, btn); });
             return btn;
           } },
         ],
@@ -70,13 +82,17 @@ export async function renderBrokers(container) {
         { empty: 'No broker companies yet.' },
       ));
     } catch (err) {
+      companiesLoading.remove();
       companiesSlot.appendChild(errorBanner(err.message));
     }
 
     clear(leadsSlot);
     leadsSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Broker-submitted leads (quarantine queue)'));
+    const leadsLoading = loadingState();
+    leadsSlot.appendChild(leadsLoading);
     try {
       const page = await api.get('/api/brokers/leads', { limit: 50 });
+      leadsLoading.remove();
       leadsSlot.appendChild(table(
         [
           { label: 'Name', key: 'fullName' },
@@ -85,7 +101,7 @@ export async function renderBrokers(container) {
           { label: '', render: (bl) => {
             if (bl.approvalStatus !== 'pending_approval') return '';
             const btn = el('button', { class: 'primary' }, 'Approve');
-            btn.addEventListener('click', () => approveLead(bl));
+            btn.addEventListener('click', () => { btn.disabled = true; approveLead(bl, btn); });
             return btn;
           } },
         ],
@@ -93,6 +109,7 @@ export async function renderBrokers(container) {
         { empty: 'No broker-submitted leads yet — they land here only after a broker_user account submits one.' },
       ));
     } catch (err) {
+      leadsLoading.remove();
       leadsSlot.appendChild(errorBanner(err.message));
     }
   }

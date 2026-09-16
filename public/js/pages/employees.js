@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, paginationControls } from '../ui.js';
+import { el, clear, table, toast, errorBanner, paginationControls, loadingState } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderEmployees(container) {
@@ -58,8 +58,10 @@ export async function renderEmployees(container) {
 
   async function load() {
     clear(listSlot);
+    listSlot.appendChild(loadingState());
     try {
       const page = await api.get('/api/organization/employees', { limit: 20, offset });
+      clear(listSlot);
       const rows = table(
         [
           { label: 'Name', key: 'fullName' },

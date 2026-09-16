@@ -25,14 +25,12 @@ page.on('response', (res) => {
   }
 });
 
-// A single persistent dialog handler pulling from a queue — safer than
-// stacking multiple page.once('dialog', ...) calls, which can double-fire
-// against the same native dialog when a flow triggers several prompts in a row.
-const dialogQueue = [];
+// The app no longer uses window.prompt/confirm — it has real in-app modals
+// (.modal-overlay/.modal-card, see public/js/ui.js). No native dialog
+// handler is needed; interact with the modal DOM directly instead.
 page.on('dialog', (dialog) => {
-  const value = dialogQueue.shift();
-  if (value === undefined) dialog.dismiss();
-  else dialog.accept(value);
+  step('no unexpected native browser dialogs', false, `unexpected dialog: ${dialog.message()}`);
+  dialog.dismiss();
 });
 
 const rand = Math.random().toString(36).slice(2, 8);
@@ -78,6 +76,21 @@ try {
   await page.waitForSelector('.badge:has-text("qualified")', { timeout: 5000 });
   step('lead advances through status transitions', true);
 
+  // A second, disposable lead just to exercise the "mark lost" modal
+  // (a textarea-based formModal) without disturbing the qualified lead the
+  // rest of the flow depends on.
+  await page.fill('input[placeholder="Full name"]', 'Disposable Lost Lead');
+  await page.fill('input[placeholder="010-000-0000"]', '0509999999');
+  await page.click('button:has-text("Add lead")');
+  await page.waitForSelector('text=Disposable Lost Lead', { timeout: 5000 });
+  const lostLeadRow = page.locator('tr', { hasText: 'Disposable Lost Lead' });
+  await lostLeadRow.locator('button:has-text("Mark lost")').click();
+  await page.waitForSelector('.modal-card:has-text("Mark")', { timeout: 5000 });
+  await page.fill('.modal-card textarea', 'E2E test reason');
+  await page.click('.modal-card button:has-text("Mark lost")');
+  await page.waitForSelector('tr:has-text("Disposable Lost Lead") .badge:has-text("lost")', { timeout: 5000 });
+  step('lead marked lost via the real in-app modal (textarea formModal)', true);
+
   // ---- Inventory ----
   await page.click('a[href="#/units"]');
   await page.waitForSelector('h1:has-text("Inventory")');
@@ -108,15 +121,20 @@ try {
   await page.waitForSelector('.badge:has-text("open")', { timeout: 5000 });
   step('opportunity created from qualified lead', true);
 
-  dialogQueue.push(`U-${rand}`);
   await page.click('button:has-text("Reserve unit")');
+  await page.waitForSelector('.modal-card:has-text("Reserve a unit")', { timeout: 5000 });
+  await page.locator('.modal-card select').selectOption({ index: 0 }); // the one unit just created
+  await page.click('.modal-card button:has-text("Reserve")');
   await page.waitForSelector('.badge:has-text("reserved")', { timeout: 5000 });
-  step('unit reserved for opportunity (concurrency-protected path)', true);
+  step('unit reserved via the real in-app modal (concurrency-protected path)', true);
 
-  dialogQueue.push('E2E Plan', '900000');
   await page.click('button:has-text("Sign contract")');
+  await page.waitForSelector('.modal-card:has-text("Sign contract")', { timeout: 5000 });
+  await page.locator('.modal-card select').selectOption({ index: 0 }); // the one template just created
+  await page.fill('.modal-card input[type="number"]', '900000');
+  await page.click('.modal-card button:has-text("Sign contract")');
   await page.waitForSelector('.badge:has-text("won")', { timeout: 5000 });
-  step('contract signed, opportunity moves to won', true);
+  step('contract signed via the real in-app modal, opportunity moves to won', true);
 
   // ---- Finance ----
   await page.click('a[href="#/finance"]');
@@ -129,6 +147,22 @@ try {
   await page.waitForSelector('h1:has-text("Roles & Permissions")');
   await page.waitForSelector('table', { timeout: 5000 });
   step('roles page lists the auto-created Owner role', await page.locator('text=Owner').first().isVisible());
+
+  await page.fill('input[placeholder="e.g. Sales Manager"]', 'E2E Disposable Role');
+  await page.click('button:has-text("Create role")');
+  await page.waitForSelector('tr:has-text("E2E Disposable Role")', { timeout: 5000 });
+  const disposableRoleRow = page.locator('tr', { hasText: 'E2E Disposable Role' });
+  await disposableRoleRow.locator('button:has-text("Manage grants")').click();
+  await page.waitForSelector('h3:has-text("Grants for")', { timeout: 5000 });
+  await page.click('button:has-text("Add grant")');
+  await page.waitForSelector('tr:has-text("view")', { timeout: 5000 });
+  step('custom role created and a grant added', true);
+
+  await page.click('button:has-text("Revoke")');
+  await page.waitForSelector('.modal-card:has-text("Please confirm")', { timeout: 5000 });
+  await page.click('.modal-card button:has-text("Revoke")');
+  await page.waitForSelector('text=No grants on this role yet', { timeout: 5000 });
+  step('grant revoked via the real in-app confirm modal', true);
 
   // ---- Logout / session persistence ----
   await page.click('button:has-text("Log out")');
