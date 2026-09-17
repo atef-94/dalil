@@ -44,3 +44,16 @@ test('marking a lead lost requires a lostReason and locks it from further change
   assert.equal(lost.lostReason, 'Went with a competitor');
   await assert.rejects(() => svc.updateStatus(lead.id, 'contacted'));
 });
+
+test('assignOwner reassigns a lead to a new owner', async () => {
+  const svc = freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  const reassigned = await svc.assignOwner(lead.id, 'c1', 'emp-2');
+  assert.equal(reassigned.ownerEmployeeUserId, 'emp-2');
+});
+
+test('assignOwner rejects a lead belonging to a different company (cross-tenant)', async () => {
+  const svc = freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  await assert.rejects(() => svc.assignOwner(lead.id, 'c2', 'emp-2'));
+});

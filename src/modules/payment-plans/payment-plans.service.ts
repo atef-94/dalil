@@ -69,9 +69,9 @@ export class PaymentPlansService {
     return this.templates.save(updated);
   }
 
-  async previewSchedule(templateId: string, totalPrice: number, discountPercent?: number, escalationPercentPerYear?: number) {
+  async previewSchedule(templateId: string, companyId: string, totalPrice: number, discountPercent?: number, escalationPercentPerYear?: number) {
     const template = await this.templates.findById(templateId);
-    if (!template) throw new NotFoundError('template not found');
+    if (!template || template.companyId !== companyId) throw new NotFoundError('template not found');
     const input: GenerateScheduleInput = { template, totalPrice, discountPercent, escalationPercentPerYear };
     return generateSchedule(input);
   }
@@ -88,13 +88,13 @@ export class PaymentPlansService {
     discountPercent?: number,
     escalationPercentPerYear?: number,
   ): Promise<PaymentScheduleLine[]> {
-    const existing = await this.scheduleLines.findAll((l) => l.contractId === contractId);
+    const existing = await this.scheduleLines.findAll((l) => l.contractId === contractId && l.companyId === companyId);
     if (existing.length > 0) {
       return existing.sort((a, b) => a.sequence - b.sequence);
     }
 
     const template = await this.templates.findById(templateId);
-    if (!template) throw new NotFoundError('template not found');
+    if (!template || template.companyId !== companyId) throw new NotFoundError('template not found');
 
     const generated = generateSchedule({ template, totalPrice, discountPercent, escalationPercentPerYear });
     const lines: PaymentScheduleLine[] = [];
@@ -117,8 +117,8 @@ export class PaymentPlansService {
     return lines;
   }
 
-  async getScheduleForContract(contractId: string): Promise<PaymentScheduleLine[]> {
-    const lines = await this.scheduleLines.findAll((l) => l.contractId === contractId);
+  async getScheduleForContract(contractId: string, companyId: string): Promise<PaymentScheduleLine[]> {
+    const lines = await this.scheduleLines.findAll((l) => l.contractId === contractId && l.companyId === companyId);
     return lines.sort((a, b) => a.sequence - b.sequence);
   }
 }

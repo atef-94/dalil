@@ -19,7 +19,7 @@ test('full lifecycle: Lead -> Opportunity -> Reservation -> Contract -> Payment 
 
   const opportunity = await sales.createOpportunity({ companyId, leadId: lead.id, ownerEmployeeUserId: agentUserId });
   const unit = await inventory.createUnit({ companyId, projectId: 'proj-lifecycle', code: 'L-001', unitType: 'villa', areaSqm: 300, listPrice: 3_000_000 });
-  const reservation = await sales.reserveUnitForOpportunity(opportunity.id, unit.id);
+  const reservation = await sales.reserveUnitForOpportunity(opportunity.id, unit.id, companyId);
 
   const template = await paymentPlans.createTemplate({
     companyId,
@@ -40,7 +40,7 @@ test('full lifecycle: Lead -> Opportunity -> Reservation -> Contract -> Payment 
   });
   assert.equal(contract.status, 'signed');
 
-  const schedule = await paymentPlans.getScheduleForContract(contract.id);
+  const schedule = await paymentPlans.getScheduleForContract(contract.id, companyId);
   assert.ok(schedule.length >= 4); // down payment + 3 monthly installments
 
   // Pay the down payment in full.
@@ -54,7 +54,7 @@ test('full lifecycle: Lead -> Opportunity -> Reservation -> Contract -> Payment 
     recordedByUserId: financeUserId,
   });
 
-  const balanceAfterDownPayment = await finance.getBalance(contract.id);
+  const balanceAfterDownPayment = await finance.getBalance(contract.id, companyId);
   assert.equal(balanceAfterDownPayment.totalPaid, downPaymentLine.amount);
 
   // Force the first installment into the past so the sweep marks it overdue.
@@ -76,7 +76,7 @@ test('full lifecycle: Lead -> Opportunity -> Reservation -> Contract -> Payment 
   });
   assert.equal(repaidLine.status, 'paid');
 
-  const finalBalance = await finance.getBalance(contract.id);
+  const finalBalance = await finance.getBalance(contract.id, companyId);
   assert.equal(finalBalance.totalPaid, downPaymentLine.amount + overdueLine!.amount);
 });
 

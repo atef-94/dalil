@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Reservation, Unit, UnitHold } from '../../domain/types.js';
+import type { Project, Reservation, Unit, UnitHold } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { InventoryError, ValidationError, NotFoundError } from '../../infra/errors.js';
 import { KeyedMutex } from '../../infra/keyed-mutex.js';
@@ -13,6 +13,12 @@ export interface CreateUnitInput {
   listPrice: number;
 }
 
+export interface CreateProjectInput {
+  companyId: string;
+  name: string;
+  location?: string;
+}
+
 const HOLD_TTL_MS = 15 * 60 * 1000;
 
 export class InventoryService {
@@ -22,7 +28,35 @@ export class InventoryService {
     private readonly units: Repository<Unit>,
     private readonly holds: Repository<UnitHold>,
     private readonly reservations: Repository<Reservation>,
+    private readonly projects: Repository<Project>,
   ) {}
+
+  /**
+   * projectId on Unit stays a free-form string for backward compatibility
+   * with data created before Project existed as a real entity — creating a
+   * unit never requires a matching Project record. Real Projects are an
+   * additive, independently manageable entity; the frontend now sources the
+   * project picker from here instead of free text.
+   */
+  async createProject(input: CreateProjectInput): Promise<Project> {
+    if (!input.name?.trim()) throw new ValidationError('name is required');
+    const project: Project = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      name: input.name.trim(),
+      location: input.location?.trim() || undefined,
+      createdAt: new Date().toISOString(),
+    };
+    return this.projects.save(project);
+  }
+
+  async listProjects(companyId: string): Promise<Project[]> {
+    return this.projects.findAll((p) => p.companyId === companyId);
+  }
+
+  async getProject(id: string): Promise<Project | undefined> {
+    return this.projects.findById(id);
+  }
 
   async createUnit(input: CreateUnitInput): Promise<Unit> {
     if (!input.code?.trim()) throw new ValidationError('code is required');
@@ -58,6 +92,13 @@ export class InventoryService {
     return this.units.findById(id);
   }
 
+  /** The entity/repo has existed since Reservations were introduced (via
+   * holdUnit/reserveUnit), but nothing could ever list them back — a real
+   * gap for a "which units are reserved, by whom, expiring when" view. */
+  async listReservations(companyId: string, status?: Reservation['status']): Promise<Reservation[]> {
+    return this.reservations.findAll((r) => r.companyId === companyId && (!status || r.status === status));
+  }
+
   private async sweepExpiredHolds(unitId: string): Promise<void> {
     const active = await this.holds.findAll((h) => h.unitId === unitId && h.active);
     const now = Date.now();
@@ -72,11 +113,11 @@ export class InventoryService {
     }
   }
 
-  async holdUnit(unitId: string, byUserId: string): Promise<UnitHold> {
+  async holdUnit(unitId: string, byUserId: string, companyId: string): Promise<UnitHold> {
     return this.mutex.runExclusive(unitId, async () => {
       await this.sweepExpiredHolds(unitId);
       const unit = await this.units.findById(unitId);
-      if (!unit) throw new NotFoundError('unit not found');
+      if (!unit || unit.companyId !== companyId) throw new NotFoundError('unit not found');
       if (unit.status !== 'available') {
         throw new InventoryError(`unit is not available (current status: ${unit.status})`);
       }
@@ -99,11 +140,11 @@ export class InventoryService {
    * Mutex-protected + live-race-tested: only one of N concurrent reserve
    * calls against the same unit can ever win.
    */
-  async reserveUnit(unitId: string, clientId: string, opportunityId?: string): Promise<Reservation> {
+  async reserveUnit(unitId: string, clientId: string, companyId: string, opportunityId?: string): Promise<Reservation> {
     return this.mutex.runExclusive(unitId, async () => {
       await this.sweepExpiredHolds(unitId);
       const unit = await this.units.findById(unitId);
-      if (!unit) throw new NotFoundError('unit not found');
+      if (!unit || unit.companyId !== companyId) throw new NotFoundError('unit not found');
       if (unit.status !== 'available' && unit.status !== 'held') {
         throw new InventoryError(`unit is not reservable (current status: ${unit.status})`);
       }

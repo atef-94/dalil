@@ -60,13 +60,13 @@ export class SalesService {
     return this.contracts.findAll((c) => c.companyId === companyId);
   }
 
-  async reserveUnitForOpportunity(opportunityId: string, unitId: string) {
+  async reserveUnitForOpportunity(opportunityId: string, unitId: string, companyId: string) {
     const opportunity = await this.opportunities.findById(opportunityId);
-    if (!opportunity) throw new NotFoundError('opportunity not found');
+    if (!opportunity || opportunity.companyId !== companyId) throw new NotFoundError('opportunity not found');
     if (opportunity.stage !== 'open') {
       throw new SalesError(`opportunity is not open (current stage: ${opportunity.stage})`);
     }
-    const reservation = await this.inventory.reserveUnit(unitId, opportunity.leadId, opportunityId);
+    const reservation = await this.inventory.reserveUnit(unitId, opportunity.leadId, companyId, opportunityId);
     await this.opportunities.save({ ...opportunity, stage: 'reserved' });
     return reservation;
   }
@@ -86,12 +86,13 @@ export class SalesService {
    */
   async signContract(input: SignContractInput): Promise<Contract> {
     return this.signMutex.runExclusive(input.reservationId, async () => {
+      const reservation = await this.inventory.getReservation(input.reservationId);
+      if (!reservation || reservation.companyId !== input.companyId) throw new NotFoundError('reservation not found');
+
       if (await this.contractExistsForReservation(input.reservationId)) {
         throw new SalesError('this reservation already has a signed contract');
       }
 
-      const reservation = await this.inventory.getReservation(input.reservationId);
-      if (!reservation) throw new NotFoundError('reservation not found');
       if (reservation.status !== 'active') {
         throw new SalesError(`reservation is not active (current status: ${reservation.status})`);
       }
@@ -141,9 +142,9 @@ export class SalesService {
    * reached 'signed'. Cancelling releases the unit back onto the market and
    * marks the reservation cancelled — it does not touch any already-recorded
    * payments, which stay on file against the cancelled contract. */
-  async cancelContract(contractId: string): Promise<Contract> {
+  async cancelContract(contractId: string, companyId: string): Promise<Contract> {
     const contract = await this.contracts.findById(contractId);
-    if (!contract) throw new NotFoundError('contract not found');
+    if (!contract || contract.companyId !== companyId) throw new NotFoundError('contract not found');
     if (contract.status !== 'signed') {
       throw new SalesError(`only a signed contract can be cancelled (current status: ${contract.status})`);
     }

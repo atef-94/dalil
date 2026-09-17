@@ -1,10 +1,13 @@
 # ACTIVE Operating System
 
-A connected real estate operating layer — CRM, Sales, Inventory, Payment
-Plans, Finance/Collections, Brokers, Organization, Auth, default-deny RBAC,
-and a real product frontend — unifying what is usually a fragmented stack of
-point solutions. It is a real, working web application: sign up, log in, and
-use it.
+A full real-estate **operating system**, not just a CRM: CRM, Sales,
+Inventory, Payment Plans, Finance/Collections, Brokers, Organization
+(Branches/Departments), HR, Operations (maintenance), Legal (contract
+documents), Purchasing (vendors/POs), Marketing (campaigns), Communication
+(internal messaging), Analytics, a rule-based AI lead-scoring engine, a
+Customer Portal, Auth, default-deny RBAC, and a real product frontend —
+unifying what is usually a fragmented stack of point solutions. It is a
+real, working web application: sign up, log in, and use it.
 
 ## Why this exists / provenance
 
@@ -63,17 +66,87 @@ Real users should use the signup/login screen instead.
 |---|---|
 | Auth + self-service signup | Implemented |
 | RBAC (evaluator + role-management API) | Implemented |
-| Organization (Company/Employee) | Partially implemented — no Branch/Department/Team CRUD |
+| Organization (Company/Employee/Branch/Department) | Implemented — no Team CRUD |
 | Multi-tenancy | Implemented (application layer; verified isolated for both demo and real signed-up tenants) |
 | CRM (Leads) | Implemented — no Activities/Notes/Follow-ups |
 | Sales (Opportunities/Contracts, incl. cancel) | Implemented, concurrency-proven |
-| Inventory (Units) | Implemented, concurrency-proven — no Project/Building/Floor entities |
+| Inventory (Units, Projects) | Implemented, concurrency-proven — no Building/Floor entities |
 | Payment Plans | Implemented, most thoroughly tested |
 | Finance/Collections | Implemented |
 | Brokers (quarantine gate + commissions) | Implemented |
-| Frontend SPA | Implemented — verified end-to-end in a real browser |
+| HR (leave requests: request/approve/reject/cancel) | Implemented — no attendance/payroll |
+| Operations (maintenance tickets on units) | Implemented |
+| Legal (contract document tracking: pending → received → verified/rejected) | Implemented — documents are metadata records, not file uploads |
+| Purchasing (vendors + purchase orders: draft → approved → fulfilled) | Implemented |
+| Marketing (campaigns + lead-source attribution/conversion) | Implemented |
+| Communication (internal message/notification log) | Implemented — logged only, no real email/WhatsApp/SMS gateway |
+| Analytics (sales funnel, pipeline, collections aging, inventory occupancy, broker performance) | Implemented |
+| AI (rule-based lead priority scoring, 0–100 with shown factors) | Implemented — deterministic scoring, not a trained ML/LLM model (none is configured in this environment) |
+| Customer Portal (customer_user accounts scoped to their own contracts/schedule) | Implemented |
+| Tasks (generic tasks/reminders/follow-ups) | Implemented |
+| Automation Engine (event/scheduled/webhook triggers, conditions/branching, retries, approvals, run history, workflow templates, encrypted secrets) | Implemented, production-capable — see below |
+| AI Execution Layer (AI Agent takes real actions — create leads/tasks, update lead status, assign owners, send messages, update campaigns, call webhooks — through the same permission/policy/approval/audit pipeline as the Automation Engine) | Implemented |
+| Frontend SPA | Implemented — staff app shell plus a separate scoped portal shell for customer_user accounts; verified end-to-end in a real browser |
 | Persistent storage | Implemented (SQLite) — Postgres/Prisma remains a future migration |
-| Marketing, Communication, Customer Portal, Analytics, AI, HR, Legal, Operations, Purchasing | Not implemented |
+
+### Automation Engine + AI Execution Layer
+
+`src/modules/automation/automation.service.ts` is ACTIVE's native workflow
+engine — a from-scratch build (no automation/workflow/scheduler/queue
+infrastructure existed before this phase). It supports:
+
+- **Triggers**: domain events (`lead.created`, `contract.signed`, `payment.overdue_swept`,
+  and 13 others — emitted from `app.ts` route handlers via `src/infra/event-bus.ts`
+  right after the underlying mutation already succeeded, so an automation
+  failure can never break the primary API response), scheduled/recurring
+  (per-workflow interval, ticked every minute from `main.ts`), and inbound
+  webhooks (`POST /api/automation/webhooks/:companyId/:slug`, public —
+  the URL's slug is the credential, the same model Zapier/Make use).
+- **Conditions and branching**: each step is independently gated by
+  AND-combined conditions against the trigger payload (dot-path field,
+  8 operators); a step whose conditions fail is skipped, not blocking —
+  branching is multiple steps off the same trigger, each condition-gated
+  differently.
+- **Actions**: `create_task`, `create_lead`, `send_message`,
+  `update_lead_status`, `assign_lead_owner`, `update_campaign_status`,
+  `webhook_call` (with encrypted-secret bearer-token injection), and
+  `require_approval` (pauses the run and creates an `ApprovalRequest` until
+  a human with `approve:approval` decides it).
+- **Retry/failure handling**: per-step `maxRetries` with `onFailure:
+  'stop'|'continue'`.
+- **Idempotency**: every run carries a dedup key (derived from event
+  type+payload, a scheduled interval bucket, or a webhook idempotency
+  header/payload hash) — a duplicate trigger delivery is guaranteed to
+  create at most one run per workflow.
+- **RBAC enforcement**: a workflow always executes as its creator; every
+  single step re-checks that user's live RBAC grant before running, every
+  single run — a workflow can never do more than its creator is currently
+  authorized to do, and a permission revoke takes effect on the very next
+  run.
+- **Audit trail**: every step execution is recorded (`WorkflowStepRun`,
+  with attempts/output/error) and written to the existing `AuditLog`.
+- **Templates**: `GET /api/automation/templates` returns 4 built-in
+  starting points (new-lead welcome task, qualified-lead reassignment
+  approval, overdue-payment notice, weekly campaign review reminder).
+
+The **AI Execution Layer** (`src/modules/ai/ai-agent.service.ts`) is not
+limited to analysis/recommendations — it takes real actions on a human's
+behalf. Every request goes through the same four-stage pipeline, no
+exceptions: **permission** (does the requesting human hold the RBAC grant
+this action needs?) → **policy** (`AiPolicy.autonomyLevel` — `suggest_only`
+/ `require_approval` / `auto_execute`, defaulting to `require_approval`
+when a company hasn't set one) → **approval** (if policy requires it, the
+action pauses as a real `ApprovalRequest` — the same entity/table the
+Automation Engine's workflow approvals use) → **audit** (every request,
+whatever the outcome, is persisted as an `AiActionRequest` and written to
+`AuditLog` with an `executedByAI: true` marker). It never has its own
+execution path: `AutomationService.executeActionDirect()` dispatches
+through the exact same `executeAction()` switch a workflow step uses, so
+an AI-requested action and a workflow-triggered one are indistinguishable
+to the executor and get identical RBAC enforcement. `suggestNextAction()`
+builds a concrete, explainable "next best action" for a lead from the
+existing rule-based `LeadScoringService` (no external LLM/ML dependency in
+this deployment) — surfaced as an "Ask AI" button on the Leads page.
 
 ## Known gaps (stated honestly, not silently dropped)
 
@@ -89,13 +162,42 @@ Real users should use the signup/login screen instead.
   `terminated` exist as states but no endpoint sets them.
   `PaymentScheduleLine.status` never passes through `due` (only
   `upcoming` → `overdue` → `paid`, via the sweep).
-  No `Project`, `Client`, `Branch`, `Department`, `Team` entities exist —
-  `projectId`/`departmentId`/`branchId` are plain string fields.
+  No `Team` entity exists yet (Branch/Department/Project do). `Unit.projectId`
+  deliberately stays a free-form string rather than a validated FK, for
+  backward compatibility with data/UI predating the `Project` entity.
 - No restricted-tier audit-log field masking; audit logging covers the
   significant mutating actions (leads, contracts, payments, role
   assignment, employee creation, broker-lead approval) but not every single
-  endpoint.
+  endpoint, and not yet the newer modules (HR, Operations, Legal,
+  Purchasing, Marketing, Communication).
 - No external integrations (WhatsApp, ad platforms, payment gateways, MLS).
+  Communication logs messages with an intended channel (`email`/`whatsapp`/
+  `sms`) but never actually sends through a real provider.
+- Legal documents are metadata records (name, type, status, notes) — there
+  is no file upload/storage backing them yet.
+- The AI module is intentionally a transparent, rule-based scorer, not a
+  trained model — no LLM/ML API is configured in this environment. Its
+  single `scoreLead` method is designed as a drop-in point for a real
+  ML/LLM-backed scorer later.
+- The Customer Portal has no self-service signup — a staff member with
+  `create:portal_access` grants access per lead from the Leads page.
+- **No content/CMS entity exists yet**, so "schedule and publish approved
+  content" (one of the AI capabilities requested in scope) isn't directly
+  automatable — `webhook_call` is the documented escape hatch (e.g. trigger
+  an external CMS/Zapier publish step) until a content entity is built.
+- The Automation Engine's action set covers CRM/Sales lead mutations, tasks,
+  messaging, campaigns, and generic webhooks — it does not yet expose
+  Finance/Payments, Contract, HR, Operations, Legal, or Purchasing state
+  transitions as automatable action types (those modules are event
+  *sources* — 9 of the 16 domain events come from them — but not yet action
+  *targets*). Extending `AutomationActionType` and `executeAction()`'s
+  switch is the intended path (see `automation.service.ts`) and follows the
+  exact same pattern the CRM/Marketing/Task actions already use.
+- The Automation Engine executes step-by-step synchronously within the
+  triggering request/tick (no external job queue) — correct and simple for
+  this deployment's scale, but a slow `webhook_call` step delays the run
+  (and, for event triggers, the API response of the route that fired it)
+  until it resolves or times out.
 
 ## Development
 
@@ -124,7 +226,7 @@ the `x-demo-user` bypass is rejected, and data survives a process restart.
 ## Testing
 
 ```bash
-npm run test              # 112 automated unit/integration tests (node:test)
+npm run test              # 258 automated unit/integration tests (node:test)
 node scripts/e2e-smoke.mjs   # real-browser E2E smoke test (Playwright)
 ```
 
@@ -150,9 +252,16 @@ docker compose up -d app   # SQLite persists to the app-data volume
 
 **Deployment ready** for a single-instance deployment: real persistent
 storage, real self-service signup connected to real RBAC, a working
-frontend verified end-to-end in a real browser, 112 passing automated
-tests. **Not yet "enterprise production ready"**: no horizontal scaling
-(the in-memory concurrency mutex and rate limiter are per-process), no
-Postgres/Prisma migration executed, several modules (Marketing,
-Communication, Analytics, AI, HR, Legal, Operations, Purchasing) remain
-entirely unbuilt, and audit-log field masking is not implemented.
+frontend (staff app + a separate scoped customer portal) verified
+end-to-end in a real browser, 258 passing automated tests, and every
+module named in the original scope — CRM, Sales, Inventory, Payment Plans,
+Finance, Brokers, Organization (incl. Branches/Departments/Projects), HR,
+Operations, Legal, Purchasing, Marketing, Communication, Analytics, AI
+lead scoring, Tasks, the native Automation Engine, the AI Execution Layer,
+and the Customer Portal — is real and working, not stubbed.
+**Not yet "enterprise production ready"**: no horizontal scaling (the
+in-memory concurrency mutex and rate limiter are per-process), no
+Postgres/Prisma migration executed, no external integrations (email/
+WhatsApp/SMS gateways, payment gateways, MLS), no file storage backing
+Legal documents, and audit-log field masking / full endpoint coverage is
+not implemented.

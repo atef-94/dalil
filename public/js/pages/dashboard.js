@@ -1,6 +1,6 @@
-import { el, clear } from '../ui.js';
+import { el, clear, icon, statCard, errorBanner, statusBadge } from '../ui.js';
 import { api } from '../api.js';
-import { session } from '../state.js';
+import { session, can } from '../state.js';
 
 export async function renderDashboard(container) {
   clear(container);
@@ -8,13 +8,6 @@ export async function renderDashboard(container) {
 
   const grid = el('div', { class: 'stat-grid' });
   container.appendChild(grid);
-
-  function stat(label, value) {
-    grid.appendChild(el('div', { class: 'stat-card' }, [
-      el('div', { class: 'value' }, String(value)),
-      el('div', { class: 'label' }, label),
-    ]));
-  }
 
   const results = await Promise.allSettled([
     api.get('/api/crm/leads', { limit: 1 }),
@@ -24,10 +17,48 @@ export async function renderDashboard(container) {
   ]);
   const [leads, opportunities, units, employees] = results.map((r) => (r.status === 'fulfilled' ? r.value.total : '—'));
 
-  stat('Leads', leads);
-  stat('Opportunities', opportunities);
-  stat('Units', units);
-  stat('Employees', employees);
+  grid.append(
+    statCard({ label: 'Leads', value: leads, iconName: 'leads' }),
+    statCard({ label: 'Opportunities', value: opportunities, iconName: 'opportunities' }),
+    statCard({ label: 'Units', value: units, iconName: 'units' }),
+    statCard({ label: 'Employees', value: employees, iconName: 'employees' }),
+  );
+
+  // ---- AI-native: recent agent activity + anything waiting on a human ----
+  if (can('ai_action', 'view')) {
+    const aiPanel = el('div', { class: 'ai-panel' });
+    container.appendChild(aiPanel);
+    try {
+      const [decisionsPage, approvalsPage] = await Promise.all([
+        api.get('/api/ai/decisions', { limit: 5 }),
+        can('approval', 'view') ? api.get('/api/automation/approvals', { status: 'pending', limit: 5 }) : Promise.resolve({ items: [] }),
+      ]);
+      const recentDecisions = decisionsPage.items.slice().reverse().slice(0, 4);
+      aiPanel.appendChild(el('div', { class: 'ai-panel-header' }, [icon('ai'), 'AI activity']));
+      if (approvalsPage.items.length > 0) {
+        aiPanel.appendChild(el('p', {}, [
+          el('strong', {}, `${approvalsPage.items.length} item(s) waiting on your approval`),
+          ' — see ',
+          el('a', { href: '#/approvals' }, 'Approvals'),
+          '.',
+        ]));
+      }
+      if (recentDecisions.length === 0) {
+        aiPanel.appendChild(el('p', { style: 'color:var(--text-muted);font-size:13px' }, 'No AI agent decisions yet — try "Ask AI" on a lead in Leads, or run one from AI Agents.'));
+      } else {
+        for (const d of recentDecisions) {
+          aiPanel.appendChild(el('div', { style: 'display:flex;align-items:baseline;gap:8px;padding:6px 0;border-top:1px solid var(--brand-100);font-size:13px' }, [
+            statusBadge(d.status),
+            el('span', {}, `${d.agentKey}: ${d.reasoning}`),
+          ]));
+        }
+        aiPanel.appendChild(el('div', { style: 'margin-top:8px' }, [el('a', { href: '#/ai-activity' }, 'See full AI activity →')]));
+      }
+    } catch (err) {
+      clear(aiPanel);
+      aiPanel.appendChild(errorBanner(err.message));
+    }
+  }
 
   const info = el('div', { class: 'card' }, [
     el('h3', { style: 'margin-top:0' }, 'Your workspace'),

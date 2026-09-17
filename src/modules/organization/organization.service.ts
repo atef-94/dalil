@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Company, Employee } from '../../domain/types.js';
+import type { Branch, Company, Department, Employee } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { OrgValidationError, NotFoundError } from '../../infra/errors.js';
 
@@ -18,11 +18,71 @@ export interface CreateEmployeeInput {
   managerEmployeeId?: string;
 }
 
+export interface CreateBranchInput {
+  companyId: string;
+  name: string;
+  address?: string;
+}
+
+export interface CreateDepartmentInput {
+  companyId: string;
+  name: string;
+  branchId?: string;
+}
+
 export class OrganizationService {
   constructor(
     private readonly companies: Repository<Company>,
     private readonly employees: Repository<Employee>,
+    private readonly branches: Repository<Branch>,
+    private readonly departments: Repository<Department>,
   ) {}
+
+  async createBranch(input: CreateBranchInput): Promise<Branch> {
+    if (!input.name?.trim()) throw new OrgValidationError('name is required');
+    const branch: Branch = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      name: input.name.trim(),
+      address: input.address?.trim() || undefined,
+      createdAt: new Date().toISOString(),
+    };
+    return this.branches.save(branch);
+  }
+
+  async listBranches(companyId: string): Promise<Branch[]> {
+    return this.branches.findAll((b) => b.companyId === companyId);
+  }
+
+  async getBranch(id: string): Promise<Branch | undefined> {
+    return this.branches.findById(id);
+  }
+
+  async createDepartment(input: CreateDepartmentInput): Promise<Department> {
+    if (!input.name?.trim()) throw new OrgValidationError('name is required');
+    if (input.branchId) {
+      const branch = await this.branches.findById(input.branchId);
+      if (!branch || branch.companyId !== input.companyId) {
+        throw new OrgValidationError('branchId does not exist in this company');
+      }
+    }
+    const department: Department = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      name: input.name.trim(),
+      branchId: input.branchId,
+      createdAt: new Date().toISOString(),
+    };
+    return this.departments.save(department);
+  }
+
+  async listDepartments(companyId: string): Promise<Department[]> {
+    return this.departments.findAll((d) => d.companyId === companyId);
+  }
+
+  async getDepartment(id: string): Promise<Department | undefined> {
+    return this.departments.findById(id);
+  }
 
   async createCompany(input: CreateCompanyInput): Promise<Company> {
     if (!input.name?.trim()) {
@@ -42,6 +102,18 @@ export class OrganizationService {
       const manager = await this.employees.findById(input.managerEmployeeId);
       if (!manager || manager.companyId !== input.companyId) {
         throw new OrgValidationError('managerEmployeeId does not exist in this company');
+      }
+    }
+    if (input.branchId) {
+      const branch = await this.branches.findById(input.branchId);
+      if (!branch || branch.companyId !== input.companyId) {
+        throw new OrgValidationError('branchId does not exist in this company');
+      }
+    }
+    if (input.departmentId) {
+      const department = await this.departments.findById(input.departmentId);
+      if (!department || department.companyId !== input.companyId) {
+        throw new OrgValidationError('departmentId does not exist in this company');
       }
     }
 
@@ -87,9 +159,9 @@ export class OrganizationService {
     return false;
   }
 
-  async reassignManager(employeeId: string, newManagerEmployeeId: string): Promise<Employee> {
+  async reassignManager(employeeId: string, newManagerEmployeeId: string, companyId: string): Promise<Employee> {
     const employee = await this.employees.findById(employeeId);
-    if (!employee) throw new NotFoundError('employee not found');
+    if (!employee || employee.companyId !== companyId) throw new NotFoundError('employee not found');
 
     if (newManagerEmployeeId === employeeId) {
       throw new OrgValidationError('an employee cannot manage themselves');
@@ -106,9 +178,9 @@ export class OrganizationService {
     return this.employees.save(updated);
   }
 
-  async terminate(employeeId: string): Promise<Employee> {
+  async terminate(employeeId: string, companyId: string): Promise<Employee> {
     const employee = await this.employees.findById(employeeId);
-    if (!employee) throw new NotFoundError('employee not found');
+    if (!employee || employee.companyId !== companyId) throw new NotFoundError('employee not found');
     const updated: Employee = { ...employee, status: 'terminated', terminatedAt: new Date().toISOString() };
     return this.employees.save(updated);
   }

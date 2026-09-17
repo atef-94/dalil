@@ -8,6 +8,62 @@ export async function renderUnits(container) {
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
+  const newProjectNameInput = el('input', { type: 'text', placeholder: 'e.g. Marina Towers' });
+  const newProjectLocationInput = el('input', { type: 'text', placeholder: 'e.g. North Coast (optional)' });
+  const addProjectBtn = el('button', {}, 'Add project');
+  addProjectBtn.addEventListener('click', async () => {
+    clear(errorSlot);
+    if (!newProjectNameInput.value.trim()) {
+      errorSlot.appendChild(errorBanner('Enter a project name.'));
+      return;
+    }
+    addProjectBtn.disabled = true;
+    try {
+      const project = await api.post('/api/inventory/projects', {
+        name: newProjectNameInput.value.trim(),
+        location: newProjectLocationInput.value.trim() || undefined,
+      });
+      newProjectNameInput.value = '';
+      newProjectLocationInput.value = '';
+      toast(`Project created — id: ${project.id}`, 'success');
+      await loadProjects();
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      addProjectBtn.disabled = false;
+    }
+  });
+
+  const projectsListSlot = el('div');
+  container.appendChild(el('div', { class: 'card' }, [
+    el('h3', { style: 'margin-top:0' }, 'Projects'),
+    el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, 'Create a project here, then use its ID as the Project field below when adding units.'),
+    el('div', { class: 'form-row' }, [
+      el('div', {}, [el('label', {}, 'Project name'), newProjectNameInput]),
+      el('div', {}, [el('label', {}, 'Location'), newProjectLocationInput]),
+      el('div', { style: 'align-self:flex-end' }, addProjectBtn),
+    ]),
+    projectsListSlot,
+  ]));
+
+  async function loadProjects() {
+    clear(projectsListSlot);
+    try {
+      const page = await api.get('/api/inventory/projects', { limit: 50 });
+      projectsListSlot.appendChild(table(
+        [
+          { label: 'Name', key: 'name' },
+          { label: 'Location', render: (p) => p.location || '—' },
+          { label: 'ID (paste into Project field below)', render: (p) => p.id },
+        ],
+        page.items,
+        { empty: 'No projects yet — add one above.' },
+      ));
+    } catch (err) {
+      projectsListSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   const projectInput = el('input', { type: 'text', placeholder: 'proj-1' });
   const codeInput = el('input', { type: 'text', placeholder: 'A-101' });
   const typeInput = el('input', { type: 'text', placeholder: 'apartment' });
@@ -67,6 +123,7 @@ export async function renderUnits(container) {
   }
 
   async function load() {
+    await loadProjects();
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {

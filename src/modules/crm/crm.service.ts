@@ -82,4 +82,10 @@ export class CrmService {
     const updated: Lead = { ...lead, status: newStatus };
     return this.leads.save(updated);
   }
+
+  async assignOwner(leadId: string, companyId: string, ownerEmployeeUserId: string): Promise<Lead> {
+    const lead = await this.leads.findById(leadId);
+    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
+    return this.leads.save({ ...lead, ownerEmployeeUserId });
+  }
 }

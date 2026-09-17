@@ -43,18 +43,18 @@ export class BrokersService {
     return this.brokerCompanies.findAll((bc) => bc.companyId === companyId);
   }
 
-  async approveBrokerCompany(id: string): Promise<BrokerCompany> {
+  async approveBrokerCompany(id: string, companyId: string): Promise<BrokerCompany> {
     const company = await this.brokerCompanies.findById(id);
-    if (!company) throw new NotFoundError('broker company not found');
+    if (!company || company.companyId !== companyId) throw new NotFoundError('broker company not found');
     if (company.status !== 'pending') {
       throw new BrokerError(`broker company is not pending (current status: ${company.status})`);
     }
     return this.brokerCompanies.save({ ...company, status: 'approved' });
   }
 
-  async suspendBrokerCompany(id: string): Promise<BrokerCompany> {
+  async suspendBrokerCompany(id: string, companyId: string): Promise<BrokerCompany> {
     const company = await this.brokerCompanies.findById(id);
-    if (!company) throw new NotFoundError('broker company not found');
+    if (!company || company.companyId !== companyId) throw new NotFoundError('broker company not found');
     if (company.status !== 'approved') {
       throw new BrokerError(`only an approved broker company can be suspended (current status: ${company.status})`);
     }
@@ -95,9 +95,9 @@ export class BrokersService {
    * broker lead is rejected outright, never silently merged into the
    * existing Lead.
    */
-  async approveBrokerLead(id: string, approverOwnerUserId?: string): Promise<BrokerLead> {
+  async approveBrokerLead(id: string, companyId: string, approverOwnerUserId?: string): Promise<BrokerLead> {
     const brokerLead = await this.brokerLeads.findById(id);
-    if (!brokerLead) throw new NotFoundError('broker lead not found');
+    if (!brokerLead || brokerLead.companyId !== companyId) throw new NotFoundError('broker lead not found');
     if (brokerLead.approvalStatus !== 'pending_approval') {
       throw new BrokerError(`broker lead is not pending approval (current status: ${brokerLead.approvalStatus})`);
     }
@@ -137,6 +137,8 @@ export class BrokersService {
   }
 
   async recordCommissionForContract(companyId: string, brokerCompanyId: string, contractId: string, contractAmount: number): Promise<Commission> {
+    const brokerCompany = await this.brokerCompanies.findById(brokerCompanyId);
+    if (!brokerCompany || brokerCompany.companyId !== companyId) throw new NotFoundError('broker company not found');
     const ratePercent = await this.resolveRate(companyId, brokerCompanyId);
     const commission: Commission = {
       id: randomUUID(),
@@ -158,9 +160,9 @@ export class BrokersService {
     return this.commissions.findAll((c) => c.companyId === companyId && (!brokerCompanyId || c.brokerCompanyId === brokerCompanyId));
   }
 
-  async approveCommission(id: string): Promise<Commission> {
+  async approveCommission(id: string, companyId: string): Promise<Commission> {
     const commission = await this.commissions.findById(id);
-    if (!commission) throw new NotFoundError('commission not found');
+    if (!commission || commission.companyId !== companyId) throw new NotFoundError('commission not found');
     if (commission.status !== 'pending') {
       throw new BrokerError(`commission is not pending (current status: ${commission.status})`);
     }
