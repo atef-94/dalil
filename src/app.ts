@@ -1,4 +1,5 @@
 import type {
+  ActionName,
   AgentDecision,
   AiActionRequest,
   AiPolicy,
@@ -24,6 +25,7 @@ import type {
   Message,
   Opportunity,
   Payment,
+  PaymentFrequency,
   PaymentPlanTemplate,
   PaymentScheduleLine,
   PermissionGrant,
@@ -31,8 +33,11 @@ import type {
   PurchaseOrder,
   Receipt,
   Reservation,
+  ResourceName,
   Role,
+  ScopeName,
   Secret,
+  SensitivityTier,
   Task,
   Unit,
   UnitHold,
@@ -50,6 +55,8 @@ import { HttpServer, type RequestContext } from './infra/http-server.js';
 import { SlidingWindowRateLimiter } from './infra/rate-limiter.js';
 import { paginate } from './infra/pagination.js';
 import { searchFilter } from './infra/search.js';
+import { parseCsvRecords } from './infra/csv.js';
+import { runImport, SkipRow } from './infra/csv-import.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
@@ -668,6 +675,45 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 204 };
   });
 
+  // Bulk CSV import for roles + grants. A permission matrix is too
+  // security-sensitive to derive from a loosely-worded prose column like
+  // "Create, View All, Edit, Delete" — one wrong guess there is a real
+  // access-control bug. So this uses one row per exact (Role, Action,
+  // Resource, Scope) grant instead: unambiguous, and validated the same
+  // way the manual "Add grant" screen already validates it (RbacEvaluator
+  // rejects an invalid resource/action/scope at check time, same as any
+  // other grant). The role itself is created on its first occurrence and
+  // reused for subsequent rows with the same name.
+  httpServer.post('/api/roles/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'role'))) {
+      throw new ForbiddenError('missing create:role permission');
+    }
+    if (!(await rbac.can(actor.userId, 'edit', 'role'))) {
+      throw new ForbiddenError('missing edit:role permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const existingRoles = await roleManagement.listRoles(actor.companyId);
+    const roleByName = new Map<string, Role>(existingRoles.map((r) => [r.name, r]));
+    const result = await runImport(records, [], async (record) => {
+      const roleName = record['Role Name']?.trim();
+      const action = record['Action']?.trim() as ActionName;
+      const resource = record['Resource']?.trim() as ResourceName;
+      const scope = record['Scope']?.trim() as ScopeName;
+      const sensitivity = (record['Sensitivity']?.trim() || undefined) as SensitivityTier | undefined;
+      if (!roleName) throw new ValidationError('"Role Name" is required');
+      if (!action || !resource || !scope) throw new ValidationError('"Action", "Resource", and "Scope" are required');
+      let role = roleByName.get(roleName);
+      if (!role) {
+        role = await roleManagement.createRole(actor.companyId, roleName);
+        roleByName.set(roleName, role);
+      }
+      return roleManagement.addGrant(actor.companyId, role.id, { action, resource, scope, sensitivity });
+    });
+    return { status: 200, body: result };
+  });
+
   // ---- Users & role assignment ----
   httpServer.get('/api/users', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -725,6 +771,61 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const body = parseJsonBody<Parameters<PaymentPlansService['createTemplate']>[0]>(ctx.body);
     const template = await paymentPlans.createTemplate({ ...body, companyId: actor.companyId });
     return { status: 201, body: template };
+  });
+
+  // Bulk CSV import — one real paymentPlans.createTemplate() call per row.
+  // Discount/maintenance-fee/delivery-payment percentages aren't fields on
+  // PaymentPlanTemplate (discount is applied per-contract at signing time,
+  // not stored on the template), so they're reported as unsupportedColumns
+  // rather than silently accepted and dropped.
+  httpServer.post('/api/payment-plan-templates/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'payment_plan_template'))) {
+      throw new ForbiddenError('missing create:payment_plan_template permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const projects = await inventory.listProjects(actor.companyId);
+    const FREQUENCY_MAP: Record<string, PaymentFrequency> = {
+      monthly: 'monthly',
+      quarterly: 'quarterly',
+      'semi-annually': 'semiannual',
+      semiannual: 'semiannual',
+      annually: 'annual',
+      annual: 'annual',
+      'one time': 'monthly', // cash plans: termMonths will be 0, so frequency is moot
+    };
+    const result = await runImport(
+      records,
+      ['Plan ID', 'Delivery Payment (%)', 'Discount Rate (%)', 'Maintenance Fee (%)', 'Status'],
+      async (record) => {
+        const name = record['Plan Name']?.trim();
+        if (!name) throw new ValidationError('"Plan Name" is required');
+        const downPaymentValue = Number((record['Down Payment (%)'] ?? '').replace('%', ''));
+        if (!Number.isFinite(downPaymentValue)) throw new ValidationError('"Down Payment (%)" must be a number');
+        const years = Number(record['Installment Years'] ?? '0');
+        // A pure cash/one-time plan (0 installment years) still needs a
+        // valid termMonths >= 1 (see schedule-generator.ts's real
+        // validation) — mapped to 1 month, with the down payment already
+        // covering the full amount for a 100%-down cash plan.
+        const termMonths = Math.max(1, Number.isFinite(years) ? Math.round(years * 12) : 1);
+        const frequencyKey = (record['Payment Frequency'] ?? '').trim().toLowerCase();
+        const frequency = FREQUENCY_MAP[frequencyKey] ?? 'monthly';
+        const applicableProjects = (record['Applicable Projects'] ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+        const projectId = applicableProjects.length === 1 ? projects.find((p) => p.name === applicableProjects[0])?.id : undefined;
+        return paymentPlans.createTemplate({
+          companyId: actor.companyId,
+          projectId,
+          name,
+          downPaymentType: 'percentage',
+          downPaymentValue,
+          frequency,
+          termMonths,
+          fees: [],
+        });
+      },
+    );
+    return { status: 200, body: result };
   });
 
   httpServer.get('/api/payment-plan-templates', async (ctx) => {
@@ -803,6 +904,40 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 201, body: unit };
   });
 
+  // Bulk CSV import — one real inventory.createUnit() call per row, same
+  // permission as the manual route above. Columns beyond the real Unit
+  // schema (Building/Block, Floor, Bedrooms, etc.) aren't stored anywhere
+  // yet, so they're reported back as unsupportedColumns rather than
+  // silently dropped.
+  httpServer.post('/api/inventory/units/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const projects = await inventory.listProjects(actor.companyId);
+    const result = await runImport(
+      records,
+      ['Building/Block', 'Floor', 'Bedrooms', 'Bathrooms', 'Finishing Type', 'View', 'Price per SQM (EGP)', 'Maintenance Fee (%)', 'Delivery Date', 'Status'],
+      async (record) => {
+        const projectName = record['Project Name']?.trim();
+        const project = projects.find((p) => p.name === projectName);
+        if (!project) throw new ValidationError(`project "${projectName}" not found — create it first`);
+        const code = record['Unit ID']?.trim();
+        const unitType = record['Unit Type']?.trim();
+        const areaSqm = Number(record['Area (SQM)']);
+        const listPrice = Number((record['Total Price (EGP)'] ?? '').replace(/,/g, ''));
+        if (!code) throw new ValidationError('"Unit ID" is required');
+        if (!unitType) throw new ValidationError('"Unit Type" is required');
+        if (!Number.isFinite(areaSqm) || areaSqm <= 0) throw new ValidationError('"Area (SQM)" must be a positive number');
+        if (!Number.isFinite(listPrice) || listPrice <= 0) throw new ValidationError('"Total Price (EGP)" must be a positive number');
+        return inventory.createUnit({ companyId: actor.companyId, projectId: project.id, code, unitType, areaSqm, listPrice });
+      },
+    );
+    return { status: 200, body: result };
+  });
+
   httpServer.get('/api/inventory/units', async (ctx) => {
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'unit');
@@ -853,6 +988,38 @@ export async function buildApplication(options: AppOptions): Promise<Application
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
+  });
+
+  // Bulk CSV import — one real crm.createLead() call per row, same
+  // permission and the same audit/event trail (lead.created) as the
+  // manual route above, so imported leads flow through the Automation
+  // Engine and AI Execution Layer exactly like manually-entered ones.
+  httpServer.post('/api/crm/leads/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const companyUsers = await repos.users.findAll((u) => u.companyId === actor.companyId);
+    const result = await runImport(
+      records,
+      ['Lead ID', 'Lead Source', 'Interested Project', 'Interested Unit Type', 'Budget Min (EGP)', 'Budget Max (EGP)', 'Preferred Payment Plan', 'Lead Status', 'Priority', 'Notes'],
+      async (record) => {
+        const fullName = `${record['First Name'] ?? ''} ${record['Last Name'] ?? ''}`.trim();
+        const phone = record['Phone']?.trim();
+        const email = record['Email']?.trim() || undefined;
+        if (!fullName) throw new ValidationError('"First Name"/"Last Name" are required');
+        if (!phone) throw new ValidationError('"Phone" is required');
+        const agentEmail = record['Assigned Sales Agent']?.trim();
+        const owner = agentEmail ? companyUsers.find((u) => u.email === agentEmail) : undefined;
+        const lead = await crm.createLead({ companyId: actor.companyId, fullName, phone, email, ownerEmployeeUserId: owner?.id ?? actor.userId });
+        await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id, metadata: { importedViaCsv: true } });
+        await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
+        return lead;
+      },
+    );
+    return { status: 200, body: result };
   });
 
   httpServer.get('/api/crm/leads', async (ctx) => {
@@ -979,6 +1146,85 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 201, body: contract };
   });
 
+  // Bulk CSV import for reservations/contracts. Unlike the other import
+  // routes, this can't be a single create() call per row: a contract only
+  // exists after reserving a real unit for a real opportunity, and that
+  // reservation is concurrency-protected (see SalesService/InventoryService)
+  // precisely to stop double-booking. So each row resolves human-friendly
+  // keys (customer phone, project+unit code, plan name) to real records
+  // and then drives the exact same protected pipeline the manual UI does —
+  // createOpportunity -> reserveUnitForOpportunity -> signContract — never
+  // a shortcut around it. A "Reservation" row stops after reserving; a
+  // "Contract" row also signs.
+  httpServer.post('/api/sales/contracts/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'contract'))) {
+      throw new ForbiddenError('missing create:contract permission');
+    }
+    if (!(await rbac.can(actor.userId, 'create', 'opportunity'))) {
+      throw new ForbiddenError('missing create:opportunity permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const [leads, projects, units, templates, opportunities] = await Promise.all([
+      repos.leads.findAll((l) => l.companyId === actor.companyId),
+      inventory.listProjects(actor.companyId),
+      inventory.listUnits(actor.companyId),
+      paymentPlans.listTemplates(actor.companyId),
+      sales.listOpportunities(actor.companyId),
+    ]);
+    const result = await runImport(
+      records,
+      ['Contract/Reservation ID', 'Reservation Deposit (EGP)', 'Reservation Date', 'Expiry Date', 'Status', 'Assigned Agent', 'Broker Name', 'Notes'],
+      async (record) => {
+        const phone = record['Customer Phone']?.trim();
+        const lead = leads.find((l) => l.phone === phone);
+        if (!lead) throw new ValidationError(`no lead found with phone "${phone}" — import leads first`);
+
+        const projectName = record['Project Name']?.trim();
+        const unitCode = record['Unit ID']?.trim();
+        const project = projects.find((p) => p.name === projectName);
+        const unit = project && units.find((u) => u.projectId === project.id && u.code === unitCode);
+        if (!unit) throw new ValidationError(`unit "${unitCode}" in project "${projectName}" not found`);
+
+        let opportunity = opportunities.find((o) => o.leadId === lead.id && o.stage === 'open');
+        if (!opportunity) {
+          opportunity = await sales.createOpportunity({ companyId: actor.companyId, leadId: lead.id, ownerEmployeeUserId: actor.userId });
+          opportunities.push(opportunity);
+          await emitEvent({ companyId: actor.companyId, type: 'opportunity.created', payload: { ...opportunity }, actorUserId: actor.userId, dedupeKey: `opportunity.created:${opportunity.id}` });
+        }
+
+        const reservation = await sales.reserveUnitForOpportunity(opportunity.id, unit.id, actor.companyId);
+
+        const type = (record['Type'] ?? '').trim().toLowerCase();
+        if (type === 'reservation') return reservation;
+
+        const planName = record['Payment Plan']?.trim();
+        const template = templates.find((t) => t.name === planName);
+        if (!template) throw new ValidationError(`payment plan template "${planName}" not found`);
+        const totalPrice = Number((record['Total Price (EGP)'] ?? '').replace(/,/g, ''));
+        if (!Number.isFinite(totalPrice) || totalPrice <= 0) throw new ValidationError('"Total Price (EGP)" must be a positive number');
+
+        const contract = await sales.signContract({
+          companyId: actor.companyId,
+          reservationId: reservation.id,
+          creditedEmployeeUserId: actor.userId,
+          paymentPlanTemplateId: template.id,
+          totalPrice,
+        });
+        await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id, metadata: { importedViaCsv: true } });
+        await emitEvent({ companyId: actor.companyId, type: 'contract.signed', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.signed:${contract.id}` });
+        // Generate the payment schedule immediately, same as an operator
+        // would do as the very next manual step — a signed contract with
+        // no schedule isn't usable yet, and a Finance import row can't
+        // record a payment against a schedule line that doesn't exist.
+        await paymentPlans.generateForContract(contract.id, actor.companyId, template.id, totalPrice);
+        return contract;
+      },
+    );
+    return { status: 200, body: result };
+  });
+
   httpServer.post('/api/sales/contracts/:contractId/cancel', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'edit', 'contract'))) {
@@ -1007,6 +1253,75 @@ export async function buildApplication(options: AppOptions): Promise<Application
       dedupeKey: `payment.recorded:${result.payment.id}`,
     });
     return { status: 201, body: result };
+  });
+
+  // Bulk CSV import for collections. A finance export's literal "Contract
+  // ID"/"Receipt ID" values won't match this system's own generated IDs
+  // unless they came from ACTIVE itself, so rows are resolved by
+  // Project+Unit (finds the signed contract for that unit) and Installment
+  // Number (finds that schedule line by its real sequence number) instead —
+  // stable keys that survive being re-exported from anywhere. Every payment
+  // still goes through the exact same finance.recordPayment() the manual
+  // route above uses, so it's still subject to the real validation there
+  // (positive amount, line not already fully paid, etc).
+  httpServer.post('/api/finance/payments/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const [projects, units, contracts] = await Promise.all([
+      inventory.listProjects(actor.companyId),
+      inventory.listUnits(actor.companyId),
+      sales.listContracts(actor.companyId),
+    ]);
+    const METHOD_MAP: Record<string, Payment['method']> = {
+      'bank transfer': 'transfer',
+      transfer: 'transfer',
+      cheque: 'cheque',
+      check: 'cheque',
+      'visa pos': 'card',
+      card: 'card',
+      cash: 'cash',
+    };
+    const result = await runImport(
+      records,
+      ['Receipt/Transaction ID', 'Contract ID', 'Customer Name', 'Payment Status', 'Finance Officer', 'Notes'],
+      async (record) => {
+        const projectName = record['Project']?.trim();
+        const unitCode = record['Unit']?.trim();
+        const project = projects.find((p) => p.name === projectName);
+        const unit = project && units.find((u) => u.projectId === project.id && u.code === unitCode);
+        if (!unit) throw new ValidationError(`unit "${unitCode}" in project "${projectName}" not found`);
+        const contract = contracts.find((c) => c.unitId === unit.id && c.status === 'signed');
+        if (!contract) throw new ValidationError(`no signed contract found for unit "${unitCode}"`);
+
+        const amount = Number((record['Amount Paid (EGP)'] ?? '').replace(/,/g, ''));
+        if (!Number.isFinite(amount) || amount <= 0) throw new SkipRow('"Amount Paid (EGP)" is 0 or blank — nothing to record for this row yet');
+
+        const schedule = await paymentPlans.getScheduleForContract(contract.id, actor.companyId);
+        const sequence = Number(record['Installment Number'] ?? '');
+        const line = schedule.find((l) => l.sequence === sequence);
+        if (!line) throw new ValidationError(`no schedule line found with installment number ${record['Installment Number']} for this contract`);
+
+        const methodKey = (record['Payment Method'] ?? '').trim().toLowerCase();
+        const method = METHOD_MAP[methodKey];
+        if (!method) throw new ValidationError(`unrecognized "Payment Method": "${record['Payment Method']}"`);
+
+        const recorded = await finance.recordPayment({ companyId: actor.companyId, contractId: contract.id, paymentScheduleLineId: line.id, amount, method, recordedByUserId: actor.userId });
+        await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'payment_schedule', resourceId: recorded.line.id, metadata: { amount, importedViaCsv: true } });
+        await emitEvent({
+          companyId: actor.companyId,
+          type: 'payment.recorded',
+          payload: { ...recorded },
+          actorUserId: actor.userId,
+          dedupeKey: `payment.recorded:${recorded.payment.id}`,
+        });
+        return recorded.payment;
+      },
+    );
+    return { status: 200, body: result };
   });
 
   httpServer.get('/api/finance/contracts/:contractId/balance', async (ctx) => {
@@ -1045,6 +1360,38 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const body = parseJsonBody<{ name: string }>(ctx.body);
     const brokerCompany = await brokers.registerBrokerCompany({ companyId: actor.companyId, name: body.name });
     return { status: 201, body: brokerCompany };
+  });
+
+  // Bulk CSV import — registers one real BrokerCompany per row, and (if a
+  // commission rate is given) a real per-broker CommissionRule through the
+  // exact same setCommissionRule() the manual commission-rules screen uses.
+  // Only name and commission rate exist on the real schema today — contact
+  // details, bank info, tax card, etc. are reported as unsupportedColumns.
+  httpServer.post('/api/brokers/companies/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'broker_company'))) {
+      throw new ForbiddenError('missing create:broker_company permission');
+    }
+    if (!(await rbac.can(actor.userId, 'edit', 'broker_company'))) {
+      throw new ForbiddenError('missing edit:broker_company permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const result = await runImport(
+      records,
+      ['Broker ID', 'Broker Type', 'Contact Person', 'Phone', 'Email', 'Commercial Reg/ID', 'Tax Card', 'Bank Name', 'Account Name', 'IBAN', 'Status', 'Assigned Account Manager', 'Notes'],
+      async (record) => {
+        const name = record['Company/Individual Name']?.trim();
+        if (!name) throw new ValidationError('"Company/Individual Name" is required');
+        const rateText = (record['Commission Rate (%)'] ?? '').replace('%', '').trim();
+        const rate = rateText ? Number(rateText) : undefined;
+        if (rate !== undefined && (!Number.isFinite(rate) || rate <= 0)) throw new ValidationError('"Commission Rate (%)" must be a positive number');
+        const brokerCompany = await brokers.registerBrokerCompany({ companyId: actor.companyId, name });
+        if (rate !== undefined) await brokers.setCommissionRule(actor.companyId, rate, brokerCompany.id);
+        return brokerCompany;
+      },
+    );
+    return { status: 200, body: result };
   });
 
   httpServer.post('/api/brokers/companies/:brokerCompanyId/approve', async (ctx) => {
