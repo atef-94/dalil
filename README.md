@@ -79,13 +79,14 @@ Real users should use the signup/login screen instead.
 | Legal (contract document tracking: pending → received → verified/rejected) | Implemented — documents are metadata records, not file uploads |
 | Purchasing (vendors + purchase orders: draft → approved → fulfilled) | Implemented |
 | Marketing (campaigns + lead-source attribution/conversion) | Implemented |
-| Communication (internal message/notification log) | Implemented — logged only, no real email/WhatsApp/SMS gateway |
+| Communication (internal message/notification log) | Implemented — internal log; real external delivery (WhatsApp/Email/SMS) goes through the Integration Layer below, not this module directly |
 | Analytics (sales funnel, pipeline, collections aging, inventory occupancy, broker performance) | Implemented |
 | AI (rule-based lead priority scoring, 0–100 with shown factors) | Implemented — deterministic scoring, not a trained ML/LLM model (none is configured in this environment) |
 | Customer Portal (customer_user accounts scoped to their own contracts/schedule) | Implemented |
 | Tasks (generic tasks/reminders/follow-ups) | Implemented |
 | Automation Engine (event/scheduled/webhook triggers, conditions/branching, retries, approvals, run history, workflow templates, encrypted secrets) | Implemented, production-capable — see below |
 | AI Execution Layer (AI Agent takes real actions — create leads/tasks, update lead status, assign owners, send messages, update campaigns, call webhooks — through the same permission/policy/approval/audit pipeline as the Automation Engine) | Implemented |
+| Integration Layer (WhatsApp Business, Email/SendGrid, Meta Ads, Google Calendar, Stripe, generic custom REST) | Implemented — real outbound HTTP calls, encrypted per-connection credentials, per-provider rate limiting, retry/backoff, and a delivery event log; reachable from workflows/AI via the `integration_call` action and from the Integrations page. No real third-party credentials are configured in this environment, so live delivery to an actual WhatsApp/SendGrid/etc account is unverified here — the connect/send/log pipeline itself is real, not a stub |
 | Frontend SPA | Implemented — staff app shell plus a separate scoped portal shell for customer_user accounts; verified end-to-end in a real browser |
 | Persistent storage | Implemented (SQLite) — Postgres/Prisma remains a future migration |
 
@@ -170,9 +171,16 @@ this deployment) — surfaced as an "Ask AI" button on the Leads page.
   assignment, employee creation, broker-lead approval) but not every single
   endpoint, and not yet the newer modules (HR, Operations, Legal,
   Purchasing, Marketing, Communication).
-- No external integrations (WhatsApp, ad platforms, payment gateways, MLS).
-  Communication logs messages with an intended channel (`email`/`whatsapp`/
-  `sms`) but never actually sends through a real provider.
+- The Integration Layer (`src/modules/integrations/integration.service.ts`)
+  makes real outbound HTTP calls to WhatsApp Business, SendGrid, Meta Ads,
+  Google Calendar, and Stripe, plus a generic authenticated REST passthrough
+  for other approved services — with encrypted credentials, rate limiting,
+  retries, and a delivery log. It has not been exercised against real
+  third-party credentials in this environment (none are configured), and
+  there is no MLS connector. The internal `Communication` module (message
+  log) is separate and still logs-only by design — external delivery goes
+  through the Integration Layer's `integration_call` action, not through
+  `Communication.sendMessage` directly.
 - Legal documents are metadata records (name, type, status, notes) — there
   is no file upload/storage backing them yet.
 - The AI module is intentionally a transparent, rule-based scorer, not a
@@ -226,7 +234,7 @@ the `x-demo-user` bypass is rejected, and data survives a process restart.
 ## Testing
 
 ```bash
-npm run test              # 258 automated unit/integration tests (node:test)
+npm run test              # 315 automated unit/integration tests (node:test)
 node scripts/e2e-smoke.mjs   # real-browser E2E smoke test (Playwright)
 ```
 
@@ -253,7 +261,7 @@ docker compose up -d app   # SQLite persists to the app-data volume
 **Deployment ready** for a single-instance deployment: real persistent
 storage, real self-service signup connected to real RBAC, a working
 frontend (staff app + a separate scoped customer portal) verified
-end-to-end in a real browser, 258 passing automated tests, and every
+end-to-end in a real browser, 315 passing automated tests, and every
 module named in the original scope — CRM, Sales, Inventory, Payment Plans,
 Finance, Brokers, Organization (incl. Branches/Departments/Projects), HR,
 Operations, Legal, Purchasing, Marketing, Communication, Analytics, AI
@@ -261,7 +269,8 @@ lead scoring, Tasks, the native Automation Engine, the AI Execution Layer,
 and the Customer Portal — is real and working, not stubbed.
 **Not yet "enterprise production ready"**: no horizontal scaling (the
 in-memory concurrency mutex and rate limiter are per-process), no
-Postgres/Prisma migration executed, no external integrations (email/
-WhatsApp/SMS gateways, payment gateways, MLS), no file storage backing
-Legal documents, and audit-log field masking / full endpoint coverage is
-not implemented.
+Postgres/Prisma migration executed, no MLS connector, no real third-party
+credentials configured for the built Integration Layer (WhatsApp/Email/
+Meta Ads/Calendar/Stripe) to verify live delivery against, no file storage
+backing Legal documents, and audit-log field masking / full endpoint
+coverage is not implemented.
