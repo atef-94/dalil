@@ -178,7 +178,12 @@ function stepEditor(step = {}) {
 
 export async function renderAutomation(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Automation Engine')));
+  container.appendChild(el('div', { class: 'page-header' }, [
+    el('div', {}, [
+      el('h1', {}, 'Automation Engine'),
+      el('p', { class: 'page-subtitle' }, ['Pending approvals moved to ', el('a', { href: '#/approvals' }, 'Approvals'), '; run history across every workflow lives on ', el('a', { href: '#/workflow-history' }, 'Workflow History'), '.']),
+    ]),
+  ]));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
@@ -411,48 +416,6 @@ export async function renderAutomation(container) {
     }
   }
 
-  // ---- Pending approvals ----
-  const approvalsSlot = el('div');
-  container.appendChild(approvalsSlot);
-
-  async function decideApproval(approval, action) {
-    try {
-      await api.post(`/api/automation/approvals/${approval.id}/${action}`, {});
-      toast(`Approval ${action}d.`, 'success');
-      await loadApprovals();
-    } catch (err) {
-      errorSlot.appendChild(errorBanner(err.message));
-    }
-  }
-
-  async function loadApprovals() {
-    clear(approvalsSlot);
-    approvalsSlot.appendChild(loadingState());
-    try {
-      const page = await api.get('/api/automation/approvals', { status: 'pending', limit: 50 });
-      clear(approvalsSlot);
-      approvalsSlot.appendChild(el('h3', {}, 'Pending approvals'));
-      approvalsSlot.appendChild(table(
-        [
-          { label: 'Reason', key: 'reason' },
-          { label: 'Requested', render: (a) => new Date(a.createdAt).toLocaleString() },
-          { label: '', render: (a) => {
-            const approveBtn = el('button', { class: 'primary' }, 'Approve');
-            approveBtn.addEventListener('click', () => decideApproval(a, 'approve'));
-            const rejectBtn = el('button', {}, 'Reject');
-            rejectBtn.addEventListener('click', () => decideApproval(a, 'reject'));
-            return el('div', { class: 'form-actions' }, [approveBtn, rejectBtn]);
-          } },
-        ],
-        page.items,
-        { empty: 'No pending approvals.' },
-      ));
-    } catch (err) {
-      clear(approvalsSlot);
-      approvalsSlot.appendChild(errorBanner(err.message));
-    }
-  }
-
   // ---- Secrets ----
   const secretsSlot = el('div', { class: 'card' });
   container.appendChild(secretsSlot);
@@ -508,5 +471,5 @@ export async function renderAutomation(container) {
     }
   }
 
-  await Promise.all([loadStats(), loadWorkflows(), loadApprovals(), loadSecrets()]);
+  await Promise.all([loadStats(), loadWorkflows(), loadSecrets()]);
 }

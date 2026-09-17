@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
+import { el, clear, toast, errorBanner, selectInput, icon } from '../ui.js';
 import { api } from '../api.js';
 
 // require_approval and ai_decide are workflow-only meta-actions (the
@@ -14,11 +14,76 @@ const AUTONOMY_LEVELS = [
 
 export async function renderAi(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'AI Execution Layer')));
-  container.appendChild(el('p', { class: 'muted' },
-    'Every action here — whether suggested, auto-executed, or paused for approval — passes through the same permission, policy, approval, and audit systems as the Automation Engine. AI never bypasses them.'));
+  container.appendChild(el('div', { class: 'page-header' }, [
+    el('div', {}, [
+      el('h1', {}, 'AI Agents'),
+      el('p', { class: 'page-subtitle' }, 'Every action here — whether suggested, auto-executed, or paused for approval — passes through the same permission, policy, approval, and audit systems as the Automation Engine. AI never bypasses them.'),
+    ]),
+  ]));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
+
+  // ---- Agents roster ----
+  const agentsSlot = el('div');
+  container.appendChild(agentsSlot);
+
+  async function loadAgents() {
+    clear(agentsSlot);
+    let agents = [];
+    try {
+      agents = await api.get('/api/ai/agents');
+    } catch (err) {
+      agentsSlot.appendChild(errorBanner(err.message));
+      return;
+    }
+
+    const cards = el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:16px' });
+    for (const agent of agents) {
+      let tools = [];
+      try { tools = await api.get('/api/ai/tools', { agent: agent.key }); } catch { /* non-fatal */ }
+      cards.appendChild(el('div', { class: 'card' }, [
+        el('div', { style: 'display:flex;align-items:center;gap:8px;margin-bottom:6px' }, [icon('ai'), el('strong', {}, agent.name)]),
+        el('div', { style: 'font-size:12px;color:var(--text-muted);margin-bottom:8px' }, agent.businessFunction),
+        el('p', { style: 'font-size:13px' }, agent.goal),
+        el('div', { style: 'font-size:12px;color:var(--text-muted)' }, `Tools: ${tools.map((t) => t.name).join(', ') || '—'}`),
+        el('div', { style: 'font-size:12px;color:var(--text-muted)' }, `Escalates below ${agent.escalateBelowConfidence}% confidence`),
+      ]));
+    }
+    agentsSlot.appendChild(cards);
+
+    // ---- Run a decision on demand ----
+    const agentSelect = selectInput(agents.map((a) => ({ value: a.key, label: a.name })));
+    const subjectInput = el('input', { type: 'text', placeholder: `${agents[0]?.subjectType || 'subject'} id` });
+    const runBtn = el('button', { class: 'primary' }, 'Run decision');
+
+    agentSelect.addEventListener('change', () => {
+      const agent = agents.find((a) => a.key === agentSelect.value);
+      subjectInput.placeholder = `${agent?.subjectType || 'subject'} id`;
+    });
+
+    runBtn.addEventListener('click', async () => {
+      if (!subjectInput.value.trim()) return;
+      runBtn.disabled = true;
+      try {
+        const decision = await api.post(`/api/ai/agents/${agentSelect.value}/decide`, { subjectId: subjectInput.value.trim() });
+        toast(`[${decision.status}, ${decision.confidence}% confidence] ${decision.reasoning}`, decision.status === 'escalated' ? 'info' : 'success');
+      } catch (err) {
+        errorSlot.appendChild(errorBanner(err.message));
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+
+    agentsSlot.appendChild(el('div', { class: 'card' }, [
+      el('h3', { style: 'margin-top:0' }, 'Run a decision on demand'),
+      el('div', { class: 'form-row', style: 'align-items:flex-end' }, [
+        el('div', {}, [el('label', {}, 'Agent'), agentSelect]),
+        el('div', {}, [el('label', {}, 'Subject id'), subjectInput]),
+        runBtn,
+      ]),
+      el('p', { class: 'page-subtitle', style: 'margin-top:8px' }, ['See the outcome in ', el('a', { href: '#/ai-activity' }, 'AI Activity'), '.']),
+    ]));
+  }
 
   // ---- Policies ----
   const policiesSlot = el('div', { class: 'card' });
@@ -27,7 +92,7 @@ export async function renderAi(container) {
   async function loadPolicies() {
     clear(policiesSlot);
     policiesSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Autonomy policy per action type'));
-    policiesSlot.appendChild(el('p', { class: 'muted' }, 'An action type with no policy set defaults to "require approval" — the AI can never auto-execute an action a company hasn\'t explicitly opted into.'));
+    policiesSlot.appendChild(el('p', { class: 'page-subtitle' }, 'An action type with no policy set defaults to "require approval" — the AI can never auto-execute an action a company hasn\'t explicitly opted into.'));
     let current = [];
     try {
       current = await api.get('/api/ai/policies');
@@ -59,137 +124,5 @@ export async function renderAi(container) {
     rows.forEach((r) => policiesSlot.appendChild(r));
   }
 
-  // ---- Agents ----
-  const agentsSlot = el('div', { class: 'card' });
-  container.appendChild(agentsSlot);
-
-  async function loadAgents() {
-    clear(agentsSlot);
-    agentsSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Specialized Agents'));
-    let agents = [];
-    try {
-      agents = await api.get('/api/ai/agents');
-    } catch (err) {
-      agentsSlot.appendChild(errorBanner(err.message));
-      return;
-    }
-
-    const agentSelect = selectInput(agents.map((a) => ({ value: a.key, label: a.name })));
-    const subjectInput = el('input', { type: 'text', placeholder: `${agents[0]?.subjectType || 'subject'} id` });
-    const runBtn = el('button', { class: 'primary' }, 'Run decision');
-    const toolsSlot = el('div', { class: 'muted' });
-
-    async function renderTools() {
-      const agent = agents.find((a) => a.key === agentSelect.value);
-      subjectInput.placeholder = `${agent?.subjectType || 'subject'} id`;
-      try {
-        const tools = await api.get('/api/ai/tools', { agent: agentSelect.value });
-        clear(toolsSlot);
-        toolsSlot.appendChild(el('span', {}, `Goal: ${agent?.goal || ''} — Tools: ${tools.map((t) => t.name).join(', ')}`));
-      } catch {
-        clear(toolsSlot);
-      }
-    }
-    agentSelect.addEventListener('change', renderTools);
-    await renderTools();
-
-    runBtn.addEventListener('click', async () => {
-      if (!subjectInput.value.trim()) return;
-      runBtn.disabled = true;
-      try {
-        const decision = await api.post(`/api/ai/agents/${agentSelect.value}/decide`, { subjectId: subjectInput.value.trim() });
-        toast(`[${decision.status}, ${decision.confidence}% confidence] ${decision.reasoning}`, decision.status === 'escalated' ? 'info' : 'success');
-        await loadDecisions();
-      } catch (err) {
-        errorSlot.appendChild(errorBanner(err.message));
-      } finally {
-        runBtn.disabled = false;
-      }
-    });
-
-    agentsSlot.appendChild(el('div', { class: 'form-row', style: 'align-items:flex-end' }, [
-      el('div', {}, [el('label', {}, 'Agent'), agentSelect]),
-      el('div', {}, [el('label', {}, 'Subject id'), subjectInput]),
-      runBtn,
-    ]));
-    agentsSlot.appendChild(toolsSlot);
-  }
-
-  // ---- Agent decision history ----
-  const decisionsSlot = el('div');
-  container.appendChild(decisionsSlot);
-
-  async function loadDecisions() {
-    clear(decisionsSlot);
-    decisionsSlot.appendChild(loadingState());
-    try {
-      const page = await api.get('/api/ai/decisions', { limit: 50 });
-      clear(decisionsSlot);
-      decisionsSlot.appendChild(el('h3', {}, 'Agent decision history'));
-      decisionsSlot.appendChild(table(
-        [
-          { label: 'Agent', key: 'agentKey' },
-          { label: 'Subject', render: (d) => `${d.subjectType}:${d.subjectId}` },
-          { label: 'Chosen action', render: (d) => d.chosenActionType || '—' },
-          { label: 'Confidence', render: (d) => `${d.confidence}%` },
-          { label: 'Reasoning', render: (d) => d.reasoning },
-          { label: 'Status', render: (d) => statusBadge(d.status) },
-          { label: 'When', render: (d) => new Date(d.createdAt).toLocaleString() },
-        ],
-        page.items.slice().reverse(),
-        { empty: 'No agent decisions yet — run one above.' },
-      ));
-    } catch (err) {
-      clear(decisionsSlot);
-      decisionsSlot.appendChild(errorBanner(err.message));
-    }
-  }
-
-  async function decide(request, action) {
-    try {
-      await api.post(`/api/ai/actions/${request.approvalRequestId}/${action}`, {});
-      toast(`AI action ${action}d.`, 'success');
-      await Promise.all([loadRequests(), loadPolicies()]);
-    } catch (err) {
-      errorSlot.appendChild(errorBanner(err.message));
-    }
-  }
-
-  // ---- Action request log ----
-  const requestsSlot = el('div');
-  container.appendChild(requestsSlot);
-
-  async function loadRequests() {
-    clear(requestsSlot);
-    requestsSlot.appendChild(loadingState());
-    try {
-      const page = await api.get('/api/ai/actions', { limit: 50 });
-      clear(requestsSlot);
-      requestsSlot.appendChild(el('h3', {}, 'AI action requests'));
-      requestsSlot.appendChild(table(
-        [
-          { label: 'Action', key: 'actionType' },
-          { label: 'Requested by', key: 'requestedByUserId' },
-          { label: 'Reasoning', render: (r) => r.reasoning || '' },
-          { label: 'Status', render: (r) => statusBadge(r.status) },
-          { label: 'When', render: (r) => new Date(r.createdAt).toLocaleString() },
-          { label: '', render: (r) => {
-            if (r.status !== 'pending_approval' || !r.approvalRequestId) return '';
-            const approveBtn = el('button', { class: 'primary' }, 'Approve');
-            approveBtn.addEventListener('click', () => decide(r, 'approve'));
-            const rejectBtn = el('button', {}, 'Reject');
-            rejectBtn.addEventListener('click', () => decide(r, 'reject'));
-            return el('div', { class: 'form-actions' }, [approveBtn, rejectBtn]);
-          } },
-        ],
-        page.items.slice().reverse(),
-        { empty: 'No AI action requests yet — try "Ask AI" on a lead in the Leads page.' },
-      ));
-    } catch (err) {
-      clear(requestsSlot);
-      requestsSlot.appendChild(errorBanner(err.message));
-    }
-  }
-
-  await Promise.all([loadPolicies(), loadAgents(), loadDecisions(), loadRequests()]);
+  await Promise.all([loadAgents(), loadPolicies()]);
 }

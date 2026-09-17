@@ -38,6 +38,18 @@ test('granting portal access twice for the same lead is rejected', async () => {
   await assert.rejects(() => svc.grantPortalAccess({ companyId: 'c1', leadId: 'lead-1', email: 'client2@example.com', password: 'password123' }));
 });
 
+test('listCustomers returns only this company\'s customers', async () => {
+  const { svc, leads } = freshService();
+  await seedLead(leads, 'c1');
+  await leads.save({ id: 'lead-2', companyId: 'c2', fullName: 'Other Co Client', phone: '0555-9999', status: 'opportunity', createdAt: new Date().toISOString() });
+  await svc.grantPortalAccess({ companyId: 'c1', leadId: 'lead-1', email: 'client@example.com', password: 'password123' });
+  await svc.grantPortalAccess({ companyId: 'c2', leadId: 'lead-2', email: 'other@example.com', password: 'password123' });
+
+  const c1Customers = await svc.listCustomers('c1');
+  assert.equal(c1Customers.length, 1);
+  assert.equal(c1Customers[0]!.fullName, 'Portal Client');
+});
+
 test('a customer can see only their own contracts', async () => {
   const { svc, leads, contracts } = freshService();
   await seedLead(leads);

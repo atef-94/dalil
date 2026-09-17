@@ -92,6 +92,13 @@ export class InventoryService {
     return this.units.findById(id);
   }
 
+  /** The entity/repo has existed since Reservations were introduced (via
+   * holdUnit/reserveUnit), but nothing could ever list them back — a real
+   * gap for a "which units are reserved, by whom, expiring when" view. */
+  async listReservations(companyId: string, status?: Reservation['status']): Promise<Reservation[]> {
+    return this.reservations.findAll((r) => r.companyId === companyId && (!status || r.status === status));
+  }
+
   private async sweepExpiredHolds(unitId: string): Promise<void> {
     const active = await this.holds.findAll((h) => h.unitId === unitId && h.active);
     const now = Date.now();

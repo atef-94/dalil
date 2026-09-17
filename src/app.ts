@@ -584,6 +584,18 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: paginate(departments, ctx.query) };
   });
 
+  // Company name/creation date for the Settings page — no dedicated
+  // 'company' RBAC resource exists (every authenticated user already
+  // implicitly knows their own companyId from GET /api/me, and a company's
+  // display name isn't sensitive), so this only requires authentication,
+  // the same bar GET /api/me itself uses.
+  httpServer.get('/api/organization/company', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const company = await repos.companies.findById(actor.companyId);
+    if (!company) throw new NotFoundError('company not found');
+    return { status: 200, body: company };
+  });
+
   // ---- Permission Manifest ----
   httpServer.get('/api/me/manifest', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -813,6 +825,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const body = parseJsonBody<{ clientId: string; opportunityId?: string }>(ctx.body);
     const reservation = await inventory.reserveUnit(ctx.params.unitId!, body.clientId, actor.companyId, body.opportunityId);
     return { status: 201, body: reservation };
+  });
+
+  httpServer.get('/api/inventory/reservations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'unit'))) {
+      throw new ForbiddenError('missing view:unit permission');
+    }
+    const status = ctx.query.get('status') as Reservation['status'] | null;
+    const reservations = await inventory.listReservations(actor.companyId, status ?? undefined);
+    return { status: 200, body: paginate(reservations, ctx.query) };
   });
 
   // ---- CRM ----
@@ -1597,6 +1619,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const body = parseJsonBody<{ leadId: string; email: string; password: string }>(ctx.body);
     const { customer } = await portal.grantPortalAccess({ companyId: actor.companyId, ...body });
     return { status: 201, body: customer };
+  });
+
+  httpServer.get('/api/customers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'portal_access'))) {
+      throw new ForbiddenError('missing view:portal_access permission');
+    }
+    const customers = await portal.listCustomers(actor.companyId);
+    return { status: 200, body: paginate(customers, ctx.query) };
   });
 
   const customerActorOf = async (ctx: RequestContext): Promise<{ actor: Actor; customerId: string }> => {

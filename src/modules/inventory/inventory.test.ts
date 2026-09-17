@@ -91,6 +91,25 @@ test('reserving an available unit transitions it to reserved and creates a Reser
   assert.equal(reservation.clientId, 'lead-1');
 });
 
+test('listReservations returns only this company\'s reservations, optionally filtered by status', async () => {
+  const svc = freshService();
+  const unitA = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const unitB = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-2', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const unitOther = await svc.createUnit({ companyId: 'c2', projectId: 'p1', code: 'B-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await svc.reserveUnit(unitA.id, 'lead-1', 'c1');
+  await svc.reserveUnit(unitB.id, 'lead-2', 'c1');
+  await svc.reserveUnit(unitOther.id, 'lead-3', 'c2');
+
+  const all = await svc.listReservations('c1');
+  assert.equal(all.length, 2);
+  assert.ok(all.every((r) => r.companyId === 'c1'));
+
+  const active = await svc.listReservations('c1', 'active');
+  assert.equal(active.length, 2);
+  const converted = await svc.listReservations('c1', 'converted');
+  assert.equal(converted.length, 0);
+});
+
 test('reserving an already-reserved unit fails', async () => {
   const svc = freshService();
   const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });

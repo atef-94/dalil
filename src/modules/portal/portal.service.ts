@@ -63,6 +63,13 @@ export class PortalService {
     return customer;
   }
 
+  /** Staff-facing counterpart to grantPortalAccess/getCustomer — nothing
+   * previously listed the customers a company has granted portal access
+   * to, only the portal's own scoped GET /api/portal/me for that customer. */
+  async listCustomers(companyId: string): Promise<Customer[]> {
+    return this.customers.findAll((c) => c.companyId === companyId);
+  }
+
   async myContracts(customerId: string, companyId: string): Promise<Contract[]> {
     const customer = await this.customers.findById(customerId);
     if (!customer || customer.companyId !== companyId) throw new NotFoundError('customer not found');
