@@ -16,13 +16,17 @@ export async function renderAnalytics(container) {
   container.appendChild(body);
 
   try {
-    const [funnel, pipeline, aging, occupancy, brokerPerf, scores] = await Promise.all([
+    const [funnel, pipeline, aging, occupancy, brokerPerf, scores, speedToContact, conversionRates, costPerLead, lostReasons] = await Promise.all([
       api.get('/api/analytics/sales-funnel'),
       api.get('/api/analytics/pipeline'),
       api.get('/api/analytics/collections-aging'),
       api.get('/api/analytics/inventory-occupancy'),
       api.get('/api/analytics/broker-performance'),
       api.get('/api/analytics/lead-scores'),
+      api.get('/api/analytics/speed-to-first-contact'),
+      api.get('/api/analytics/funnel-conversion-rates'),
+      api.get('/api/analytics/cost-per-qualified-lead'),
+      api.get('/api/analytics/lost-reasons'),
     ]);
 
     clear(body);
@@ -36,6 +40,37 @@ export async function renderAnalytics(container) {
         statCard(funnel.opportunity, 'Opportunity'),
         statCard(funnel.lost, 'Lost'),
       ]),
+    ]));
+
+    body.appendChild(el('div', { class: 'card' }, [
+      el('h3', { style: 'margin-top:0' }, 'Performance analytics'),
+      el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, 'Computed from real recorded activity — no fabricated or estimated figures.'),
+      el('div', { class: 'stat-grid' }, [
+        statCard(
+          speedToContact.averageHours !== null ? `${speedToContact.averageHours}h` : '—',
+          `Avg. speed to first contact${speedToContact.sampleSize ? ` (n=${speedToContact.sampleSize})` : ''}`,
+        ),
+        statCard(`${conversionRates.overallWinRatePercent}%`, 'Overall win rate'),
+        statCard(`${conversionRates.lostRatePercent}%`, 'Lost rate'),
+        statCard(
+          costPerLead.costPerQualifiedLead !== null ? Number(costPerLead.costPerQualifiedLead).toLocaleString() : '—',
+          'Cost per qualified lead',
+        ),
+      ]),
+      el('div', { class: 'stat-grid', style: 'margin-top:10px' }, [
+        statCard(`${conversionRates.newToContactedPercent}%`, 'New → Contacted'),
+        statCard(`${conversionRates.contactedToQualifiedPercent}%`, 'Contacted → Qualified'),
+        statCard(`${conversionRates.qualifiedToOpportunityPercent}%`, 'Qualified → Opportunity'),
+      ]),
+      el('h4', { style: 'margin-bottom:6px' }, 'Lost reasons'),
+      table(
+        [
+          { label: 'Reason', key: 'reason' },
+          { label: 'Count', key: 'count' },
+        ],
+        lostReasons,
+        { empty: 'No lost leads with a recorded reason yet.' },
+      ),
     ]));
 
     body.appendChild(el('div', { class: 'card' }, [

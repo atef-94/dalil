@@ -311,7 +311,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const purchasing = new PurchasingService(repos.vendors, repos.purchaseOrders);
   const marketing = new MarketingService(repos.campaigns, repos.leads);
   const communication = new CommunicationService(repos.messages);
-  const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions);
+  const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions, repos.auditEntries, repos.campaigns);
   const leadScoring = new LeadScoringService(repos.leads);
   const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth, repos.opportunities, repos.legalDocuments, repos.messages, repos.tasks);
   const tasks = new TaskService(repos.tasks);
@@ -2132,6 +2132,38 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:analytics permission');
     }
     return { status: 200, body: await analytics.brokerPerformance(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/speed-to-first-contact', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.speedToFirstContact(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/funnel-conversion-rates', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.funnelConversionRates(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/cost-per-qualified-lead', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.costPerQualifiedLead(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/lost-reasons', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.lostReasonBreakdown(actor.companyId) };
   });
 
   httpServer.get('/api/analytics/lead-scores', async (ctx) => {
