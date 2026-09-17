@@ -94,16 +94,25 @@ export async function renderOpportunities(container) {
             options: templatesPage.items.map((t) => ({ value: t.id, label: t.name })),
           },
           { key: 'totalPrice', label: 'Total contract price', type: 'number', value: String(cached.unitPrice) },
+          { key: 'discountPercent', label: 'Discount (%, optional)', type: 'number' },
         ],
         submitLabel: 'Sign contract',
       });
       if (!result || !result.templateId || !result.totalPrice) return;
-      const contract = await api.post('/api/sales/contracts', {
+      const response = await api.post('/api/sales/contracts', {
         reservationId: cached.reservationId,
         paymentPlanTemplateId: result.templateId,
         totalPrice: Number(result.totalPrice),
+        discountPercent: result.discountPercent ? Number(result.discountPercent) : undefined,
       });
-      toast(`Contract signed (${contract.id.slice(0, 8)}…).`, 'success');
+      // A discount above the company's configured threshold returns a
+      // pending ActionApproval (HTTP 202) instead of a signed Contract
+      // (HTTP 201) — only the latter has no actionType.
+      if (response.actionType) {
+        toast('Discount exceeds the no-approval threshold — sent for approval instead of signing.', 'success');
+      } else {
+        toast(`Contract signed (${response.id.slice(0, 8)}…).`, 'success');
+      }
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));

@@ -31,6 +31,9 @@ import type {
   PaymentScheduleLine,
   PermissionGrant,
   Project,
+  ActionApproval,
+  ApprovableActionType,
+  DiscountApprovalPolicy,
   PurchaseOrder,
   Receipt,
   Reservation,
@@ -80,6 +83,7 @@ import { SalesService } from './modules/sales/sales.service.js';
 import { FinanceService } from './modules/finance/finance.service.js';
 import { BrokersService } from './modules/brokers/brokers.service.js';
 import { SalesCommissionService } from './modules/commissions/sales-commission.service.js';
+import { ApprovalEngineService } from './modules/approvals/approval-engine.service.js';
 import { RoleManagementService } from './modules/permissions/role-management.service.js';
 import { OnboardingService } from './modules/onboarding/onboarding.service.js';
 import { HrService } from './modules/hr/hr.service.js';
@@ -139,6 +143,7 @@ export interface Application {
     finance: FinanceService;
     brokers: BrokersService;
     salesCommissions: SalesCommissionService;
+    approvalEngine: ApprovalEngineService;
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
@@ -225,6 +230,8 @@ function buildRepos(db?: DatabaseSync) {
     leadDistributionPools: repo<LeadDistributionPool>('lead_distribution_pools'),
     salesCommissionRules: repo<SalesCommissionRule>('sales_commission_rules'),
     salesCommissions: repo<SalesCommission>('sales_commissions'),
+    actionApprovals: repo<ActionApproval>('action_approvals'),
+    discountApprovalPolicies: repo<DiscountApprovalPolicy>('discount_approval_policies'),
   };
 }
 
@@ -306,7 +313,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
-  const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
+  const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
+  const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines);
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
@@ -502,6 +510,42 @@ export async function buildApplication(options: AppOptions): Promise<Application
     } catch (err) {
       process.stderr.write(`sales commission recording failed for contract ${contract.id}: ${err instanceof Error ? err.message : String(err)}\n`);
     }
+  };
+
+  // The one real place a signed contract actually gets created — used
+  // both by the direct POST /api/sales/contracts route and by the
+  // discount-override approval resume path below, so approval never
+  // takes a shortcut around audit/event/commission recording.
+  const finishContractSigning = async (
+    companyId: string,
+    input: { reservationId: string; creditedEmployeeUserId: string; paymentPlanTemplateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number },
+    actorUserId: string,
+  ): Promise<Contract> => {
+    const contract = await sales.signContract({ companyId, ...input });
+    await auditLog.record({ companyId, actorUserId, action: 'create', resource: 'contract', resourceId: contract.id });
+    await emitEvent({ companyId, type: 'contract.signed', payload: { ...contract }, actorUserId, dedupeKey: `contract.signed:${contract.id}` });
+    await recordSalesCommissionsAndEmit(companyId, contract, actorUserId);
+    return contract;
+  };
+
+  // Dispatch table for resuming an approved ActionApproval — the
+  // Universal Approval Engine itself knows nothing about contracts or
+  // discounts; this is the one place that maps an actionType to what
+  // "finishing" it actually means. Add a case here for each new
+  // actionType this engine gates.
+  const resumeApprovedAction = async (approval: ActionApproval, actorUserId: string): Promise<unknown> => {
+    if (approval.actionType === 'discount_override') {
+      const ctx = approval.context as {
+        reservationId: string;
+        creditedEmployeeUserId: string;
+        paymentPlanTemplateId: string;
+        totalPrice: number;
+        discountPercent?: number;
+        escalationPercentPerYear?: number;
+      };
+      return finishContractSigning(approval.companyId, ctx, actorUserId);
+    }
+    throw new ValidationError(`no resume handler registered for action type "${String(approval.actionType)}"`);
   };
 
   // ---- Auth ----
@@ -1330,6 +1374,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: contract };
   });
 
+  // Discount governance: a company that never configures this sees zero
+  // change from the discount behavior it always had — any discount can
+  // still be applied directly.
+  httpServer.post('/api/sales/discount-policy', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'contract'))) {
+      throw new ForbiddenError('missing edit:contract permission');
+    }
+    const body = parseJsonBody<{ maxDiscountPercentWithoutApproval: number }>(ctx.body);
+    const policy = await sales.setDiscountApprovalPolicy(actor.companyId, body.maxDiscountPercentWithoutApproval);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'contract', resourceId: policy.id, metadata: { discountPolicy: true } });
+    return { status: 200, body: policy };
+  });
+
+  httpServer.get('/api/sales/discount-policy', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'contract'))) {
+      throw new ForbiddenError('missing view:contract permission');
+    }
+    const policy = await sales.getDiscountApprovalPolicy(actor.companyId);
+    if (!policy) return { status: 404, body: { error: 'no discount approval policy configured for this company' } };
+    return { status: 200, body: policy };
+  });
+
   httpServer.post('/api/sales/contracts', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'contract'))) {
@@ -1342,18 +1410,35 @@ export async function buildApplication(options: AppOptions): Promise<Application
       discountPercent?: number;
       escalationPercentPerYear?: number;
     }>(ctx.body);
-    const contract = await sales.signContract({
-      companyId: actor.companyId,
+    const creditedEmployeeUserId = await resolveCreditedEmployee(actor.companyId, body.reservationId, actor.userId);
+    const signInput = {
       reservationId: body.reservationId,
-      creditedEmployeeUserId: await resolveCreditedEmployee(actor.companyId, body.reservationId, actor.userId),
+      creditedEmployeeUserId,
       paymentPlanTemplateId: body.paymentPlanTemplateId,
       totalPrice: body.totalPrice,
       discountPercent: body.discountPercent,
       escalationPercentPerYear: body.escalationPercentPerYear,
-    });
-    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id });
-    await emitEvent({ companyId: actor.companyId, type: 'contract.signed', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.signed:${contract.id}` });
-    await recordSalesCommissionsAndEmit(actor.companyId, contract, actor.userId);
+    };
+
+    // Universal Approval Engine, wired in for the one real ungoverned
+    // action this system had: a discount of any size could always be
+    // applied at signing with no oversight. A company that never
+    // configures a policy sees no change — sales.discountRequiresApproval
+    // returns false with nothing configured.
+    if (await sales.discountRequiresApproval(actor.companyId, body.discountPercent)) {
+      const approval = await approvalEngine.requestApproval({
+        companyId: actor.companyId,
+        actionType: 'discount_override',
+        requestedByUserId: actor.userId,
+        reason: `Discount of ${body.discountPercent}% exceeds the company's no-approval threshold`,
+        context: signInput,
+      });
+      await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'approval', resourceId: approval.id, metadata: { actionType: 'discount_override' } });
+      await emitEvent({ companyId: actor.companyId, type: 'action_approval.requested', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.requested:${approval.id}` });
+      return { status: 202, body: approval };
+    }
+
+    const contract = await finishContractSigning(actor.companyId, signInput, actor.userId);
     return { status: 201, body: contract };
   });
 
@@ -2551,6 +2636,46 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: run };
   });
 
+  // ---- Universal Approval Engine ----
+  // Independent of the Automation Engine's own ApprovalRequest above (that
+  // one only ever exists inside a workflow run) — any route can gate an
+  // action behind one of these without building a workflow first. See
+  // resumeApprovedAction for how "approving" one actually finishes the
+  // underlying action.
+  httpServer.get('/api/approvals', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'approval'))) {
+      throw new ForbiddenError('missing view:approval permission');
+    }
+    const status = ctx.query.get('status') as ActionApproval['status'] | null;
+    const list = await approvalEngine.listApprovals(actor.companyId, status ?? undefined);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.post('/api/approvals/:approvalId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const approval = await approvalEngine.approve(ctx.params.approvalId!, actor.companyId, actor.userId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'approval', resourceId: approval.id });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.decided', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.decided:${approval.id}` });
+    try {
+      const result = await resumeApprovedAction(approval, actor.userId);
+      return { status: 200, body: { approval, result } };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await approvalEngine.recordResumeFailure(approval.id, actor.companyId, message);
+      throw err;
+    }
+  });
+
+  httpServer.post('/api/approvals/:approvalId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const body = ctx.body && typeof ctx.body === 'object' ? (ctx.body as { reason?: string }) : {};
+    const approval = await approvalEngine.reject(ctx.params.approvalId!, actor.companyId, actor.userId, body.reason);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'approval', resourceId: approval.id, metadata: { rejected: true } });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.decided', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.decided:${approval.id}` });
+    return { status: 200, body: approval };
+  });
+
   // ---- Automation Engine: secrets (encrypted-at-rest credentials for
   // webhook_call actions — never returned in plaintext by any route) ----
   httpServer.post('/api/automation/secrets', async (ctx) => {
@@ -2826,7 +2951,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
     },

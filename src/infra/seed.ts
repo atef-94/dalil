@@ -230,6 +230,10 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   // earnings; "department" additionally lets them see their team's base
   // commissions the way they already see the team's leads/contracts.
   await addGrant(salesManagerRole.id, 'view', 'sales_commission', 'department');
+  // Lets a sales manager decide discount-override approvals raised by
+  // their own team (the Universal Approval Engine's one wired gate).
+  await addGrant(salesManagerRole.id, 'view', 'approval', 'company');
+  await addGrant(salesManagerRole.id, 'approve', 'approval', 'company');
 
   // Sales Agent: own-scoped CRM/Sales, company-wide unit visibility (units
   // are not individually owned), can create/edit their own unit holds.

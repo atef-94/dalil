@@ -13,6 +13,40 @@ export async function renderContracts(container) {
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
+  const thresholdInput = el('input', { type: 'number', placeholder: 'e.g. 10', step: '0.1', min: '0', max: '100' });
+  const savePolicyBtn = el('button', {}, 'Save policy');
+  savePolicyBtn.addEventListener('click', async () => {
+    clear(errorSlot);
+    const threshold = Number(thresholdInput.value);
+    if (!(threshold >= 0 && threshold <= 100)) {
+      errorSlot.appendChild(errorBanner('Enter a threshold percentage between 0 and 100.'));
+      return;
+    }
+    savePolicyBtn.disabled = true;
+    try {
+      await api.post('/api/sales/discount-policy', { maxDiscountPercentWithoutApproval: threshold });
+      toast('Discount approval policy saved.', 'success');
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      savePolicyBtn.disabled = false;
+    }
+  });
+  container.appendChild(el('div', { class: 'card' }, [
+    el('h3', { style: 'margin-top:0' }, 'Discount approval policy'),
+    el('p', { class: 'page-subtitle' }, 'A discount above this threshold can\'t be applied directly — it creates a pending approval on the Approvals page instead. Leave unconfigured for no gate at all.'),
+    el('div', { class: 'form-row' }, [el('div', {}, [el('label', {}, 'Max discount without approval (%)'), thresholdInput])]),
+    el('div', { class: 'form-actions' }, [savePolicyBtn]),
+  ]));
+  (async () => {
+    try {
+      const policy = await api.get('/api/sales/discount-policy');
+      thresholdInput.value = policy.maxDiscountPercentWithoutApproval;
+    } catch {
+      // No policy configured yet — leave the field blank, matching "no gate at all".
+    }
+  })();
+
   const listSlot = el('div');
   container.appendChild(listSlot);
 

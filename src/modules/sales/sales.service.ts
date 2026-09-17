@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Contract, Opportunity } from '../../domain/types.js';
+import type { Contract, DiscountApprovalPolicy, Opportunity } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { SalesError, ValidationError, NotFoundError } from '../../infra/errors.js';
 import { KeyedMutex } from '../../infra/keyed-mutex.js';
@@ -32,7 +32,36 @@ export class SalesService {
     private readonly contracts: Repository<Contract>,
     private readonly inventory: InventoryService,
     private readonly paymentPlans: PaymentPlansService,
+    private readonly discountApprovalPolicies?: Repository<DiscountApprovalPolicy>,
   ) {}
+
+  /** Optional so existing tests/callers that never touch discount policy
+   * don't need to pass a repo they don't have. */
+  private requirePolicyRepo(): Repository<DiscountApprovalPolicy> {
+    if (!this.discountApprovalPolicies) throw new SalesError('discount approval policy is not configured for this deployment', 500);
+    return this.discountApprovalPolicies;
+  }
+
+  async setDiscountApprovalPolicy(companyId: string, maxDiscountPercentWithoutApproval: number): Promise<DiscountApprovalPolicy> {
+    if (!(maxDiscountPercentWithoutApproval >= 0 && maxDiscountPercentWithoutApproval <= 100)) {
+      throw new ValidationError('maxDiscountPercentWithoutApproval must be between 0 and 100');
+    }
+    const policy: DiscountApprovalPolicy = { id: companyId, companyId, maxDiscountPercentWithoutApproval };
+    return this.requirePolicyRepo().save(policy);
+  }
+
+  async getDiscountApprovalPolicy(companyId: string): Promise<DiscountApprovalPolicy | undefined> {
+    return this.requirePolicyRepo().findById(companyId);
+  }
+
+  /** No policy configured for a company means no gate at all — a company
+   * that never opts in sees the exact discount behavior it always had. */
+  async discountRequiresApproval(companyId: string, discountPercent: number | undefined): Promise<boolean> {
+    if (!discountPercent) return false;
+    const policy = await this.requirePolicyRepo().findById(companyId);
+    if (!policy) return false;
+    return discountPercent > policy.maxDiscountPercentWithoutApproval;
+  }
 
   async createOpportunity(input: CreateOpportunityInput): Promise<Opportunity> {
     if (!input.leadId?.trim()) throw new ValidationError('leadId is required');

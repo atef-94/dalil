@@ -676,7 +676,9 @@ export type DomainEventType =
   | 'broker_lead.submitted'
   | 'employee.created'
   | 'sales_commission.recorded'
-  | 'sales_commission.status_changed';
+  | 'sales_commission.status_changed'
+  | 'action_approval.requested'
+  | 'action_approval.decided';
 
 export type ConditionOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'exists';
 
@@ -793,6 +795,48 @@ export interface ApprovalRequest {
   decidedByUserId?: string;
   decidedAt?: string;
   createdAt: string;
+}
+
+// ---- Universal Approval Engine ----
+// ApprovalRequest above only ever exists as part of an Automation Workflow
+// run (it requires a runId/stepId) — there's no way for an ordinary route
+// to gate a single action behind a manager's approval without wrapping it
+// in a full workflow. ActionApproval is that missing generic mechanism:
+// any route can create one, store enough context to finish the gated
+// action later, and resume it once approved — see
+// app.ts recordActionApprovalDecision + the discount-override gate on
+// contract signing for the first real, wired example.
+export type ApprovableActionType = 'discount_override';
+
+export interface ActionApproval {
+  id: string;
+  companyId: string;
+  actionType: ApprovableActionType;
+  requestedByUserId: string;
+  reason: string;
+  /** Exactly what's needed to finish the gated action once approved —
+   * shape depends on actionType (see app.ts's dispatch for each type). */
+  context: Record<string, unknown>;
+  status: ApprovalStatus;
+  decidedByUserId?: string;
+  decidedAt?: string;
+  rejectionReason?: string;
+  /** Set if the action itself failed when resumed after approval (e.g. the
+   * reservation was no longer active by the time someone approved it) —
+   * the approval decision still stands; this just records that acting on
+   * it didn't succeed, instead of silently losing that information. */
+  resumeFailedReason?: string;
+  createdAt: string;
+}
+
+/** Per-company policy: a contract's discountPercent above this threshold
+ * can't be signed directly — it creates an ActionApproval instead. Absent
+ * entirely (no row for a company) means no gate at all, so a company
+ * that never configures one sees zero behavior change. */
+export interface DiscountApprovalPolicy {
+  id: string; // === companyId, one policy per company
+  companyId: string;
+  maxDiscountPercentWithoutApproval: number;
 }
 
 /** Encrypted-at-rest credential store for outbound webhook_call actions
