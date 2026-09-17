@@ -71,6 +71,7 @@ import { OrganizationService } from './modules/organization/organization.service
 import { AuthService } from './modules/auth/auth.service.js';
 import { CrmService } from './modules/crm/crm.service.js';
 import { LeadDistributionService } from './modules/crm/lead-distribution.service.js';
+import { LeadTimelineService } from './modules/crm/lead-timeline.service.js';
 import { InventoryService } from './modules/inventory/inventory.service.js';
 import { PaymentPlansService } from './modules/payment-plans/payment-plans.service.js';
 import { SalesService } from './modules/sales/sales.service.js';
@@ -128,6 +129,7 @@ export interface Application {
     auth: AuthService;
     crm: CrmService;
     leadDistribution: LeadDistributionService;
+    leadTimeline: LeadTimelineService;
     inventory: InventoryService;
     paymentPlans: PaymentPlansService;
     sales: SalesService;
@@ -295,6 +297,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const auth = new AuthService(repos.users, options.tokenSecret);
   const crm = new CrmService(repos.leads);
   const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm);
+  const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
@@ -1141,7 +1144,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ status: Lead['status']; lostReason?: string }>(ctx.body);
+    const fromStatus = lead.status;
     const updated = await crm.updateStatus(ctx.params.leadId!, body.status, body.lostReason);
+    // Previously-unfixed gap: this route never wrote to the audit trail at
+    // all, so a lead's status history had no persisted record beyond its
+    // current value — the Lead Timeline (GET .../timeline below) reads
+    // this metadata to reconstruct that history.
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'lead',
+      resourceId: updated.id,
+      metadata: { fromStatus, toStatus: updated.status, lostReason: updated.lostReason },
+    });
     await emitEvent({
       companyId: actor.companyId,
       type: 'lead.status_changed',
@@ -1150,6 +1166,57 @@ export async function buildApplication(options: AppOptions): Promise<Application
       dedupeKey: `lead.status_changed:${updated.id}:${updated.status}`,
     });
     return { status: 200, body: updated };
+  });
+
+  // Progressive custom-field capture: an agent fills these real-estate/
+  // financial qualifying details in as they learn more, not all at once.
+  httpServer.patch('/api/crm/leads/:leadId/details', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'edit', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
+    const body = parseJsonBody<{
+      propertyTypeWanted?: string;
+      purchaseGoal?: string;
+      preferredLocation?: string;
+      minAreaSqm?: number;
+      maxAreaSqm?: number;
+      expectedDeliveryTimeline?: string;
+      maxDownPayment?: number;
+      maxInstallment?: number;
+      preferredTenorMonths?: number;
+      preferredTransferMethod?: string;
+    }>(ctx.body);
+    const updated = await crm.updateCustomFields(ctx.params.leadId!, actor.companyId, body);
+    return { status: 200, body: updated };
+  });
+
+  // Unified Lead Timeline: everything ACTIVE actually recorded about this
+  // lead (status/owner history, messages, tasks, opportunity, contract),
+  // in one chronological view.
+  httpServer.get('/api/crm/leads/:leadId/timeline', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'view', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing view:lead permission for this lead');
+    const timeline = await leadTimeline.getTimeline(ctx.params.leadId!, actor.companyId);
+    return { status: 200, body: timeline };
   });
 
   // ---- Sales ----
@@ -2609,7 +2676,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, leadDistribution, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
     },

@@ -277,6 +277,22 @@ export interface Lead {
   /** How many times the SLA sweep has auto-reassigned or re-flagged this
    * lead for missing first contact. */
   reassignmentCount?: number;
+
+  // ---- Custom fields ----
+  // Real-estate/financial qualifying details captured progressively as
+  // the agent learns more about the client — all optional, all free-form
+  // where the value genuinely varies by market (no fixed enum invented
+  // for e.g. "property type" or "transfer method").
+  propertyTypeWanted?: string;
+  purchaseGoal?: string;
+  preferredLocation?: string;
+  minAreaSqm?: number;
+  maxAreaSqm?: number;
+  expectedDeliveryTimeline?: string;
+  maxDownPayment?: number;
+  maxInstallment?: number;
+  preferredTenorMonths?: number;
+  preferredTransferMethod?: string;
 }
 
 export type LeadDistributionMode = 'round_robin' | 'skill_based';

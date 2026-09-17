@@ -1,5 +1,10 @@
-import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, formModal, loadingState, searchInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, formModal, loadingState, searchInput, contentModal } from '../ui.js';
 import { api } from '../api.js';
+
+const TIMELINE_ICONS = {
+  lead_created: '✦', status_changed: '↳', owner_changed: '⇄', message: '✉',
+  task: '☑', opportunity_created: '★', contract_signed: '✔', contract_cancelled: '✖',
+};
 
 const NEXT_STATUS = { new: 'contacted', contacted: 'qualified', qualified: 'opportunity' };
 
@@ -109,6 +114,68 @@ export async function renderLeads(container) {
     }
   }
 
+  async function editDetails(lead) {
+    const result = await formModal({
+      title: `Requirements for ${lead.fullName}`,
+      fields: [
+        { key: 'propertyTypeWanted', label: 'Property type wanted', placeholder: 'e.g. apartment, villa', value: lead.propertyTypeWanted },
+        { key: 'purchaseGoal', label: 'Purchase goal', placeholder: 'e.g. investment, end use', value: lead.purchaseGoal },
+        { key: 'preferredLocation', label: 'Preferred location', placeholder: 'e.g. New Cairo', value: lead.preferredLocation },
+        { key: 'minAreaSqm', label: 'Min area (sqm)', type: 'number', value: lead.minAreaSqm },
+        { key: 'maxAreaSqm', label: 'Max area (sqm)', type: 'number', value: lead.maxAreaSqm },
+        { key: 'expectedDeliveryTimeline', label: 'Expected delivery timeline', placeholder: 'e.g. ready to move, off-plan ok', value: lead.expectedDeliveryTimeline },
+        { key: 'maxDownPayment', label: 'Max down payment', type: 'number', value: lead.maxDownPayment },
+        { key: 'maxInstallment', label: 'Max monthly installment', type: 'number', value: lead.maxInstallment },
+        { key: 'preferredTenorMonths', label: 'Preferred tenor (months)', type: 'number', value: lead.preferredTenorMonths },
+        { key: 'preferredTransferMethod', label: 'Preferred transfer method', placeholder: 'e.g. cash, bank transfer', value: lead.preferredTransferMethod },
+      ],
+      submitLabel: 'Save requirements',
+    });
+    if (!result) return;
+    const numeric = (v) => (v.trim() === '' ? undefined : Number(v));
+    try {
+      await api.patch(`/api/crm/leads/${lead.id}/details`, {
+        propertyTypeWanted: result.propertyTypeWanted.trim() || undefined,
+        purchaseGoal: result.purchaseGoal.trim() || undefined,
+        preferredLocation: result.preferredLocation.trim() || undefined,
+        minAreaSqm: numeric(result.minAreaSqm),
+        maxAreaSqm: numeric(result.maxAreaSqm),
+        expectedDeliveryTimeline: result.expectedDeliveryTimeline.trim() || undefined,
+        maxDownPayment: numeric(result.maxDownPayment),
+        maxInstallment: numeric(result.maxInstallment),
+        preferredTenorMonths: numeric(result.preferredTenorMonths),
+        preferredTransferMethod: result.preferredTransferMethod.trim() || undefined,
+      });
+      toast('Requirements saved.', 'success');
+      await load();
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
+  async function openTimeline(lead) {
+    const body = el('div', {});
+    body.appendChild(loadingState());
+    contentModal(`${lead.fullName} — Timeline`, body);
+    try {
+      const timeline = await api.get(`/api/crm/leads/${lead.id}/timeline`);
+      clear(body);
+      if (timeline.entries.length === 0) {
+        body.appendChild(el('p', { class: 'muted' }, 'No activity recorded yet.'));
+      }
+      body.appendChild(el('div', { class: 'timeline' }, timeline.entries.map((e) => el('div', { class: 'timeline-entry', style: 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#e5e5e5)' }, [
+        el('span', {}, TIMELINE_ICONS[e.type] || '•'),
+        el('div', {}, [
+          el('div', {}, e.summary),
+          el('div', { class: 'muted', style: 'font-size:12px' }, new Date(e.at).toLocaleString()),
+        ]),
+      ]))));
+    } catch (err) {
+      clear(body);
+      body.appendChild(errorBanner(err.message));
+    }
+  }
+
   async function grantPortalAccess(lead) {
     const result = await formModal({
       title: `Grant customer portal access to ${lead.fullName}`,
@@ -139,7 +206,13 @@ export async function renderLeads(container) {
           { label: 'Phone', key: 'phone' },
           { label: 'Status', render: (l) => statusBadge(l.status) },
           { label: '', render: (l) => {
-            const actions = el('div', { style: 'display:flex;gap:6px' });
+            const actions = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' });
+            const detailsBtn = el('button', {}, 'Requirements');
+            detailsBtn.addEventListener('click', () => editDetails(l));
+            actions.appendChild(detailsBtn);
+            const timelineBtn = el('button', {}, 'Timeline');
+            timelineBtn.addEventListener('click', () => openTimeline(l));
+            actions.appendChild(timelineBtn);
             if (NEXT_STATUS[l.status]) {
               const btn = el('button', {}, `→ ${NEXT_STATUS[l.status]}`);
               btn.addEventListener('click', () => { btn.disabled = true; advance(l, btn); });
