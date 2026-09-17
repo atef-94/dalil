@@ -292,7 +292,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const communication = new CommunicationService(repos.messages);
   const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions);
   const leadScoring = new LeadScoringService(repos.leads);
-  const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth);
+  const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth, repos.opportunities, repos.legalDocuments, repos.messages, repos.tasks);
   const tasks = new TaskService(repos.tasks);
   const eventBus = new EventBus();
   const automation = new AutomationService(
@@ -302,6 +302,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     communication,
     crm,
     marketing,
+    finance,
+    sales,
     auditLog,
     options.secretStoreKey ?? options.tokenSecret,
     undefined,
@@ -1641,6 +1643,19 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const customers = await portal.listCustomers(actor.companyId);
     const filtered = searchFilter(customers, ['fullName', 'phone', 'email'], ctx.query.get('q'));
     return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  // Customer 360: everything ACTIVE already knows about one customer,
+  // joined from CRM/Sales/Payment Plans/Legal/Communication/Tasks — see
+  // PortalService.getCustomer360 for the join logic. Same permission as
+  // the customer list above, since this is just one customer's detail.
+  httpServer.get('/api/customers/:id/360', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'portal_access'))) {
+      throw new ForbiddenError('missing view:portal_access permission');
+    }
+    const profile = await portal.getCustomer360(ctx.params.id!, actor.companyId);
+    return { status: 200, body: profile };
   });
 
   const customerActorOf = async (ctx: RequestContext): Promise<{ actor: Actor; customerId: string }> => {

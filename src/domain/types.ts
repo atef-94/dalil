@@ -579,7 +579,9 @@ export type AutomationActionType =
   | 'webhook_call'
   | 'integration_call'
   | 'ai_decide'
-  | 'require_approval';
+  | 'require_approval'
+  | 'record_payment'
+  | 'cancel_contract';
 
 export interface WorkflowActionConfig {
   type: AutomationActionType;

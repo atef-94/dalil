@@ -9,6 +9,7 @@ import type {
   LeadStatus,
   MessageChannel,
   MessageRelatedResource,
+  PaymentMethod,
   ResourceName,
   Secret,
   StepRunStatus,
@@ -34,6 +35,8 @@ import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
+import { FinanceService } from '../finance/finance.service.js';
+import { SalesService } from '../sales/sales.service.js';
 
 export interface AutomationRepos {
   workflows: Repository<WorkflowDefinition>;
@@ -192,6 +195,8 @@ const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   integration_call: 'integration_connection',
   ai_decide: 'ai_action',
   require_approval: 'approval',
+  record_payment: 'payment_schedule',
+  cancel_contract: 'contract',
 };
 
 const ACTION_VERB: Record<AutomationActionType, ActionName> = {
@@ -205,6 +210,8 @@ const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   integration_call: 'create',
   ai_decide: 'create',
   require_approval: 'approve',
+  record_payment: 'edit',
+  cancel_contract: 'edit',
 };
 
 /**
@@ -255,6 +262,8 @@ export class AutomationService {
     private readonly communication: CommunicationService,
     private readonly crm: CrmService,
     private readonly marketing: MarketingService,
+    private readonly finance: FinanceService,
+    private readonly sales: SalesService,
     private readonly auditLog: AuditLog,
     private readonly encryptionSecret: string,
     private readonly fetchImpl: typeof fetch = fetch,
@@ -858,6 +867,26 @@ export class AutomationService {
         const status = this.requireString(params.status, 'status') as CampaignStatus;
         const updated = await this.marketing.updateStatus(campaignId, companyId, status);
         return { campaignId: updated.id, status: updated.status };
+      }
+      case 'record_payment': {
+        const contractId = this.requireString(params.contractId, 'contractId');
+        const contract = await this.sales.getContract(contractId);
+        if (!contract || contract.companyId !== companyId) throw new AutomationError('contract not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, contract.creditedEmployeeUserId);
+        const paymentScheduleLineId = this.requireString(params.paymentScheduleLineId, 'paymentScheduleLineId');
+        const amount = params.amount;
+        if (typeof amount !== 'number' || amount <= 0) throw new ValidationError('"amount" must be a positive number');
+        const method = this.requireString(params.method, 'method') as PaymentMethod;
+        const result = await this.finance.recordPayment({ companyId, contractId, paymentScheduleLineId, amount, method, recordedByUserId: actorUserId });
+        return { paymentId: result.payment.id, lineId: result.line.id, lineStatus: result.line.status };
+      }
+      case 'cancel_contract': {
+        const contractId = this.requireString(params.contractId, 'contractId');
+        const contract = await this.sales.getContract(contractId);
+        if (!contract || contract.companyId !== companyId) throw new AutomationError('contract not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, contract.creditedEmployeeUserId);
+        const cancelled = await this.sales.cancelContract(contractId, companyId);
+        return { contractId: cancelled.id, status: cancelled.status };
       }
       case 'webhook_call': {
         await this.requirePermission(actorUserId, action, companyId);

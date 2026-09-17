@@ -11,6 +11,9 @@ import { MarketingService } from '../marketing/marketing.service.js';
 import { OperationsService } from '../operations/operations.service.js';
 import { HrService } from '../hr/hr.service.js';
 import { FinanceService } from '../finance/finance.service.js';
+import { SalesService } from '../sales/sales.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from '../integrations/integration.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
@@ -30,16 +33,22 @@ import type {
   LeaveRequest,
   MaintenanceTicket,
   Message,
+  Contract,
+  Opportunity,
   Payment,
+  PaymentPlanTemplate,
   PaymentScheduleLine,
   PermissionGrant,
   PermissionOverride,
+  Project,
   Receipt,
+  Reservation,
   ResourceName,
   Role,
   Secret,
   Task,
   Unit,
+  UnitHold,
   User,
   UserRole,
   WorkflowDefinition,
@@ -73,6 +82,12 @@ function freshHarness() {
   const payments = new InMemoryRepository<Payment>();
   const receipts = new InMemoryRepository<Receipt>();
   const scheduleLines = new InMemoryRepository<PaymentScheduleLine>();
+  const opportunities = new InMemoryRepository<Opportunity>();
+  const contracts = new InMemoryRepository<Contract>();
+  const holds = new InMemoryRepository<UnitHold>();
+  const reservations = new InMemoryRepository<Reservation>();
+  const projects = new InMemoryRepository<Project>();
+  const templates = new InMemoryRepository<PaymentPlanTemplate>();
 
   const tasks = new TaskService(tasksRepo);
   const communication = new CommunicationService(messages);
@@ -83,6 +98,9 @@ function freshHarness() {
   const operations = new OperationsService(maintenanceTickets, units);
   const hr = new HrService(leaveRequests, employees);
   const finance = new FinanceService(payments, receipts, scheduleLines);
+  const inventory = new InventoryService(units, holds, reservations, projects);
+  const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
   const automation = new AutomationService(
     { workflows, runs, stepRuns, approvals, secrets },
@@ -91,6 +109,8 @@ function freshHarness() {
     communication,
     crm,
     marketing,
+    finance,
+    sales,
     auditLog,
     'test-encryption-secret-not-for-production',
   );

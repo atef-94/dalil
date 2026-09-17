@@ -251,6 +251,20 @@ function openModalShell(titleText, bodyNode) {
   return { overlay, card, close };
 }
 
+/** Opens a modal around arbitrary read-only content (e.g. a detail/summary
+ * view) using the exact same shell confirmModal/formModal use — for pages
+ * that need more than a yes/no or a form. Returns { close }; the caller
+ * builds and appends its own content to the returned card body region via
+ * bodyNode, which it constructs before calling this. */
+export function contentModal(title, bodyNode, { wide = false } = {}) {
+  const { card, close } = openModalShell(title, bodyNode);
+  if (wide) card.classList.add('wide');
+  const closeBtn = el('button', { class: 'modal-close', 'aria-label': 'Close' }, '×');
+  closeBtn.addEventListener('click', close);
+  card.insertBefore(closeBtn, card.firstChild);
+  return { close };
+}
+
 /** Promise-based replacement for window.confirm — styled, keyboard/overlay
  * dismissible, never blocks the whole browser tab. */
 export function confirmModal(message, { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {

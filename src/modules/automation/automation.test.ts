@@ -8,21 +8,35 @@ import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
+import { FinanceService } from '../finance/finance.service.js';
+import { SalesService } from '../sales/sales.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 import { AutomationService } from './automation.service.js';
 import type {
   ActionName,
   ApprovalRequest,
   AuditLogEntry,
   Campaign,
+  Contract,
   Employee,
   Lead,
   Message,
+  Opportunity,
+  Payment,
+  PaymentPlanTemplate,
+  PaymentScheduleLine,
   PermissionGrant,
   PermissionOverride,
+  Project,
+  Receipt,
   ResourceName,
   Role,
   Secret,
   Task,
+  Unit,
+  UnitHold,
+  Reservation,
   User,
   UserRole,
   WorkflowDefinition,
@@ -57,6 +71,21 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
   const marketing = new MarketingService(campaigns, leads);
   const auditLog = new AuditLog(auditLogRepo);
 
+  const opportunities = new InMemoryRepository<Opportunity>();
+  const contracts = new InMemoryRepository<Contract>();
+  const payments = new InMemoryRepository<Payment>();
+  const receipts = new InMemoryRepository<Receipt>();
+  const scheduleLines = new InMemoryRepository<PaymentScheduleLine>();
+  const units = new InMemoryRepository<Unit>();
+  const holds = new InMemoryRepository<UnitHold>();
+  const reservations = new InMemoryRepository<Reservation>();
+  const projects = new InMemoryRepository<Project>();
+  const templates = new InMemoryRepository<PaymentPlanTemplate>();
+  const inventory = new InventoryService(units, holds, reservations, projects);
+  const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const finance = new FinanceService(payments, receipts, scheduleLines);
+  const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
+
   const fetchCalls: { url: string; init?: RequestInit }[] = [];
   let fetchImpl: typeof fetch = (async (url, init) => {
     fetchCalls.push({ url: String(url), init: init as RequestInit | undefined });
@@ -70,6 +99,8 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
     communication,
     crm,
     marketing,
+    finance,
+    sales,
     auditLog,
     'test-encryption-secret-not-for-production',
     ((url: Parameters<typeof fetch>[0], init?: RequestInit) => fetchImpl(url, init)) as typeof fetch,
@@ -89,6 +120,13 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
     campaigns,
     crm,
     marketing,
+    finance,
+    sales,
+    contracts,
+    scheduleLines,
+    units,
+    projects,
+    reservations,
     runs,
     stepRuns,
     auditLogRepo,
@@ -466,6 +504,80 @@ test('update_campaign_status action updates the real campaign through MarketingS
   assert.equal(run!.status, 'completed');
   const updated = await h.marketing.getCampaign(campaign.id);
   assert.equal(updated!.status, 'active');
+});
+
+test('record_payment action records a real payment through FinanceService and advances the schedule line', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'payment_schedule' }]);
+  await h.contracts.save({ id: 'contract-1', companyId: 'c1', reservationId: 'r1', unitId: 'u1', clientId: 'lead-1', creditedEmployeeUserId: 'owner-1', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+  await h.scheduleLines.save({ id: 'line-1', companyId: 'c1', contractId: 'contract-1', sourceTemplateId: 't1', sourceTemplateVersion: 1, sequence: 0, label: 'Down payment', dueDate: new Date().toISOString(), amount: 1000, amountPaid: 0, status: 'upcoming' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Record collected payment',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'payment.recorded' },
+    steps: [{ name: 'Record it', action: { type: 'record_payment', params: { contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 1000, method: 'transfer' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'payment.recorded', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const line = await h.scheduleLines.findById('line-1');
+  assert.equal(line!.status, 'paid');
+  assert.equal(line!.amountPaid, 1000);
+});
+
+test('record_payment action rejects a contract belonging to a different company (cross-tenant)', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'payment_schedule' }]);
+  await h.contracts.save({ id: 'contract-2', companyId: 'c2', reservationId: 'r2', unitId: 'u2', clientId: 'lead-2', creditedEmployeeUserId: 'owner-2', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Record collected payment',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'payment.recorded' },
+    steps: [{ name: 'Record it', action: { type: 'record_payment', params: { contractId: 'contract-2', paymentScheduleLineId: 'line-1', amount: 1000, method: 'transfer' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'payment.recorded', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /contract not found/);
+});
+
+test('cancel_contract action cancels a real contract through SalesService', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'contract' }]);
+  await h.units.save({ id: 'u3', companyId: 'c1', projectId: 'p1', code: 'A-101', unitType: 'apartment', areaSqm: 120, listPrice: 900000, status: 'contracted', createdAt: new Date().toISOString() });
+  await h.reservations.save({ id: 'r3', companyId: 'c1', unitId: 'u3', clientId: 'lead-3', status: 'converted', createdAt: new Date().toISOString(), expiresAt: new Date().toISOString() });
+  await h.contracts.save({ id: 'contract-3', companyId: 'c1', reservationId: 'r3', unitId: 'u3', clientId: 'lead-3', creditedEmployeeUserId: 'owner-1', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Cancel stale contract',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Cancel it', action: { type: 'cancel_contract', params: { contractId: 'contract-3' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const cancelled = await h.contracts.findById('contract-3');
+  assert.equal(cancelled!.status, 'cancelled');
+});
+
+test('cancel_contract action fails when the workflow creator lacks edit:contract permission', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', []);
+  await h.contracts.save({ id: 'contract-4', companyId: 'c1', reservationId: 'r4', unitId: 'u4', clientId: 'lead-4', creditedEmployeeUserId: 'owner-1', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Cancel stale contract',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Cancel it', action: { type: 'cancel_contract', params: { contractId: 'contract-4' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lacks edit:contract permission/);
 });
 
 test('webhook_call sends a bearer token resolved from the encrypted secret store', async () => {
