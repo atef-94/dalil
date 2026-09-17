@@ -31,6 +31,7 @@ export const RESOURCES: ResourceName[] = [
   'secret',
   'task',
   'ai_action',
+  'integration_connection',
 ];
 
 export interface PermissionManifestEntry {

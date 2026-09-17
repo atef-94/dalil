@@ -3,6 +3,8 @@ import type {
   AiActionRequest,
   AiPolicy,
   ApprovalRequest,
+  IntegrationConnection,
+  IntegrationEvent,
   AuditLogEntry,
   Branch,
   BrokerCompany,
@@ -78,6 +80,7 @@ import { PortalService } from './modules/portal/portal.service.js';
 import { TaskService } from './modules/tasks/task.service.js';
 import { AutomationService, type WorkflowStepInput } from './modules/automation/automation.service.js';
 import { AiAgentService } from './modules/ai/ai-agent.service.js';
+import { IntegrationService } from './modules/integrations/integration.service.js';
 
 export interface AppOptions {
   nodeEnv: string;
@@ -135,6 +138,7 @@ export interface Application {
     automation: AutomationService;
     eventBus: EventBus;
     aiAgent: AiAgentService;
+    integrations: IntegrationService;
     /** Sweeps overdue payment schedule lines AND emits one
      * `payment.overdue_swept` domain event per swept line — use this
      * instead of `finance.sweepOverdue()` wherever the sweep should also
@@ -193,6 +197,8 @@ function buildRepos(db?: DatabaseSync) {
     aiActionRequests: repo<AiActionRequest>('ai_action_requests'),
     aiPolicies: repo<AiPolicy>('ai_policies'),
     agentDecisions: repo<AgentDecision>('agent_decisions'),
+    integrationConnections: repo<IntegrationConnection>('integration_connections'),
+    integrationEvents: repo<IntegrationEvent>('integration_events'),
   };
 }
 
@@ -319,6 +325,19 @@ export async function buildApplication(options: AppOptions): Promise<Application
     operations,
     hr,
     finance,
+  );
+
+  const integrations = new IntegrationService(
+    { connections: repos.integrationConnections, events: repos.integrationEvents },
+    automation,
+    auditLog,
+  );
+  // Wires the generic `integration_call` action type (workflow steps and
+  // AI actions alike) to the Integration Layer's send() — see the
+  // integrationSender field comment in automation.service.ts for why this
+  // is late-bound instead of a constructor dependency.
+  automation.setIntegrationSender((companyId, provider, action, params, userId) =>
+    integrations.send(companyId, provider as IntegrationConnection['provider'], action, params, userId),
   );
 
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
@@ -1988,6 +2007,71 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: stats };
   });
 
+  // ---- Integration Layer (WhatsApp, Email, Meta Ads, Google Calendar,
+  // Stripe, and a generic custom_api connector for other approved
+  // third-party services) — secure credential storage (reused from the
+  // Automation Engine's encrypted Secret store), rate limiting, retries,
+  // and delivery logging. See IntegrationService. ----
+  httpServer.get('/api/integrations/connectors', async (ctx) => {
+    await actorOf(ctx);
+    return { status: 200, body: integrations.listConnectors() };
+  });
+
+  httpServer.post('/api/integrations/connections', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'integration_connection'))) {
+      throw new ForbiddenError('missing create:integration_connection permission');
+    }
+    const body = parseJsonBody<{
+      provider: IntegrationConnection['provider'];
+      displayName: string;
+      config?: Record<string, unknown>;
+      credentials: Record<string, string>;
+    }>(ctx.body);
+    const connection = await integrations.connect({ companyId: actor.companyId, createdByUserId: actor.userId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'integration_connection', resourceId: connection.id, metadata: { provider: connection.provider } });
+    return { status: 201, body: connection };
+  });
+
+  httpServer.get('/api/integrations/connections', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'integration_connection'))) {
+      throw new ForbiddenError('missing view:integration_connection permission');
+    }
+    const list = await integrations.listConnections(actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.delete('/api/integrations/connections/:connectionId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'delete', 'integration_connection'))) {
+      throw new ForbiddenError('missing delete:integration_connection permission');
+    }
+    const connection = await integrations.disconnect(ctx.params.connectionId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'integration_connection', resourceId: connection.id });
+    return { status: 200, body: connection };
+  });
+
+  httpServer.post('/api/integrations/:provider/send', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'integration_connection'))) {
+      throw new ForbiddenError('missing create:integration_connection permission');
+    }
+    const body = parseJsonBody<{ action: string; params: Record<string, unknown> }>(ctx.body);
+    const result = await integrations.send(actor.companyId, ctx.params.provider as IntegrationConnection['provider'], body.action, body.params ?? {}, actor.userId);
+    return { status: 200, body: result };
+  });
+
+  httpServer.get('/api/integrations/events', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'integration_connection'))) {
+      throw new ForbiddenError('missing view:integration_connection permission');
+    }
+    const connectionId = ctx.query.get('connectionId') ?? undefined;
+    const list = await integrations.listEvents(actor.companyId, connectionId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
   // ---- Audit ----
   httpServer.get('/api/audit-log', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -2014,7 +2098,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, aiAgent,
+      tasks, automation, eventBus, sweepOverdueAndEmit, aiAgent, integrations,
     },
     seedResult,
   };

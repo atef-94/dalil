@@ -24,6 +24,7 @@ import { renderAnalytics } from './pages/analytics.js';
 import { renderPortal } from './pages/portal.js';
 import { renderAutomation } from './pages/automation.js';
 import { renderAi } from './pages/ai.js';
+import { renderIntegrations } from './pages/integrations.js';
 
 const NAV = [
   { path: '/dashboard', labelKey: 'nav_dashboard', render: renderDashboard },
@@ -41,6 +42,7 @@ const NAV = [
   { path: '/analytics', labelKey: 'nav_analytics', render: renderAnalytics },
   { path: '/automation', labelKey: 'nav_automation', render: renderAutomation },
   { path: '/ai', labelKey: 'nav_ai', render: renderAi },
+  { path: '/integrations', labelKey: 'nav_integrations', render: renderIntegrations },
   { path: '/employees', labelKey: 'nav_employees', render: renderEmployees },
   { path: '/hr', labelKey: 'nav_hr', render: renderHr },
   { path: '/roles', labelKey: 'nav_roles', render: renderRoles },

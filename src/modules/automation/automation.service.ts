@@ -164,6 +164,7 @@ const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   assign_lead_owner: 'lead',
   update_campaign_status: 'campaign',
   webhook_call: 'secret',
+  integration_call: 'integration_connection',
   require_approval: 'approval',
 };
 
@@ -175,6 +176,7 @@ const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   assign_lead_owner: 'edit',
   update_campaign_status: 'edit',
   webhook_call: 'view',
+  integration_call: 'create',
   require_approval: 'approve',
 };
 
@@ -201,6 +203,12 @@ export class AutomationService {
   // burst of triggers (e.g. many leads created at once) queues instead of
   // spawning unbounded concurrent webhook_call/etc. work.
   private readonly executionLimiter: ConcurrencyLimiter;
+  // Late-bound rather than constructor-injected: IntegrationService itself
+  // depends on AutomationService (for encrypted credential storage via
+  // getDecryptedSecret/setSecret), so a constructor-level dependency in the
+  // other direction would be circular. app.ts wires this once, right after
+  // both services are constructed, via setIntegrationSender().
+  private integrationSender?: (companyId: string, provider: string, action: string, params: Record<string, unknown>, userId: string) => Promise<Record<string, unknown>>;
 
   constructor(
     private readonly repos: AutomationRepos,
@@ -219,6 +227,15 @@ export class AutomationService {
     maxConcurrentRuns = 10,
   ) {
     this.executionLimiter = new ConcurrencyLimiter(maxConcurrentRuns);
+  }
+
+  /** Wires the Integration Layer's send() in as the executor for
+   * `integration_call` steps/AI actions — see the field comment above for
+   * why this is late-bound rather than a constructor dependency. */
+  setIntegrationSender(
+    sender: (companyId: string, provider: string, action: string, params: Record<string, unknown>, userId: string) => Promise<Record<string, unknown>>,
+  ): void {
+    this.integrationSender = sender;
   }
 
   // ---- Workflow CRUD ----
@@ -821,6 +838,13 @@ export class AutomationService {
         if (!response.ok) throw new AutomationError(`webhook call failed with status ${response.status}`, 502);
         return { status: response.status };
       }
+      case 'integration_call': {
+        await this.requirePermission(actorUserId, action, companyId, actorUserId);
+        if (!this.integrationSender) throw new AutomationError('no integration sender is configured for this deployment');
+        const provider = this.requireString(params.provider, 'provider');
+        const integrationAction = this.requireString(params.action, 'action');
+        return this.integrationSender(companyId, provider, integrationAction, params, actorUserId);
+      }
       default:
         throw new AutomationError(`unsupported action type: ${(action as WorkflowActionConfig).type}`);
     }
@@ -975,7 +999,11 @@ export class AutomationService {
     return meta;
   }
 
-  private async getDecryptedSecret(companyId: string, key: string): Promise<string | undefined> {
+  /** Public so other modules that legitimately need a stored credential —
+   * currently the Integration Layer's connector adapters — can reuse this
+   * same encrypted store instead of building a second one. Still never
+   * exposed over HTTP: no route returns a decrypted value. */
+  async getDecryptedSecret(companyId: string, key: string): Promise<string | undefined> {
     const secret = (await this.repos.secrets.findAll((s) => s.companyId === companyId && s.key === key))[0];
     if (!secret) return undefined;
     return decryptSecret({ encryptedValue: secret.encryptedValue, iv: secret.iv, authTag: secret.authTag }, this.encryptionSecret);

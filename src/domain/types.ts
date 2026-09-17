@@ -91,7 +91,8 @@ export type ResourceName =
   | 'approval'
   | 'secret'
   | 'task'
-  | 'ai_action';
+  | 'ai_action'
+  | 'integration_connection';
 
 export type ActionName =
   | 'view'
@@ -576,6 +577,7 @@ export type AutomationActionType =
   | 'assign_lead_owner'
   | 'update_campaign_status'
   | 'webhook_call'
+  | 'integration_call'
   | 'require_approval';
 
 export interface WorkflowActionConfig {
@@ -762,5 +764,58 @@ export interface AgentDecision {
    * a second round trip. */
   resultActionStatus?: AiActionStatus;
   requestedByUserId: string;
+  createdAt: string;
+}
+
+// ---- Integration Layer ----
+
+export type IntegrationProvider =
+  | 'whatsapp'
+  | 'email'
+  | 'meta_ads'
+  | 'google_calendar'
+  | 'payment_stripe'
+  | 'custom_api';
+
+export type IntegrationConnectionStatus = 'connected' | 'disconnected' | 'error';
+
+/**
+ * One company's connection to an external provider. Credentials never live
+ * here — `credentialKeys` names the entries in the existing encrypted
+ * Secret store (the same AES-256-GCM store the Automation Engine's
+ * webhook_call action uses) that hold the actual tokens/API keys.
+ * Non-secret provider config (a WhatsApp phone number id, an email
+ * from-address, a Stripe account id) lives in `config` directly since it
+ * isn't sensitive.
+ */
+export interface IntegrationConnection {
+  id: string;
+  companyId: string;
+  provider: IntegrationProvider;
+  displayName: string;
+  config: Record<string, unknown>;
+  credentialKeys: string[];
+  status: IntegrationConnectionStatus;
+  lastError?: string;
+  lastUsedAt?: string;
+  createdByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type IntegrationEventStatus = 'success' | 'failed' | 'rate_limited';
+
+/** The delivery log for every outbound call the Integration Layer makes —
+ * real logging/failure-handling visibility, not just a console line. */
+export interface IntegrationEvent {
+  id: string;
+  companyId: string;
+  connectionId: string;
+  provider: IntegrationProvider;
+  action: string;
+  status: IntegrationEventStatus;
+  requestSummary: Record<string, unknown>;
+  attempts: number;
+  error?: string;
   createdAt: string;
 }

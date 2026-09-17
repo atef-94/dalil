@@ -63,6 +63,7 @@ const ALL_RESOURCES: ResourceName[] = [
   'secret',
   'task',
   'ai_action',
+  'integration_connection',
 ];
 
 /**
@@ -204,12 +205,11 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
 
   // CEO: full company-wide visibility and control.
   for (const resource of ALL_RESOURCES) {
-    for (const action of ['view', 'create', 'edit', 'approve'] as ActionName[]) {
+    for (const action of ['view', 'create', 'edit', 'approve', 'delete'] as ActionName[]) {
       await addGrant(ceoRole.id, action, resource, 'company');
     }
   }
   await addGrant(ceoRole.id, 'assign', 'role', 'company');
-  await addGrant(ceoRole.id, 'delete', 'role', 'company');
 
   // Sales Manager: department-scoped visibility over CRM/Sales/Inventory,
   // plus the ability to see their department's roster.
