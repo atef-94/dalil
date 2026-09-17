@@ -19,6 +19,7 @@ export async function renderLeads(container) {
   const nameInput = el('input', { type: 'text', placeholder: 'Full name' });
   const phoneInput = el('input', { type: 'text', placeholder: '010-000-0000' });
   const emailInput = el('input', { type: 'email', placeholder: 'optional' });
+  const nationalIdInput = el('input', { type: 'text', placeholder: 'optional — strongest duplicate check' });
   const sourceInput = el('input', { type: 'text', placeholder: 'e.g. walk-in, website (optional)' });
   const createBtn = el('button', { class: 'primary' }, 'Add lead');
 
@@ -34,9 +35,10 @@ export async function renderLeads(container) {
         fullName: nameInput.value.trim(),
         phone: phoneInput.value.trim(),
         email: emailInput.value.trim() || undefined,
+        nationalId: nationalIdInput.value.trim() || undefined,
         sourceId: sourceInput.value.trim() || undefined,
       });
-      nameInput.value = ''; phoneInput.value = ''; emailInput.value = ''; sourceInput.value = '';
+      nameInput.value = ''; phoneInput.value = ''; emailInput.value = ''; nationalIdInput.value = ''; sourceInput.value = '';
       toast('Lead added.', 'success');
       await load();
     } catch (err) {
@@ -52,6 +54,7 @@ export async function renderLeads(container) {
       el('div', {}, [el('label', {}, 'Full name'), nameInput]),
       el('div', {}, [el('label', {}, 'Phone'), phoneInput]),
       el('div', {}, [el('label', {}, 'Email'), emailInput]),
+      el('div', {}, [el('label', {}, 'National ID'), nationalIdInput]),
       el('div', {}, [el('label', {}, 'Source'), sourceInput]),
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),

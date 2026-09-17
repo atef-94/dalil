@@ -16,6 +16,7 @@ export interface SubmitBrokerLeadInput {
   fullName: string;
   phone: string;
   email?: string;
+  nationalId?: string;
 }
 
 export class BrokersService {
@@ -80,6 +81,7 @@ export class BrokersService {
       fullName: input.fullName.trim(),
       phone: input.phone.trim(),
       email: input.email?.trim(),
+      nationalId: input.nationalId?.trim() || undefined,
       approvalStatus: 'pending_approval',
       createdAt: new Date().toISOString(),
     };
@@ -108,6 +110,7 @@ export class BrokersService {
         fullName: brokerLead.fullName,
         phone: brokerLead.phone,
         email: brokerLead.email,
+        nationalId: brokerLead.nationalId,
         sourceId: `broker:${brokerLead.brokerCompanyId}`,
         ownerEmployeeUserId: approverOwnerUserId,
       });
@@ -115,7 +118,7 @@ export class BrokersService {
     } catch (err) {
       if (err instanceof ConflictError) {
         await this.brokerLeads.save({ ...brokerLead, approvalStatus: 'rejected_duplicate' });
-        throw new BrokerError('a lead with this phone or email already exists — not merged, rejected', 409);
+        throw new BrokerError('a lead with this phone, email, or national ID already exists — not merged, rejected', 409);
       }
       throw err;
     }

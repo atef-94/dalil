@@ -23,11 +23,14 @@ export interface CreateLeadInput extends LeadCustomFields {
   fullName: string;
   phone: string;
   email?: string;
+  nationalId?: string;
   sourceId?: string;
   ownerEmployeeUserId?: string;
   requiredSkill?: string;
   firstContactSlaDueAt?: string;
 }
+
+const LEAD_OWNERSHIP_PROTECTION_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
 
 function sanitizeString(value: string | undefined): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
@@ -68,18 +71,28 @@ const ORDER: LeadStatus[] = ['new', 'contacted', 'qualified', 'opportunity'];
 export class CrmService {
   constructor(private readonly leads: Repository<Lead>) {}
 
-  private async findDuplicate(companyId: string, phone: string, email?: string): Promise<Lead | undefined> {
+  /** Matches on phone, email, OR national ID — any one shared field is
+   * treated as the same real person, since a phone or email can be
+   * swapped out to dodge dedup but a national ID can't. This block is
+   * permanent (not time-boxed): the system should never hold two Lead
+   * rows for the same person, no matter how old the first one is. */
+  private async findDuplicate(companyId: string, phone: string, email?: string, nationalId?: string): Promise<Lead | undefined> {
     const candidates = await this.leads.findAll((l) => l.companyId === companyId);
-    return candidates.find((l) => l.phone === phone || (!!email && !!l.email && l.email === email));
+    return candidates.find((l) =>
+      l.phone === phone ||
+      (!!email && !!l.email && l.email === email) ||
+      (!!nationalId && !!l.nationalId && l.nationalId === nationalId),
+    );
   }
 
   async createLead(input: CreateLeadInput): Promise<Lead> {
     if (!input.fullName?.trim()) throw new ValidationError('fullName is required');
     if (!input.phone?.trim()) throw new ValidationError('phone is required');
 
-    const duplicate = await this.findDuplicate(input.companyId, input.phone.trim(), input.email?.trim());
+    const nationalId = sanitizeString(input.nationalId);
+    const duplicate = await this.findDuplicate(input.companyId, input.phone.trim(), input.email?.trim(), nationalId);
     if (duplicate) {
-      throw new ConflictError('a lead with this phone or email already exists');
+      throw new ConflictError('a lead with this phone, email, or national ID already exists');
     }
 
     const lead: Lead = {
@@ -88,15 +101,40 @@ export class CrmService {
       fullName: input.fullName.trim(),
       phone: input.phone.trim(),
       email: input.email?.trim(),
+      nationalId,
       sourceId: input.sourceId,
       status: 'new',
       ownerEmployeeUserId: input.ownerEmployeeUserId,
+      // Captured once and never changed afterward — see
+      // resolveCommissionOwner(), which uses this to keep commission
+      // credit with whoever established first contact for 60 days, even
+      // through a later reassignment (SLA auto-reassignment, a manual
+      // reassign, etc).
+      originalOwnerEmployeeUserId: input.ownerEmployeeUserId,
       createdAt: new Date().toISOString(),
       requiredSkill: input.requiredSkill?.trim() || undefined,
       firstContactSlaDueAt: input.firstContactSlaDueAt,
       ...sanitizeCustomFields(input),
     };
     return this.leads.save(lead);
+  }
+
+  /** The lead-ownership protection law: for 60 days from first contact,
+   * commission credit stays with whoever originally brought the lead in
+   * — even if it's since been reassigned (by the SLA sweep, a manual
+   * reassign, or anything else) — so a lead can't be effectively "stolen"
+   * by re-routing it away from the agent who did the work of first
+   * contact. After 60 days, credit follows the lead's current owner like
+   * normal. Returns undefined if the lead was never assigned an owner at
+   * all (nothing to protect or fall back to). */
+  async resolveCommissionOwner(leadId: string, companyId: string, now: Date = new Date()): Promise<string | undefined> {
+    const lead = await this.leads.findById(leadId);
+    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
+    const withinProtectionWindow = now.getTime() - Date.parse(lead.createdAt) <= LEAD_OWNERSHIP_PROTECTION_MS;
+    if (withinProtectionWindow && lead.originalOwnerEmployeeUserId) {
+      return lead.originalOwnerEmployeeUserId;
+    }
+    return lead.ownerEmployeeUserId;
   }
 
   /** Merges in whatever custom fields the caller passes — a real estate

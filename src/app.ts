@@ -459,6 +459,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
     };
   };
 
+  // The 60-day lead-ownership protection law: at contract-signing time,
+  // resolve who actually gets commission credit — the lead's original
+  // first-contact owner if still inside the 60-day window, otherwise
+  // whoever is actually signing. Best-effort: if the reservation/lead
+  // can't be resolved for any reason, falls back to the signer, exactly
+  // like this route always behaved before this law existed — signContract
+  // itself still does the real reservation validation.
+  const resolveCreditedEmployee = async (companyId: string, reservationId: string, signingUserId: string): Promise<string> => {
+    const reservation = await inventory.getReservation(reservationId);
+    if (!reservation || reservation.companyId !== companyId) return signingUserId;
+    const protectedOwner = await crm.resolveCommissionOwner(reservation.clientId, companyId).catch(() => undefined);
+    return protectedOwner ?? signingUserId;
+  };
+
   // ---- Auth ----
   httpServer.post('/api/auth/register', async (ctx) => {
     const body = parseJsonBody<{ companyId: string; email: string; password: string; userType: string; locale: 'en' | 'ar' }>(ctx.body);
@@ -1016,6 +1030,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       fullName: string;
       phone: string;
       email?: string;
+      nationalId?: string;
       sourceId?: string;
       ownerEmployeeUserId?: string;
       requiredSkill?: string;
@@ -1040,6 +1055,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       fullName: body.fullName,
       phone: body.phone,
       email: body.email,
+      nationalId: body.nationalId,
       sourceId: body.sourceId,
       requiredSkill: body.requiredSkill,
       ownerEmployeeUserId: ownerEmployeeUserId ?? actor.userId,
@@ -1298,7 +1314,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const contract = await sales.signContract({
       companyId: actor.companyId,
       reservationId: body.reservationId,
-      creditedEmployeeUserId: actor.userId,
+      creditedEmployeeUserId: await resolveCreditedEmployee(actor.companyId, body.reservationId, actor.userId),
       paymentPlanTemplateId: body.paymentPlanTemplateId,
       totalPrice: body.totalPrice,
       discountPercent: body.discountPercent,
@@ -1371,7 +1387,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
         const contract = await sales.signContract({
           companyId: actor.companyId,
           reservationId: reservation.id,
-          creditedEmployeeUserId: actor.userId,
+          creditedEmployeeUserId: (await crm.resolveCommissionOwner(lead.id, actor.companyId)) ?? actor.userId,
           paymentPlanTemplateId: template.id,
           totalPrice,
         });
@@ -1582,7 +1598,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const user = await repos.users.findById(actor.userId);
     if (!user?.brokerCompanyId) throw new ForbiddenError('this account is not linked to a broker company');
-    const body = parseJsonBody<{ fullName: string; phone: string; email?: string }>(ctx.body);
+    const body = parseJsonBody<{ fullName: string; phone: string; email?: string; nationalId?: string }>(ctx.body);
     const brokerLead = await brokers.submitBrokerLead({
       companyId: actor.companyId,
       brokerCompanyId: user.brokerCompanyId,

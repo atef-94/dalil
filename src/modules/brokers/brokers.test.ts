@@ -110,6 +110,27 @@ test('approving a broker lead with a duplicate phone is rejected, not merged', a
   assert.equal(leads.length, 1); // still just the original, not merged or duplicated
 });
 
+test('approving a broker lead with a duplicate national ID (different phone/email) is rejected, not merged', async () => {
+  const { svc, crm } = freshService();
+  const company = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Acme Brokers' });
+  await svc.approveBrokerCompany(company.id, 'c1');
+  await crm.createLead({ companyId: 'c1', fullName: 'Existing Client', phone: '0100', nationalId: 'NID-1' });
+
+  const brokerLead = await svc.submitBrokerLead({
+    companyId: 'c1',
+    brokerCompanyId: company.id,
+    submittedByUserId: 'broker-user-1',
+    fullName: 'Same client, fake details',
+    phone: '0999',
+    email: 'fake@x.com',
+    nationalId: 'NID-1',
+  });
+  await assert.rejects(() => svc.approveBrokerLead(brokerLead.id, 'c1', 'internal-user-1'));
+
+  const leads = await crm.listForScope({ kind: 'company', companyId: 'c1' }, async () => ({}));
+  assert.equal(leads.length, 1);
+});
+
 test('commission rate resolution: a broker-specific rule takes precedence over the company default', async () => {
   const { svc } = freshService();
   const company = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Acme Brokers' });

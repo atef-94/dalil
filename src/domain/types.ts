@@ -257,10 +257,18 @@ export interface Lead {
   fullName: string;
   phone: string;
   email?: string;
+  /** National ID / civil ID — the strongest identity signal for duplicate
+   * detection, since a phone or email can be swapped out but this can't. */
+  nationalId?: string;
   sourceId?: string;
   status: LeadStatus;
   lostReason?: string;
   ownerEmployeeUserId?: string;
+  /** Set once at creation and never changed afterward, even when
+   * ownerEmployeeUserId is later reassigned — see
+   * CrmService.resolveCommissionOwner (the 60-day lead-ownership
+   * protection law). */
+  originalOwnerEmployeeUserId?: string;
   createdAt: string;
   /** A skill tag (e.g. "luxury") the Lead Distribution pool can match
    * against Employee.skills for skill-based routing. Optional — leads
@@ -399,6 +407,7 @@ export interface BrokerLead {
   fullName: string;
   phone: string;
   email?: string;
+  nationalId?: string;
   approvalStatus: BrokerLeadApprovalStatus;
   leadId?: string; // nullable until approved
   createdAt: string;
