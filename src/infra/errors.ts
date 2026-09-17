@@ -96,3 +96,8 @@ export class AutomationError extends HttpError {
     super(status, message);
   }
 }
+export class SalesCommissionError extends HttpError {
+  constructor(message: string, status = 409) {
+    super(status, message);
+  }
+}

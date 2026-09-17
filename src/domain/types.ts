@@ -99,7 +99,8 @@ export type ResourceName =
   | 'secret'
   | 'task'
   | 'ai_action'
-  | 'integration_connection';
+  | 'integration_connection'
+  | 'sales_commission';
 
 export type ActionName =
   | 'view'
@@ -356,6 +357,13 @@ export interface Contract {
   status: ContractStatus;
   signedAt?: string;
   createdAt: string;
+  /** The negotiated contract value, set once at signing (SalesService.signContract
+   * already receives this as input — this just persists it instead of
+   * discarding it). Optional only so pre-existing test fixtures built before
+   * this field existed keep type-checking; every contract signed through the
+   * real flow always has one. Used by the Sales Commission Engine and by
+   * Forecasting/Scenario Simulation. */
+  totalPrice?: number;
 }
 
 // ---- Finance ----
@@ -430,6 +438,43 @@ export interface Commission {
   amount: number;
   status: CommissionStatus;
   createdAt: string;
+}
+
+// ---- Internal Sales Commission Engine ----
+// Parallel to the broker Commission above but for internal employees —
+// kept as its own model rather than overloading Commission/CommissionRule
+// with an optional brokerCompanyId-or-employeeUserId discriminant, since
+// broker and internal-employee commissions are genuinely different payee
+// concepts with different resolution rules (tiered by org hierarchy here,
+// not by broker company).
+
+/** 'base' is paid to the contract's credited employee (the same one the
+ * 60-day lead-ownership law resolves — see CrmService.resolveCommissionOwner);
+ * 'override' is paid to that employee's direct manager, only when an
+ * override rule is configured and a manager actually exists. */
+export type SalesCommissionTier = 'base' | 'override';
+
+export interface SalesCommissionRule {
+  id: string;
+  companyId: string;
+  tier: SalesCommissionTier;
+  employeeUserId?: string; // if unset, this is the company-wide default for this tier
+  ratePercent: number;
+}
+
+export type SalesCommissionStatus = 'pending' | 'approved' | 'paid' | 'clawed_back';
+
+export interface SalesCommission {
+  id: string;
+  companyId: string;
+  contractId: string;
+  employeeUserId: string; // who earns this line
+  tier: SalesCommissionTier;
+  ratePercent: number;
+  amount: number;
+  status: SalesCommissionStatus;
+  createdAt: string;
+  clawedBackReason?: string;
 }
 
 // ---- Audit ----
@@ -629,7 +674,9 @@ export type DomainEventType =
   | 'legal_document.status_changed'
   | 'campaign.status_changed'
   | 'broker_lead.submitted'
-  | 'employee.created';
+  | 'employee.created'
+  | 'sales_commission.recorded'
+  | 'sales_commission.status_changed';
 
 export type ConditionOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'exists';
 

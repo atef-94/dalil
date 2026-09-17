@@ -16,6 +16,7 @@ import { renderUnits } from './pages/units.js';
 import { renderTemplates } from './pages/templates.js';
 import { renderFinance } from './pages/finance.js';
 import { renderBrokers } from './pages/brokers.js';
+import { renderSalesCommissions } from './pages/sales-commissions.js';
 import { renderAudit } from './pages/audit.js';
 import { renderHr } from './pages/hr.js';
 import { renderOperations } from './pages/operations.js';
@@ -54,6 +55,7 @@ const NAV = [
     { path: '/templates', labelKey: 'nav_templates', render: renderTemplates, icon: 'templates', resource: 'payment_plan_template', action: 'view' },
     { path: '/finance', labelKey: 'nav_finance', render: renderFinance, icon: 'finance', resource: 'payment_schedule', action: 'view' },
     { path: '/brokers', labelKey: 'nav_brokers', render: renderBrokers, icon: 'brokers', resource: 'broker_company', action: 'view' },
+    { path: '/sales-commissions', labelKey: 'nav_sales_commissions', render: renderSalesCommissions, icon: 'commissions', resource: 'sales_commission', action: 'view' },
   ] },
   { section: 'section_growth', items: [
     { path: '/marketing', labelKey: 'nav_marketing', render: renderMarketing, icon: 'marketing', resource: 'campaign', action: 'view' },

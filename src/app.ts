@@ -36,6 +36,8 @@ import type {
   Reservation,
   ResourceName,
   Role,
+  SalesCommission,
+  SalesCommissionRule,
   ScopeName,
   Secret,
   SensitivityTier,
@@ -77,6 +79,7 @@ import { PaymentPlansService } from './modules/payment-plans/payment-plans.servi
 import { SalesService } from './modules/sales/sales.service.js';
 import { FinanceService } from './modules/finance/finance.service.js';
 import { BrokersService } from './modules/brokers/brokers.service.js';
+import { SalesCommissionService } from './modules/commissions/sales-commission.service.js';
 import { RoleManagementService } from './modules/permissions/role-management.service.js';
 import { OnboardingService } from './modules/onboarding/onboarding.service.js';
 import { HrService } from './modules/hr/hr.service.js';
@@ -135,6 +138,7 @@ export interface Application {
     sales: SalesService;
     finance: FinanceService;
     brokers: BrokersService;
+    salesCommissions: SalesCommissionService;
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
@@ -219,6 +223,8 @@ function buildRepos(db?: DatabaseSync) {
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
     leadDistributionPools: repo<LeadDistributionPool>('lead_distribution_pools'),
+    salesCommissionRules: repo<SalesCommissionRule>('sales_commission_rules'),
+    salesCommissions: repo<SalesCommission>('sales_commissions'),
   };
 }
 
@@ -303,6 +309,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines);
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
+  const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
   const onboarding = new OnboardingService(organization, auth, roleManagement);
   const hr = new HrService(repos.leaveRequests, repos.employees);
@@ -471,6 +478,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!reservation || reservation.companyId !== companyId) return signingUserId;
     const protectedOwner = await crm.resolveCommissionOwner(reservation.clientId, companyId).catch(() => undefined);
     return protectedOwner ?? signingUserId;
+  };
+
+  // Records base/override internal sales commission lines for a freshly
+  // signed contract and emits one sales_commission.recorded event per
+  // line, so the Automation Engine can react (e.g. notify the earner) the
+  // same way it reacts to any other domain event. Never blocks or fails
+  // the contract-signing response — a commission-recording issue must
+  // never undo or block a signed contract.
+  const recordSalesCommissionsAndEmit = async (companyId: string, contract: Contract, actorUserId: string): Promise<void> => {
+    if (contract.totalPrice === undefined) return;
+    try {
+      const recorded = await salesCommissions.recordCommissionsForContract(companyId, contract.id, contract.creditedEmployeeUserId, contract.totalPrice);
+      for (const commission of recorded) {
+        await emitEvent({
+          companyId,
+          type: 'sales_commission.recorded',
+          payload: { ...commission },
+          actorUserId,
+          dedupeKey: `sales_commission.recorded:${commission.id}`,
+        });
+      }
+    } catch (err) {
+      process.stderr.write(`sales commission recording failed for contract ${contract.id}: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
   };
 
   // ---- Auth ----
@@ -1322,6 +1353,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id });
     await emitEvent({ companyId: actor.companyId, type: 'contract.signed', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.signed:${contract.id}` });
+    await recordSalesCommissionsAndEmit(actor.companyId, contract, actor.userId);
     return { status: 201, body: contract };
   });
 
@@ -1393,6 +1425,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
         });
         await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id, metadata: { importedViaCsv: true } });
         await emitEvent({ companyId: actor.companyId, type: 'contract.signed', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.signed:${contract.id}` });
+        await recordSalesCommissionsAndEmit(actor.companyId, contract, actor.userId);
         // Generate the payment schedule immediately, same as an operator
         // would do as the very next manual step — a signed contract with
         // no schedule isn't usable yet, and a Finance import row can't
@@ -1689,6 +1722,75 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:broker_company permission');
     }
     const commission = await brokers.approveCommission(ctx.params.commissionId!, actor.companyId);
+    return { status: 200, body: commission };
+  });
+
+  // ---- Internal Sales Commission Engine ----
+  // Commission lines are recorded automatically at contract-signing time
+  // (see recordSalesCommissionsAndEmit above) — there is no manual
+  // "record commission" route, unlike the broker one, since the
+  // employee/amount/rate are always fully determined by real contract
+  // data and the configured rules.
+  httpServer.post('/api/sales-commissions/rules', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'sales_commission'))) {
+      throw new ForbiddenError('missing edit:sales_commission permission');
+    }
+    const body = parseJsonBody<{ tier: 'base' | 'override'; ratePercent: number; employeeUserId?: string }>(ctx.body);
+    const rule = await salesCommissions.setCommissionRule({ companyId: actor.companyId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'sales_commission', resourceId: rule.id, metadata: { rule: true } });
+    return { status: 201, body: rule };
+  });
+
+  httpServer.get('/api/sales-commissions/rules', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'sales_commission'))) {
+      throw new ForbiddenError('missing view:sales_commission permission');
+    }
+    const rules = await salesCommissions.listCommissionRules(actor.companyId);
+    return { status: 200, body: rules };
+  });
+
+  httpServer.get('/api/sales-commissions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'sales_commission');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:sales_commission permission' } };
+    const all = await salesCommissions.listCommissions(actor.companyId);
+    const filtered = await filterByListScope(all, scope, (c) => employeeScopeKeys(c.employeeUserId));
+    return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  httpServer.post('/api/sales-commissions/:commissionId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'sales_commission'))) {
+      throw new ForbiddenError('missing approve:sales_commission permission');
+    }
+    const commission = await salesCommissions.approveCommission(ctx.params.commissionId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'sales_commission', resourceId: commission.id });
+    await emitEvent({ companyId: actor.companyId, type: 'sales_commission.status_changed', payload: { ...commission }, actorUserId: actor.userId, dedupeKey: `sales_commission.status_changed:${commission.id}:approved` });
+    return { status: 200, body: commission };
+  });
+
+  httpServer.post('/api/sales-commissions/:commissionId/pay', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'sales_commission'))) {
+      throw new ForbiddenError('missing edit:sales_commission permission');
+    }
+    const commission = await salesCommissions.markCommissionPaid(ctx.params.commissionId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'sales_commission', resourceId: commission.id, metadata: { paid: true } });
+    await emitEvent({ companyId: actor.companyId, type: 'sales_commission.status_changed', payload: { ...commission }, actorUserId: actor.userId, dedupeKey: `sales_commission.status_changed:${commission.id}:paid` });
+    return { status: 200, body: commission };
+  });
+
+  httpServer.post('/api/sales-commissions/:commissionId/clawback', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'sales_commission'))) {
+      throw new ForbiddenError('missing edit:sales_commission permission');
+    }
+    const body = parseJsonBody<{ reason: string }>(ctx.body);
+    const commission = await salesCommissions.clawbackCommission(ctx.params.commissionId!, actor.companyId, body.reason);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'sales_commission', resourceId: commission.id, metadata: { clawedBack: true, reason: body.reason } });
+    await emitEvent({ companyId: actor.companyId, type: 'sales_commission.status_changed', payload: { ...commission }, actorUserId: actor.userId, dedupeKey: `sales_commission.status_changed:${commission.id}:clawed_back` });
     return { status: 200, body: commission };
   });
 
@@ -2724,7 +2826,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
     },

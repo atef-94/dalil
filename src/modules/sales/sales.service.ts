@@ -108,6 +108,7 @@ export class SalesService {
         status: 'signed',
         signedAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
+        totalPrice: input.totalPrice,
       };
       await this.contracts.save(contract);
 

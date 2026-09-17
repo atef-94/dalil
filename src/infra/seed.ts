@@ -64,6 +64,7 @@ const ALL_RESOURCES: ResourceName[] = [
   'task',
   'ai_action',
   'integration_connection',
+  'sales_commission',
 ];
 
 /**
@@ -224,6 +225,11 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesManagerRole.id, 'view', 'payment_plan_template', 'company');
   await addGrant(salesManagerRole.id, 'create', 'contract', 'department');
   await addGrant(salesManagerRole.id, 'view', 'contract', 'department');
+  // Override commission lines land on the manager themselves (see
+  // SalesCommissionService), so "own" is enough to see their own override
+  // earnings; "department" additionally lets them see their team's base
+  // commissions the way they already see the team's leads/contracts.
+  await addGrant(salesManagerRole.id, 'view', 'sales_commission', 'department');
 
   // Sales Agent: own-scoped CRM/Sales, company-wide unit visibility (units
   // are not individually owned), can create/edit their own unit holds.
@@ -237,6 +243,7 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesAgentRole.id, 'view', 'payment_plan_template', 'company');
   await addGrant(salesAgentRole.id, 'create', 'contract', 'own');
   await addGrant(salesAgentRole.id, 'view', 'contract', 'own');
+  await addGrant(salesAgentRole.id, 'view', 'sales_commission', 'own');
 
   // Finance: company-wide financial visibility and payment recording.
   await addGrant(financeRole.id, 'view', 'payment_schedule', 'company');
@@ -244,6 +251,9 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(financeRole.id, 'view', 'contract', 'company');
   await addGrant(financeRole.id, 'view', 'payment_plan_template', 'company');
   await addGrant(financeRole.id, 'view', 'audit_log', 'company');
+  await addGrant(financeRole.id, 'view', 'sales_commission', 'company');
+  await addGrant(financeRole.id, 'edit', 'sales_commission', 'company');
+  await addGrant(financeRole.id, 'approve', 'sales_commission', 'company');
 
   const linkRole = async (userId: string, roleId: string) => {
     const userRole: UserRole = { id: randomUUID(), userId, roleId };
