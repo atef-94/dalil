@@ -16,6 +16,8 @@ const ACTION_TYPES = [
   { value: 'assign_lead_owner', label: 'Assign lead owner' },
   { value: 'update_campaign_status', label: 'Update campaign status' },
   { value: 'webhook_call', label: 'Call webhook' },
+  { value: 'integration_call', label: 'Send via integration (WhatsApp/Email/etc)' },
+  { value: 'ai_decide', label: 'Hand off to AI agent' },
   { value: 'require_approval', label: 'Require approval' },
 ];
 const CONDITION_OPERATORS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'exists'];
@@ -57,6 +59,16 @@ const ACTION_PARAM_FIELDS = {
     { key: 'url', label: 'URL' },
     { key: 'method', label: 'Method (optional)', placeholder: 'POST' },
     { key: 'secretKey', label: 'Secret key (optional)', placeholder: 'a key stored under Secrets below' },
+  ],
+  integration_call: [
+    { key: 'provider', label: 'Provider', placeholder: 'whatsapp / email / meta_ads / google_calendar / payment_stripe / custom_api' },
+    { key: 'action', label: 'Action', placeholder: 'e.g. send_message — see the Integrations page for each provider’s actions' },
+    { key: 'to', label: 'To (optional)', placeholder: 'phone number or email, depending on the provider' },
+    { key: 'body', label: 'Message body (optional)' },
+  ],
+  ai_decide: [
+    { key: 'agentKey', label: 'Agent', placeholder: 'sales / marketing / finance / support / hr — see the AI page' },
+    { key: 'subjectId', label: 'Subject id', placeholder: 'e.g. {{id}} for the triggering lead' },
   ],
   require_approval: [
     { key: 'reason', label: 'Reason shown to the approver' },
