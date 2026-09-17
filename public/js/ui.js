@@ -37,6 +37,8 @@ const ICONS = {
   purchasing: '<path d="M3 7l2-4h14l2 4"/><path d="M3 7h18v13H3z"/><line x1="3" y1="7" x2="21" y2="7"/>',
   communication: '<path d="M4 4h16v12H8l-4 4z"/>',
   analytics: '<line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="13" width="3" height="7"/><rect x="11" y="9" width="3" height="11"/><rect x="16" y="5" width="3" height="15"/>',
+  forecasting: '<path d="M4 17l4-5 4 3 5-7 3 3"/><line x1="4" y1="20" x2="20" y2="20"/>',
+  scenario: '<path d="M4 18l5-9 5 5 6-11"/><circle cx="9" cy="9" r="1.4"/><circle cx="14" cy="14" r="1.4"/><circle cx="20" cy="3" r="1.4"/>',
   automation: '<circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><line x1="7" y1="6" x2="17" y2="6"/><line x1="6.4" y1="7.6" x2="10.8" y2="16.4"/><line x1="17.6" y1="7.6" x2="13.2" y2="16.4"/>',
   ai: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
   integrations: '<path d="M9 3v6M15 3v6"/><path d="M6 9h12v4a6 6 0 0 1-12 0z"/><path d="M12 19v3"/>',

@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal, paginationControls } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal, formModal, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderContracts(container) {
@@ -90,6 +90,32 @@ export async function renderContracts(container) {
     }
   }
 
+  // Every amendment requires approval — no threshold escape, unlike the
+  // discount-override gate on signing — so this always returns 202 with
+  // a pending ActionApproval, never a directly-applied change.
+  async function amendContract(contract) {
+    const result = await formModal({
+      title: `Amend contract ${contract.id.slice(0, 8)}…`,
+      fields: [
+        { key: 'newTotalPrice', label: 'New total contract price', type: 'number', value: String(contract.totalPrice ?? '') },
+        { key: 'discountPercent', label: 'Discount (%, optional)', type: 'number' },
+        { key: 'reason', label: 'Reason for this amendment', type: 'textarea' },
+      ],
+      submitLabel: 'Submit for approval',
+    });
+    if (!result || !result.newTotalPrice || !result.reason) return;
+    try {
+      await api.post(`/api/sales/contracts/${contract.id}/amend`, {
+        newTotalPrice: Number(result.newTotalPrice),
+        discountPercent: result.discountPercent ? Number(result.discountPercent) : undefined,
+        reason: result.reason,
+      });
+      toast('Amendment request submitted — pending approval. See the Approvals page for its status.', 'success');
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   async function load() {
     clear(listSlot);
     listSlot.appendChild(loadingState());
@@ -114,6 +140,9 @@ export async function renderContracts(container) {
             scheduleBtn.addEventListener('click', () => viewSchedule(c));
             wrap.appendChild(scheduleBtn);
             if (c.status === 'signed') {
+              const amendBtn = el('button', {}, 'Amend');
+              amendBtn.addEventListener('click', () => amendContract(c));
+              wrap.appendChild(amendBtn);
               const cancelBtn = el('button', { class: 'danger' }, 'Cancel');
               cancelBtn.addEventListener('click', () => cancelContract(c));
               wrap.appendChild(cancelBtn);

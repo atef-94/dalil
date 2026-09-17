@@ -34,6 +34,8 @@ import { renderAiActivity } from './pages/ai-activity.js';
 import { renderIntegrations } from './pages/integrations.js';
 import { renderBranches } from './pages/branches.js';
 import { renderSettings } from './pages/settings.js';
+import { renderForecasting } from './pages/forecasting.js';
+import { renderScenarioSimulation } from './pages/scenario-simulation.js';
 
 // Each item's `resource`/`action` is checked against the live permission
 // manifest (state.js `can()`, backed by GET /api/me/manifest) before it's
@@ -61,6 +63,8 @@ const NAV = [
     { path: '/marketing', labelKey: 'nav_marketing', render: renderMarketing, icon: 'marketing', resource: 'campaign', action: 'view' },
     { path: '/communication', labelKey: 'nav_communication', render: renderCommunication, icon: 'communication', resource: 'message', action: 'view' },
     { path: '/analytics', labelKey: 'nav_analytics', render: renderAnalytics, icon: 'analytics', resource: 'analytics', action: 'view' },
+    { path: '/forecasting', labelKey: 'nav_forecasting', render: renderForecasting, icon: 'forecasting', resource: 'forecast', action: 'view' },
+    { path: '/scenario-simulation', labelKey: 'nav_scenario_simulation', render: renderScenarioSimulation, icon: 'scenario', resource: 'forecast', action: 'view' },
   ] },
   { section: 'section_ops', items: [
     { path: '/operations', labelKey: 'nav_operations', render: renderOperations, icon: 'operations', resource: 'maintenance_ticket', action: 'view' },

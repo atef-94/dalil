@@ -100,7 +100,8 @@ export type ResourceName =
   | 'task'
   | 'ai_action'
   | 'integration_connection'
-  | 'sales_commission';
+  | 'sales_commission'
+  | 'forecast';
 
 export type ActionName =
   | 'view'
@@ -387,6 +388,20 @@ export interface Receipt {
   paymentId: string;
   receiptNumber: string;
   issuedAt: string;
+}
+
+/** A real reversal of money already collected on a payment schedule line —
+ * always requires approval via the Universal Approval Engine (see the
+ * 'refund' ActionApproval type), since it undoes a recorded receipt. */
+export interface Refund {
+  id: string;
+  companyId: string;
+  contractId: string;
+  paymentScheduleLineId: string;
+  amount: number;
+  reason: string;
+  recordedByUserId: string;
+  createdAt: string;
 }
 
 // ---- Brokers ----
@@ -678,7 +693,9 @@ export type DomainEventType =
   | 'sales_commission.recorded'
   | 'sales_commission.status_changed'
   | 'action_approval.requested'
-  | 'action_approval.decided';
+  | 'action_approval.decided'
+  | 'contract.amended'
+  | 'payment.refunded';
 
 export type ConditionOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'exists';
 
@@ -806,7 +823,7 @@ export interface ApprovalRequest {
 // action later, and resume it once approved — see
 // app.ts recordActionApprovalDecision + the discount-override gate on
 // contract signing for the first real, wired example.
-export type ApprovableActionType = 'discount_override';
+export type ApprovableActionType = 'discount_override' | 'contract_amendment' | 'refund';
 
 export interface ActionApproval {
   id: string;

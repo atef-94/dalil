@@ -65,6 +65,7 @@ const ALL_RESOURCES: ResourceName[] = [
   'ai_action',
   'integration_connection',
   'sales_commission',
+  'forecast',
 ];
 
 /**
@@ -230,10 +231,13 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   // earnings; "department" additionally lets them see their team's base
   // commissions the way they already see the team's leads/contracts.
   await addGrant(salesManagerRole.id, 'view', 'sales_commission', 'department');
-  // Lets a sales manager decide discount-override approvals raised by
-  // their own team (the Universal Approval Engine's one wired gate).
+  // Lets a sales manager decide approvals raised by their own team
+  // (discount overrides, contract amendments, refunds — every action
+  // type the Universal Approval Engine gates).
   await addGrant(salesManagerRole.id, 'view', 'approval', 'company');
   await addGrant(salesManagerRole.id, 'approve', 'approval', 'company');
+  // Sales/portfolio forecasting and scenario simulation.
+  await addGrant(salesManagerRole.id, 'view', 'forecast', 'company');
 
   // Sales Agent: own-scoped CRM/Sales, company-wide unit visibility (units
   // are not individually owned), can create/edit their own unit holds.
@@ -247,6 +251,10 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesAgentRole.id, 'view', 'payment_plan_template', 'company');
   await addGrant(salesAgentRole.id, 'create', 'contract', 'own');
   await addGrant(salesAgentRole.id, 'view', 'contract', 'own');
+  // Lets an agent cancel or request an amendment on their own contract
+  // (amendments always go through the Universal Approval Engine — this
+  // only lets them raise the request, not apply it unilaterally).
+  await addGrant(salesAgentRole.id, 'edit', 'contract', 'own');
   await addGrant(salesAgentRole.id, 'view', 'sales_commission', 'own');
 
   // Finance: company-wide financial visibility and payment recording.
@@ -258,6 +266,12 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(financeRole.id, 'view', 'sales_commission', 'company');
   await addGrant(financeRole.id, 'edit', 'sales_commission', 'company');
   await addGrant(financeRole.id, 'approve', 'sales_commission', 'company');
+  // Finance can request refunds (POST) and see their status, and can
+  // see the forecast/cash-flow picture, but deciding a refund approval
+  // is left to Sales Manager/CEO — separation of duties: the requester
+  // doesn't also approve their own reversal of collected money.
+  await addGrant(financeRole.id, 'view', 'approval', 'company');
+  await addGrant(financeRole.id, 'view', 'forecast', 'company');
 
   const linkRole = async (userId: string, roleId: string) => {
     const userRole: UserRole = { id: randomUUID(), userId, roleId };

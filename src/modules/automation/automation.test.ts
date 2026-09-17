@@ -30,6 +30,7 @@ import type {
   PermissionOverride,
   Project,
   Receipt,
+  Refund,
   ResourceName,
   Role,
   Secret,
@@ -75,6 +76,7 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
   const contracts = new InMemoryRepository<Contract>();
   const payments = new InMemoryRepository<Payment>();
   const receipts = new InMemoryRepository<Receipt>();
+  const refunds = new InMemoryRepository<Refund>();
   const scheduleLines = new InMemoryRepository<PaymentScheduleLine>();
   const units = new InMemoryRepository<Unit>();
   const holds = new InMemoryRepository<UnitHold>();
@@ -83,7 +85,7 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
-  const finance = new FinanceService(payments, receipts, scheduleLines);
+  const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
   const fetchCalls: { url: string; init?: RequestInit }[] = [];

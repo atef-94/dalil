@@ -33,6 +33,7 @@ export const RESOURCES: ResourceName[] = [
   'ai_action',
   'integration_connection',
   'sales_commission',
+  'forecast',
 ];
 
 export interface PermissionManifestEntry {

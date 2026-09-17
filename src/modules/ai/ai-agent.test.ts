@@ -42,6 +42,7 @@ import type {
   PermissionOverride,
   Project,
   Receipt,
+  Refund,
   Reservation,
   ResourceName,
   Role,
@@ -81,6 +82,7 @@ function freshHarness() {
   const leaveRequests = new InMemoryRepository<LeaveRequest>();
   const payments = new InMemoryRepository<Payment>();
   const receipts = new InMemoryRepository<Receipt>();
+  const refunds = new InMemoryRepository<Refund>();
   const scheduleLines = new InMemoryRepository<PaymentScheduleLine>();
   const opportunities = new InMemoryRepository<Opportunity>();
   const contracts = new InMemoryRepository<Contract>();
@@ -97,7 +99,7 @@ function freshHarness() {
   const leadScoring = new LeadScoringService(leads);
   const operations = new OperationsService(maintenanceTickets, units);
   const hr = new HrService(leaveRequests, employees);
-  const finance = new FinanceService(payments, receipts, scheduleLines);
+  const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);

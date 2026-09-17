@@ -36,6 +36,7 @@ import type {
   DiscountApprovalPolicy,
   PurchaseOrder,
   Receipt,
+  Refund,
   Reservation,
   ResourceName,
   Role,
@@ -99,6 +100,8 @@ import { TaskService } from './modules/tasks/task.service.js';
 import { AutomationService, type WorkflowStepInput } from './modules/automation/automation.service.js';
 import { AiAgentService } from './modules/ai/ai-agent.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
+import { ForecastingService } from './modules/forecasting/forecasting.service.js';
+import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
 
 export interface AppOptions {
   nodeEnv: string;
@@ -144,6 +147,8 @@ export interface Application {
     brokers: BrokersService;
     salesCommissions: SalesCommissionService;
     approvalEngine: ApprovalEngineService;
+    forecasting: ForecastingService;
+    scenarioSimulation: ScenarioSimulationService;
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
@@ -232,6 +237,7 @@ function buildRepos(db?: DatabaseSync) {
     salesCommissions: repo<SalesCommission>('sales_commissions'),
     actionApprovals: repo<ActionApproval>('action_approvals'),
     discountApprovalPolicies: repo<DiscountApprovalPolicy>('discount_approval_policies'),
+    refunds: repo<Refund>('refunds'),
   };
 }
 
@@ -315,7 +321,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
-  const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines);
+  const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
@@ -327,6 +333,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const marketing = new MarketingService(repos.campaigns, repos.leads);
   const communication = new CommunicationService(repos.messages);
   const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions, repos.auditEntries, repos.campaigns);
+  const forecasting = new ForecastingService(repos.contracts, repos.scheduleLines, repos.payments, repos.units);
+  const scenarioSimulation = new ScenarioSimulationService(repos.templates);
   const leadScoring = new LeadScoringService(repos.leads);
   const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth, repos.opportunities, repos.legalDocuments, repos.messages, repos.tasks);
   const tasks = new TaskService(repos.tasks);
@@ -528,6 +536,31 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return contract;
   };
 
+  // Same reuse principle as finishContractSigning above: a contract
+  // amendment is identical whether it happens immediately (no policy
+  // gate configured — see the route below) or after approval.
+  const finishContractAmendment = async (
+    companyId: string,
+    input: { contractId: string; newTotalPrice: number; discountPercent?: number },
+    actorUserId: string,
+  ): Promise<Contract> => {
+    const contract = await sales.amendContract({ companyId, ...input });
+    await auditLog.record({ companyId, actorUserId, action: 'edit', resource: 'contract', resourceId: contract.id, metadata: { amended: true, newTotalPrice: input.newTotalPrice, discountPercent: input.discountPercent } });
+    await emitEvent({ companyId, type: 'contract.amended', payload: { ...contract }, actorUserId, dedupeKey: `contract.amended:${contract.id}:${Date.now()}` });
+    return contract;
+  };
+
+  const finishRefund = async (
+    companyId: string,
+    input: { contractId: string; paymentScheduleLineId: string; amount: number; reason: string },
+    actorUserId: string,
+  ) => {
+    const result = await finance.recordRefund({ companyId, recordedByUserId: actorUserId, ...input });
+    await auditLog.record({ companyId, actorUserId, action: 'edit', resource: 'payment_schedule', resourceId: result.line.id, metadata: { refunded: true, amount: input.amount, reason: input.reason } });
+    await emitEvent({ companyId, type: 'payment.refunded', payload: { ...result.refund }, actorUserId, dedupeKey: `payment.refunded:${result.refund.id}` });
+    return result;
+  };
+
   // Dispatch table for resuming an approved ActionApproval — the
   // Universal Approval Engine itself knows nothing about contracts or
   // discounts; this is the one place that maps an actionType to what
@@ -544,6 +577,14 @@ export async function buildApplication(options: AppOptions): Promise<Application
         escalationPercentPerYear?: number;
       };
       return finishContractSigning(approval.companyId, ctx, actorUserId);
+    }
+    if (approval.actionType === 'contract_amendment') {
+      const ctx = approval.context as { contractId: string; newTotalPrice: number; discountPercent?: number };
+      return finishContractAmendment(approval.companyId, ctx, actorUserId);
+    }
+    if (approval.actionType === 'refund') {
+      const ctx = approval.context as { contractId: string; paymentScheduleLineId: string; amount: number; reason: string };
+      return finishRefund(approval.companyId, ctx, actorUserId);
     }
     throw new ValidationError(`no resume handler registered for action type "${String(approval.actionType)}"`);
   };
@@ -1533,6 +1574,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: contract };
   });
 
+  // Re-pricing money a client already committed to is always sensitive —
+  // unlike the discount-override gate (which only applies above a
+  // configurable threshold), every amendment goes through the Universal
+  // Approval Engine, no policy escape.
+  httpServer.post('/api/sales/contracts/:contractId/amend', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'contract'))) {
+      throw new ForbiddenError('missing edit:contract permission');
+    }
+    const body = parseJsonBody<{ newTotalPrice: number; discountPercent?: number; reason: string }>(ctx.body);
+    const contractId = ctx.params.contractId!;
+    const amendmentContext = { contractId, newTotalPrice: body.newTotalPrice, discountPercent: body.discountPercent };
+    const approval = await approvalEngine.requestApproval({
+      companyId: actor.companyId,
+      actionType: 'contract_amendment',
+      requestedByUserId: actor.userId,
+      reason: body.reason,
+      context: amendmentContext,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'approval', resourceId: approval.id, metadata: { actionType: 'contract_amendment', contractId } });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.requested', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.requested:${approval.id}` });
+    return { status: 202, body: approval };
+  });
+
   // ---- Finance ----
   httpServer.post('/api/finance/payments', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -1628,6 +1693,37 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const balance = await finance.getBalance(ctx.params.contractId!, actor.companyId);
     return { status: 200, body: balance };
+  });
+
+  httpServer.get('/api/finance/refunds', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'payment_schedule'))) {
+      throw new ForbiddenError('missing view:payment_schedule permission');
+    }
+    const refunds = await finance.listRefunds(actor.companyId);
+    return { status: 200, body: paginate(refunds, ctx.query) };
+  });
+
+  // Reversing money already collected is always sensitive — every
+  // refund request goes through the Universal Approval Engine, no
+  // direct-execute path, regardless of amount.
+  httpServer.post('/api/finance/refunds', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const body = parseJsonBody<{ contractId: string; paymentScheduleLineId: string; amount: number; reason: string }>(ctx.body);
+    const refundContext = { contractId: body.contractId, paymentScheduleLineId: body.paymentScheduleLineId, amount: body.amount, reason: body.reason };
+    const approval = await approvalEngine.requestApproval({
+      companyId: actor.companyId,
+      actionType: 'refund',
+      requestedByUserId: actor.userId,
+      reason: body.reason,
+      context: refundContext,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'approval', resourceId: approval.id, metadata: { actionType: 'refund', contractId: body.contractId } });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.requested', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.requested:${approval.id}` });
+    return { status: 202, body: approval };
   });
 
   httpServer.post('/api/finance/sweep-overdue', async (ctx) => {
@@ -2369,6 +2465,55 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: await leadScoring.scoreLead(ctx.params.leadId!, actor.companyId) };
   });
 
+  // ---- Forecasting + Scenario Simulation ----
+  httpServer.get('/api/forecasting/historical', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const projectId = ctx.query.get('projectId') ?? undefined;
+    const months = ctx.query.get('months') ? Number(ctx.query.get('months')) : undefined;
+    return { status: 200, body: await forecasting.historicalMonthly(actor.companyId, projectId, months) };
+  });
+
+  httpServer.get('/api/forecasting/forecast', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const projectId = ctx.query.get('projectId') ?? undefined;
+    const trailingMonths = ctx.query.get('trailingMonths') ? Number(ctx.query.get('trailingMonths')) : undefined;
+    const forecastMonths = ctx.query.get('forecastMonths') ? Number(ctx.query.get('forecastMonths')) : undefined;
+    return { status: 200, body: await forecasting.forecastFuture(actor.companyId, projectId, trailingMonths, forecastMonths) };
+  });
+
+  httpServer.get('/api/forecasting/compare', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const month = ctx.query.get('month');
+    if (!month) throw new ValidationError('month query parameter is required (YYYY-MM)');
+    const projectId = ctx.query.get('projectId') ?? undefined;
+    const trailingMonths = ctx.query.get('trailingMonths') ? Number(ctx.query.get('trailingMonths')) : undefined;
+    return { status: 200, body: await forecasting.compareActualVsForecast(actor.companyId, month, projectId, trailingMonths) };
+  });
+
+  // Pure calculator — never persists anything, exactly like
+  // PaymentPlansService.previewSchedule, which it reuses under the hood.
+  httpServer.post('/api/scenario-simulation/run', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const body = parseJsonBody<Parameters<ScenarioSimulationService['runScenario']>[1] & { baseline?: Parameters<ScenarioSimulationService['runScenario']>[1] }>(ctx.body);
+    if (body.baseline) {
+      const { baseline, ...scenario } = body;
+      return { status: 200, body: await scenarioSimulation.compareScenarios(actor.companyId, scenario, baseline) };
+    }
+    return { status: 200, body: await scenarioSimulation.runScenario(actor.companyId, body) };
+  });
+
   // ---- Customer Portal ----
   httpServer.post('/api/portal/grant-access', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -2951,7 +3096,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
     },

@@ -22,6 +22,13 @@ export interface SignContractInput {
   escalationPercentPerYear?: number;
 }
 
+export interface AmendContractInput {
+  companyId: string;
+  contractId: string;
+  newTotalPrice: number;
+  discountPercent?: number;
+}
+
 export class SalesService {
   // Keyed by reservationId — protects the "does a contract already exist for
   // this reservation" check from concurrent double-signing.
@@ -182,6 +189,41 @@ export class SalesService {
     await this.contracts.save(updated);
     await this.inventory.markAvailable(contract.unitId);
     await this.inventory.markReservationCancelled(contract.reservationId);
+    return updated;
+  }
+
+  /**
+   * Real post-signing renegotiation: changes a signed contract's total
+   * price/discount and rescales its not-yet-paid installments to match,
+   * leaving every already-paid or partially-paid line untouched. Always
+   * requires approval via the Universal Approval Engine (see app.ts's
+   * 'contract_amendment' actionType) — this changes money already
+   * committed to a client, so it's never applied unilaterally.
+   */
+  async amendContract(input: AmendContractInput): Promise<Contract> {
+    const contract = await this.contracts.findById(input.contractId);
+    if (!contract || contract.companyId !== input.companyId) throw new NotFoundError('contract not found');
+    if (contract.status !== 'signed') {
+      throw new SalesError(`only a signed contract can be amended (current status: ${contract.status})`);
+    }
+    if (!(input.newTotalPrice > 0)) throw new ValidationError('newTotalPrice must be positive');
+    const discountPercent = input.discountPercent ?? 0;
+    if (discountPercent < 0 || discountPercent >= 100) {
+      throw new ValidationError('discountPercent must be between 0 and 100 (exclusive)');
+    }
+
+    const lines = await this.paymentPlans.getScheduleForContract(input.contractId, input.companyId);
+    const lockedTotal = lines.filter((l) => l.amountPaid > 0).reduce((sum, l) => sum + l.amount, 0);
+    const newEffectivePrice = Math.round(input.newTotalPrice * (1 - discountPercent / 100) * 100) / 100;
+    const newRemainingBalance = Math.round((newEffectivePrice - lockedTotal) * 100) / 100;
+    if (newRemainingBalance < 0) {
+      throw new SalesError('amended total price is less than the amounts already paid on this contract');
+    }
+
+    await this.paymentPlans.rescaleUnpaidLines(input.contractId, input.companyId, newRemainingBalance);
+
+    const updated: Contract = { ...contract, totalPrice: input.newTotalPrice };
+    await this.contracts.save(updated);
     return updated;
   }
 }
