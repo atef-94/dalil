@@ -1,8 +1,11 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls, searchInput } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderPurchasing(container) {
   clear(container);
+  let vendorsOffset = 0;
+  let vendorsQuery = '';
+  let ordersOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Purchasing')));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
@@ -46,7 +49,13 @@ export async function renderPurchasing(container) {
     el('div', { class: 'form-actions' }, [registerVendorBtn]),
   ]));
 
-  const vendorsSlot = el('div', { class: 'card' });
+  const vendorsTableSlot = el('div');
+  const vendorsSearch = searchInput('Search by name or category…', (value) => { vendorsQuery = value; vendorsOffset = 0; load(); });
+  const vendorsSlot = el('div', { class: 'card' }, [
+    el('h3', { style: 'margin-top:0' }, 'Vendors'),
+    el('div', { class: 'form-row', style: 'max-width:320px;margin-bottom:10px' }, [vendorsSearch]),
+    vendorsTableSlot,
+  ]);
   container.appendChild(vendorsSlot);
 
   const vendorSelect = selectInput([]);
@@ -103,13 +112,17 @@ export async function renderPurchasing(container) {
   }
 
   async function load() {
-    clear(vendorsSlot);
-    vendorsSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Vendors'));
+    clear(vendorsTableSlot);
     try {
-      const page = await api.get('/api/purchasing/vendors', { limit: 100 });
+      // A separate, unpaginated fetch just for the create-PO vendor dropdown
+      // — capped generously since the dropdown needs every active vendor,
+      // not just the current search/page.
+      const allVendorsPage = await api.get('/api/purchasing/vendors', { limit: 200 });
       clear(vendorSelect);
-      page.items.filter((v) => v.status === 'active').forEach((v) => vendorSelect.appendChild(el('option', { value: v.id }, v.name)));
-      vendorsSlot.appendChild(table(
+      allVendorsPage.items.filter((v) => v.status === 'active').forEach((v) => vendorSelect.appendChild(el('option', { value: v.id }, v.name)));
+
+      const page = await api.get('/api/purchasing/vendors', { limit: 20, offset: vendorsOffset, q: vendorsQuery });
+      vendorsTableSlot.appendChild(table(
         [
           { label: 'Name', key: 'name' },
           { label: 'Category', key: 'category' },
@@ -118,15 +131,16 @@ export async function renderPurchasing(container) {
         page.items,
         { empty: 'No vendors yet — register one above.' },
       ));
+      vendorsTableSlot.appendChild(paginationControls(page, (next) => { vendorsOffset = next; load(); }));
     } catch (err) {
-      vendorsSlot.appendChild(errorBanner(err.message));
+      vendorsTableSlot.appendChild(errorBanner(err.message));
     }
 
     clear(ordersSlot);
     ordersSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Purchase orders'));
     ordersSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/purchasing/purchase-orders', { limit: 100 });
+      const page = await api.get('/api/purchasing/purchase-orders', { limit: 20, offset: ordersOffset });
       clear(ordersSlot);
       ordersSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Purchase orders'));
       ordersSlot.appendChild(table(
@@ -155,6 +169,7 @@ export async function renderPurchasing(container) {
         page.items,
         { empty: 'No purchase orders yet — create one above.' },
       ));
+      ordersSlot.appendChild(paginationControls(page, (next) => { ordersOffset = next; load(); }));
     } catch (err) {
       ordersSlot.appendChild(errorBanner(err.message));
     }

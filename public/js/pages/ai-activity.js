@@ -1,8 +1,10 @@
-import { el, clear, table, errorBanner, statusBadge, loadingState, statCard } from '../ui.js';
+import { el, clear, table, errorBanner, statusBadge, loadingState, statCard, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderAiActivity(container) {
   clear(container);
+  let decisionsOffset = 0;
+  let requestsOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, 'AI Activity'),
@@ -34,7 +36,7 @@ export async function renderAiActivity(container) {
     clear(decisionsSlot);
     decisionsSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/ai/decisions', { limit: 50 });
+      const page = await api.get('/api/ai/decisions', { limit: 20, offset: decisionsOffset });
       clear(decisionsSlot);
       decisionsSlot.appendChild(el('h3', {}, 'Agent decision history'));
       decisionsSlot.appendChild(table(
@@ -50,6 +52,7 @@ export async function renderAiActivity(container) {
         page.items.slice().reverse(),
         { empty: 'No agent decisions yet — run one from AI Agents.', emptyIcon: 'ai' },
       ));
+      decisionsSlot.appendChild(paginationControls(page, (next) => { decisionsOffset = next; loadDecisions(); }));
     } catch (err) {
       clear(decisionsSlot);
       decisionsSlot.appendChild(errorBanner(err.message));
@@ -63,7 +66,7 @@ export async function renderAiActivity(container) {
     clear(requestsSlot);
     requestsSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/ai/actions', { limit: 50 });
+      const page = await api.get('/api/ai/actions', { limit: 20, offset: requestsOffset });
       clear(requestsSlot);
       requestsSlot.appendChild(el('h3', {}, 'AI action requests'));
       requestsSlot.appendChild(table(
@@ -77,6 +80,7 @@ export async function renderAiActivity(container) {
         page.items.slice().reverse(),
         { empty: 'No AI action requests yet — try "Ask AI" on a lead in the Leads page.', emptyIcon: 'ai' },
       ));
+      requestsSlot.appendChild(paginationControls(page, (next) => { requestsOffset = next; loadRequests(); }));
     } catch (err) {
       clear(requestsSlot);
       requestsSlot.appendChild(errorBanner(err.message));

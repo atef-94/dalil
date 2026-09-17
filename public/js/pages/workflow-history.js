@@ -1,8 +1,11 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls } from '../ui.js';
 import { api } from '../api.js';
+
+const PAGE_SIZE = 20;
 
 export async function renderWorkflowHistory(container) {
   clear(container);
+  let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, 'Workflow Execution History'),
@@ -13,7 +16,7 @@ export async function renderWorkflowHistory(container) {
   container.appendChild(errorSlot);
 
   const workflowFilter = selectInput([{ value: '', label: 'All workflows' }]);
-  workflowFilter.addEventListener('change', render);
+  workflowFilter.addEventListener('change', () => { offset = 0; render(); });
   container.appendChild(el('div', { class: 'card' }, [
     el('div', { class: 'form-row' }, [el('div', { style: 'max-width:260px' }, [el('label', {}, 'Workflow'), workflowFilter])]),
   ]));
@@ -37,6 +40,7 @@ export async function renderWorkflowHistory(container) {
   function render() {
     clear(listSlot);
     const filtered = workflowFilter.value ? allRuns.filter((r) => r.workflowId === workflowFilter.value) : allRuns;
+    const pageItems = filtered.slice(offset, offset + PAGE_SIZE);
     listSlot.appendChild(table(
       [
         { label: 'Workflow', render: (r) => workflows.find((w) => w.id === r.workflowId)?.name ?? r.workflowId },
@@ -51,8 +55,15 @@ export async function renderWorkflowHistory(container) {
           return btn;
         } },
       ],
-      filtered,
+      pageItems,
       { empty: 'No runs yet.', emptyIcon: 'history' },
+    ));
+    // Client-side pagination over the already-fetched, merged cross-workflow
+    // run list — there's no single backend endpoint for "every run across
+    // every workflow" to paginate server-side against.
+    listSlot.appendChild(paginationControls(
+      { total: filtered.length, limit: PAGE_SIZE, offset },
+      (next) => { offset = next; render(); },
     ));
   }
 

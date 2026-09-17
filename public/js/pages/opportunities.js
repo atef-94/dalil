@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, selectInput, formModal, loadingState } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, selectInput, formModal, loadingState, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 // Tracks reservationId + unit price per opportunity for this browser session,
@@ -9,6 +9,7 @@ const sessionReservations = new Map();
 
 export async function renderOpportunities(container) {
   clear(container);
+  let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Sales Opportunities')));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
@@ -115,7 +116,7 @@ export async function renderOpportunities(container) {
     try {
       const [leadsPage, oppsPage] = await Promise.all([
         api.get('/api/crm/leads', { limit: 200 }),
-        api.get('/api/sales/opportunities', { limit: 50 }),
+        api.get('/api/sales/opportunities', { limit: 20, offset }),
       ]);
       const qualified = leadsPage.items.filter((l) => l.status === 'qualified');
       clear(leadSelect);
@@ -147,6 +148,7 @@ export async function renderOpportunities(container) {
         oppsPage.items,
         { empty: 'No opportunities yet.' },
       ));
+      listSlot.appendChild(paginationControls(oppsPage, (next) => { offset = next; load(); }));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));
     }

@@ -1,8 +1,9 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderIntegrations(container) {
   clear(container);
+  let eventsOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Integrations')));
   container.appendChild(el('p', { class: 'muted' },
     'Connect external providers with securely encrypted credentials. Every send is rate-limited, retried on failure, and logged below — nothing is silent.'));
@@ -127,7 +128,7 @@ export async function renderIntegrations(container) {
     clear(eventsSlot);
     eventsSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/integrations/events', { limit: 50 });
+      const page = await api.get('/api/integrations/events', { limit: 20, offset: eventsOffset });
       clear(eventsSlot);
       eventsSlot.appendChild(el('h3', {}, 'Delivery log'));
       eventsSlot.appendChild(table(
@@ -142,6 +143,7 @@ export async function renderIntegrations(container) {
         page.items.slice().reverse(),
         { empty: 'No delivery attempts logged yet.' },
       ));
+      eventsSlot.appendChild(paginationControls(page, (next) => { eventsOffset = next; loadEvents(); }));
     } catch (err) {
       clear(eventsSlot);
       eventsSlot.appendChild(errorBanner(err.message));

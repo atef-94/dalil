@@ -49,6 +49,7 @@ import { SqliteRepository } from './infra/sqlite-repository.js';
 import { HttpServer, type RequestContext } from './infra/http-server.js';
 import { SlidingWindowRateLimiter } from './infra/rate-limiter.js';
 import { paginate } from './infra/pagination.js';
+import { searchFilter } from './infra/search.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
@@ -505,7 +506,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       // record's subject — so 'own' resolves against the employee's own user.
       ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
     }));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    const searched = searchFilter(filtered, ['fullName', 'email', 'title'], ctx.query.get('q'));
+    return { status: 200, body: paginate(searched, ctx.query) };
   });
 
   httpServer.post('/api/organization/employees/:employeeId/reassign-manager', async (ctx) => {
@@ -805,7 +807,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:unit permission' } };
     const projectId = ctx.query.get('projectId') ?? undefined;
     const units = await inventory.listUnits(actor.companyId, projectId);
-    return { status: 200, body: paginate(units, ctx.query) };
+    const filtered = searchFilter(units, ['code', 'unitType'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/inventory/units/:unitId/hold', async (ctx) => {
@@ -855,7 +858,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'lead');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:lead permission' } };
     const leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
-    return { status: 200, body: paginate(leads, ctx.query) };
+    const filtered = searchFilter(leads, ['fullName', 'phone', 'email'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.patch('/api/crm/leads/:leadId/status', async (ctx) => {
@@ -1089,15 +1093,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     // A broker_user only ever sees their own broker company's submissions
     // (mirrors the broker hard-wall in the RBAC evaluator); internal staff
     // reviewing the quarantine queue need view:broker_company instead.
+    const q = ctx.query.get('q');
     if (actor.userType === 'broker_user') {
       const user = await repos.users.findById(actor.userId);
       const own = all.filter((bl) => bl.brokerCompanyId === user?.brokerCompanyId);
-      return { status: 200, body: paginate(own, ctx.query) };
+      return { status: 200, body: paginate(searchFilter(own, ['fullName', 'phone', 'email'], q), ctx.query) };
     }
     if (!(await rbac.can(actor.userId, 'view', 'broker_company'))) {
       throw new ForbiddenError('missing view:broker_company permission');
     }
-    return { status: 200, body: paginate(all, ctx.query) };
+    return { status: 200, body: paginate(searchFilter(all, ['fullName', 'phone', 'email'], q), ctx.query) };
   });
 
   httpServer.post('/api/brokers/leads/:brokerLeadId/approve', async (ctx) => {
@@ -1183,7 +1188,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:leave_request permission');
     }
     const requests = await hr.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(requests, ctx.query) };
+    const filtered = searchFilter(requests, ['reason'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.get('/api/hr/my-leave-requests', async (ctx) => {
@@ -1259,7 +1265,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const unitId = ctx.query.get('unitId');
     const tickets = unitId ? await operations.listForUnit(unitId, actor.companyId) : await operations.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(tickets, ctx.query) };
+    const filtered = searchFilter(tickets, ['title', 'description'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/operations/tickets/:ticketId/assign', async (ctx) => {
@@ -1309,7 +1316,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const documents = contractId
       ? await legal.listForContract(contractId, actor.companyId)
       : await legal.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(documents, ctx.query) };
+    const filtered = searchFilter(documents, ['name', 'notes'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/legal/documents/:documentId/received', async (ctx) => {
@@ -1378,7 +1386,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:vendor permission');
     }
     const vendors = await purchasing.listVendors(actor.companyId);
-    return { status: 200, body: paginate(vendors, ctx.query) };
+    const filtered = searchFilter(vendors, ['name', 'category'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/purchasing/vendors/:vendorId/deactivate', async (ctx) => {
@@ -1481,7 +1490,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:campaign permission');
     }
     const campaigns = await marketing.listCampaigns(actor.companyId);
-    return { status: 200, body: paginate(campaigns, ctx.query) };
+    const filtered = searchFilter(campaigns, ['name'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/marketing/campaigns/:campaignId/status', async (ctx) => {
@@ -1531,7 +1541,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
   httpServer.get('/api/communication/my-messages', async (ctx) => {
     const actor = await actorOf(ctx);
     const messages = await communication.listForUser(actor.userId, actor.companyId);
-    return { status: 200, body: paginate(messages, ctx.query) };
+    const filtered = searchFilter(messages, ['subject'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.get('/api/communication/messages', async (ctx) => {
@@ -1544,7 +1555,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const messages = relatedResource && relatedResourceId
       ? await communication.listForResource(relatedResource, relatedResourceId, actor.companyId)
       : await communication.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(messages, ctx.query) };
+    const filtered = searchFilter(messages, ['subject'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/communication/messages/:messageId/read', async (ctx) => {
@@ -1627,7 +1639,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:portal_access permission');
     }
     const customers = await portal.listCustomers(actor.companyId);
-    return { status: 200, body: paginate(customers, ctx.query) };
+    const filtered = searchFilter(customers, ['fullName', 'phone', 'email'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   const customerActorOf = async (ctx: RequestContext): Promise<{ actor: Actor; customerId: string }> => {

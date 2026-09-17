@@ -1,8 +1,9 @@
-import { el, clear, table, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
+import { el, clear, table, errorBanner, statusBadge, loadingState, selectInput, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderReservations(container) {
   clear(container);
+  let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, 'Reservations'),
@@ -18,7 +19,7 @@ export async function renderReservations(container) {
     { value: 'converted', label: 'Converted to contract' },
     { value: 'cancelled', label: 'Cancelled' },
   ]);
-  statusFilter.addEventListener('change', load);
+  statusFilter.addEventListener('change', () => { offset = 0; load(); });
   container.appendChild(el('div', { class: 'card' }, [
     el('div', { class: 'form-row' }, [el('div', { style: 'max-width:220px' }, [el('label', {}, 'Status'), statusFilter])]),
   ]));
@@ -31,7 +32,7 @@ export async function renderReservations(container) {
     listSlot.appendChild(loadingState());
     try {
       const [reservationsPage, leadsPage, unitsPage] = await Promise.all([
-        api.get('/api/inventory/reservations', { limit: 100, status: statusFilter.value || undefined }),
+        api.get('/api/inventory/reservations', { limit: 20, offset, status: statusFilter.value || undefined }),
         api.get('/api/crm/leads', { limit: 200 }),
         api.get('/api/inventory/units', { limit: 200 }),
       ]);
@@ -54,6 +55,7 @@ export async function renderReservations(container) {
         reservationsPage.items,
         { empty: 'No reservations yet — reserve a unit from an Opportunity or from Inventory.', emptyIcon: 'reservations' },
       ));
+      listSlot.appendChild(paginationControls(reservationsPage, (next) => { offset = next; load(); }));
     } catch (err) {
       clear(listSlot);
       listSlot.appendChild(errorBanner(err.message));

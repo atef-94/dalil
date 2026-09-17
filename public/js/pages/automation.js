@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 const TRIGGER_TYPES = [{ value: 'event', label: 'Event' }, { value: 'scheduled', label: 'Scheduled' }, { value: 'webhook', label: 'Webhook' }];
@@ -178,6 +178,7 @@ function stepEditor(step = {}) {
 
 export async function renderAutomation(container) {
   clear(container);
+  let workflowsOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, 'Automation Engine'),
@@ -374,7 +375,7 @@ export async function renderAutomation(container) {
     clear(workflowsSlot);
     workflowsSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/automation/workflows', { limit: 50 });
+      const page = await api.get('/api/automation/workflows', { limit: 20, offset: workflowsOffset });
       clear(workflowsSlot);
       workflowsSlot.appendChild(el('h3', {}, 'Workflows'));
       workflowsSlot.appendChild(table(
@@ -410,6 +411,7 @@ export async function renderAutomation(container) {
         page.items,
         { empty: 'No workflows yet — build one above, or use a template.' },
       ));
+      workflowsSlot.appendChild(paginationControls(page, (next) => { workflowsOffset = next; loadWorkflows(); }));
     } catch (err) {
       clear(workflowsSlot);
       workflowsSlot.appendChild(errorBanner(err.message));

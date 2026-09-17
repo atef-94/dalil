@@ -202,6 +202,19 @@ export function selectInput(options, props = {}) {
   ));
 }
 
+/** A debounced search box — calls onSearch(trimmedValue) ~300ms after the
+ * user stops typing, not on every keystroke. Callers own resetting their
+ * own offset/state and re-fetching; this only owns the input's own timing. */
+export function searchInput(placeholder, onSearch, { debounceMs = 300 } = {}) {
+  const input = el('input', { type: 'text', placeholder });
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => onSearch(input.value.trim()), debounceMs);
+  });
+  return input;
+}
+
 export function paginationControls(page, onChange) {
   const hasPrev = page.offset > 0;
   const hasNext = page.offset + page.limit < page.total;

@@ -1,8 +1,9 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderContracts(container) {
   clear(container);
+  let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, 'Contracts'),
@@ -60,7 +61,7 @@ export async function renderContracts(container) {
     listSlot.appendChild(loadingState());
     try {
       const [contractsPage, leadsPage, unitsPage] = await Promise.all([
-        api.get('/api/sales/contracts', { limit: 100 }),
+        api.get('/api/sales/contracts', { limit: 20, offset }),
         api.get('/api/crm/leads', { limit: 200 }),
         api.get('/api/inventory/units', { limit: 200 }),
       ]);
@@ -89,6 +90,7 @@ export async function renderContracts(container) {
         contractsPage.items,
         { empty: 'No contracts yet — sign one from an Opportunity once a unit is reserved.', emptyIcon: 'contracts' },
       ));
+      listSlot.appendChild(paginationControls(contractsPage, (next) => { offset = next; load(); }));
     } catch (err) {
       clear(listSlot);
       listSlot.appendChild(errorBanner(err.message));

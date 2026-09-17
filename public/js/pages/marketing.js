@@ -1,8 +1,10 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls, searchInput } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderMarketing(container) {
   clear(container);
+  let offset = 0;
+  let q = '';
   container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Marketing — Campaigns')));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
@@ -50,6 +52,9 @@ export async function renderMarketing(container) {
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
 
+  const search = searchInput('Search by campaign name…', (value) => { q = value; offset = 0; load(); });
+  container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
+
   const listSlot = el('div');
   container.appendChild(listSlot);
 
@@ -94,7 +99,7 @@ export async function renderMarketing(container) {
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/marketing/campaigns', { limit: 50 });
+      const page = await api.get('/api/marketing/campaigns', { limit: 20, offset, q });
       clear(listSlot);
       listSlot.appendChild(table(
         [
@@ -124,6 +129,7 @@ export async function renderMarketing(container) {
         page.items,
         { empty: 'No campaigns yet — create one above.' },
       ));
+      listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));
     }

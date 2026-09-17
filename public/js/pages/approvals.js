@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, loadingState, badge, tabs } from '../ui.js';
+import { el, clear, table, toast, errorBanner, loadingState, badge, tabs, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 // Workflow-step approvals and AI-action approvals are both ApprovalRequest
@@ -26,6 +26,7 @@ export async function renderApprovals(container) {
   container.appendChild(listSlot);
 
   let statusTab = 'pending';
+  let offset = 0;
 
   async function decide(approval, action) {
     try {
@@ -43,12 +44,12 @@ export async function renderApprovals(container) {
     tabsSlot.appendChild(tabs(
       [{ key: 'pending', label: 'Pending' }, { key: 'approved', label: 'Approved' }, { key: 'rejected', label: 'Rejected' }],
       statusTab,
-      (key) => { statusTab = key; load(); },
+      (key) => { statusTab = key; offset = 0; load(); },
     ));
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/automation/approvals', { status: statusTab, limit: 100 });
+      const page = await api.get('/api/automation/approvals', { status: statusTab, limit: 20, offset });
       clear(listSlot);
       listSlot.appendChild(table(
         [
@@ -67,6 +68,7 @@ export async function renderApprovals(container) {
         page.items.slice().reverse(),
         { empty: `No ${statusTab} approvals.`, emptyIcon: 'approvals' },
       ));
+      listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
       clear(listSlot);
       listSlot.appendChild(errorBanner(err.message));

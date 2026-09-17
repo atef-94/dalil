@@ -1,8 +1,9 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderHr(container) {
   clear(container);
+  let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'HR — Leave Requests')));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
@@ -80,7 +81,7 @@ export async function renderHr(container) {
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/hr/leave-requests', { limit: 50 });
+      const page = await api.get('/api/hr/leave-requests', { limit: 20, offset });
       clear(listSlot);
       listSlot.appendChild(table(
         [
@@ -101,6 +102,7 @@ export async function renderHr(container) {
         page.items,
         { empty: 'No leave requests yet — submit one above, or you may not have permission to view them.' },
       ));
+      listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));
     }

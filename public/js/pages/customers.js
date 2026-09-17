@@ -1,8 +1,10 @@
-import { el, clear, table, errorBanner, loadingState, badge } from '../ui.js';
+import { el, clear, table, errorBanner, loadingState, badge, paginationControls, searchInput } from '../ui.js';
 import { api } from '../api.js';
 
 export async function renderCustomers(container) {
   clear(container);
+  let offset = 0;
+  let q = '';
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, 'Customers'),
@@ -12,6 +14,9 @@ export async function renderCustomers(container) {
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
+  const search = searchInput('Search by name, phone, or email…', (value) => { q = value; offset = 0; load(); });
+  container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
+
   const listSlot = el('div');
   container.appendChild(listSlot);
 
@@ -19,7 +24,7 @@ export async function renderCustomers(container) {
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/customers', { limit: 100 });
+      const page = await api.get('/api/customers', { limit: 20, offset, q });
       clear(listSlot);
       listSlot.appendChild(table(
         [
@@ -32,6 +37,7 @@ export async function renderCustomers(container) {
         page.items,
         { empty: 'No customers yet — grant portal access to a lead from the Leads page.', emptyIcon: 'customers' },
       ));
+      listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
       clear(listSlot);
       listSlot.appendChild(errorBanner(err.message));
