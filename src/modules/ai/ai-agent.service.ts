@@ -9,6 +9,7 @@ import type {
   AiPolicy,
   ApprovalRequest,
   AutomationActionType,
+  Lead,
 } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { AuditLog } from '../../infra/audit-log.js';
@@ -20,6 +21,7 @@ import { MarketingService } from '../marketing/marketing.service.js';
 import { OperationsService } from '../operations/operations.service.js';
 import { HrService } from '../hr/hr.service.js';
 import { FinanceService } from '../finance/finance.service.js';
+import { IntegrationService } from '../integrations/integration.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
 
 export interface AiRepos {
@@ -53,6 +55,7 @@ const TOOL_REGISTRY: ToolDefinition[] = [
   { actionType: 'assign_lead_owner', name: 'Assign Lead Owner', description: 'Reassigns a lead to a different owner.', requiredParams: ['leadId', 'ownerEmployeeUserId'] },
   { actionType: 'update_campaign_status', name: 'Update Campaign Status', description: "Changes a marketing campaign's status.", requiredParams: ['campaignId', 'status'] },
   { actionType: 'webhook_call', name: 'Call Webhook', description: 'Calls an external webhook/API endpoint.', requiredParams: ['url'] },
+  { actionType: 'integration_call', name: 'Send via Integration', description: 'Sends a message through a connected external provider (WhatsApp, Email, etc).', requiredParams: ['provider', 'action'] },
   { actionType: 'require_approval', name: 'Require Approval', description: 'Pauses for human approval (workflow steps only).', requiredParams: [] },
 ];
 
@@ -139,6 +142,7 @@ export class AiAgentService {
     private readonly operations: OperationsService,
     private readonly hr: HrService,
     private readonly finance: FinanceService,
+    private readonly integrations: IntegrationService,
   ) {
     this.agents = {
       sales: {
@@ -147,7 +151,7 @@ export class AiAgentService {
         businessFunction: 'Sales',
         goal: 'Advance qualified leads through the funnel and keep unqualified ones from going cold.',
         subjectType: 'lead',
-        allowedActionTypes: ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message'],
+        allowedActionTypes: ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call'],
         escalateBelowConfidence: 20,
       },
       marketing: {
@@ -492,6 +496,29 @@ export class AiAgentService {
     if (lead.status === 'new') {
       const advanceConfidence = Math.min(95, Math.round((score.score / 35) * 100));
       if (advanceConfidence >= 50) {
+        // Cross-module reach-out: if the company has a connected WhatsApp or
+        // Email integration and hasn't already messaged this lead, reaching
+        // out directly through it is the concrete next action — the same
+        // "AI selects a permitted next action -> WhatsApp/Email" step the
+        // Lead AI Outreach workflow template demonstrates. This never fires
+        // twice for the same lead (see hasAlreadyReachedOut), so the
+        // *following* decide() call for this still-'new' lead falls through
+        // to the ordinary status-advance branch below.
+        const channel = !(await this.hasAlreadyReachedOut(companyId, lead.id)) ? await this.pickOutreachChannel(companyId, lead) : undefined;
+        if (channel) {
+          alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark contacted directly instead of reaching out first.' });
+          const greeting = `Hi ${lead.fullName}, thanks for your interest — one of our agents will follow up with you shortly!`;
+          return {
+            chosenActionType: 'integration_call',
+            params:
+              channel === 'whatsapp'
+                ? { provider: 'whatsapp', action: 'send_message', leadId: lead.id, to: lead.phone, body: greeting }
+                : { provider: 'email', action: 'send_message', leadId: lead.id, to: lead.email, subject: 'Thanks for your interest', body: greeting },
+            confidence: advanceConfidence,
+            reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to reach out directly via ${channel}.`,
+            alternatives,
+          };
+        }
         alternatives.push({ actionType: 'create_task', confidence: 100 - advanceConfidence, reasoning: 'Fallback: a manual follow-up task instead of advancing automatically.' });
         return {
           chosenActionType: 'update_lead_status',
@@ -545,6 +572,32 @@ export class AiAgentService {
       reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not yet strong enough to qualify automatically.`,
       alternatives,
     };
+  }
+
+  /** Picks the channel a new lead should be reached out on, preferring
+   * WhatsApp (more immediate) over Email — but only when the company has
+   * an active connection for it (status !== 'disconnected'; an 'error'
+   * connection is still worth retrying) and the lead actually has the
+   * matching contact field. Returns undefined when neither is available,
+   * so the caller falls back to its ordinary internal status-only path. */
+  private async pickOutreachChannel(companyId: string, lead: Lead): Promise<'whatsapp' | 'email' | undefined> {
+    const connections = await this.integrations.listConnections(companyId);
+    const isActive = (provider: string) => connections.some((c) => c.provider === provider && c.status !== 'disconnected');
+    if (lead.phone && isActive('whatsapp')) return 'whatsapp';
+    if (lead.email && isActive('email')) return 'email';
+    return undefined;
+  }
+
+  /** A lead is only ever reached out to once automatically — checked
+   * against the Integration Layer's own delivery log (IntegrationEvent
+   * already records the lead id as a safe, non-sensitive identifier for
+   * exactly this kind of lookup). Without this, re-running decide() on a
+   * lead that's still 'new' (e.g. a second "Ask AI" click before the
+   * status has had a chance to change) would message the same customer
+   * again. */
+  private async hasAlreadyReachedOut(companyId: string, leadId: string): Promise<boolean> {
+    const events = await this.integrations.listEvents(companyId);
+    return events.some((e) => e.requestSummary?.leadId === leadId);
   }
 
   /** Marketing Agent: flags a campaign whose attributed leads have real

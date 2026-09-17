@@ -578,6 +578,7 @@ export type AutomationActionType =
   | 'update_campaign_status'
   | 'webhook_call'
   | 'integration_call'
+  | 'ai_decide'
   | 'require_approval';
 
 export interface WorkflowActionConfig {

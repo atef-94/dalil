@@ -1,10 +1,11 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
 import { api } from '../api.js';
 
-// require_approval is a workflow-only meta-action (it pauses a run for a
-// human decision) — it isn't something the AI itself "performs", so it's
-// left out of the policy list here.
-const AI_ACTION_TYPES = ['create_task', 'create_lead', 'send_message', 'update_lead_status', 'assign_lead_owner', 'update_campaign_status', 'webhook_call'];
+// require_approval and ai_decide are workflow-only meta-actions (the
+// former pauses a run for a human decision, the latter hands a subject to
+// a specialized agent) — neither is something the AI itself "performs" as
+// a chosen action, so both are left out of the policy list here.
+const AI_ACTION_TYPES = ['create_task', 'create_lead', 'send_message', 'update_lead_status', 'assign_lead_owner', 'update_campaign_status', 'webhook_call', 'integration_call'];
 const AUTONOMY_LEVELS = [
   { value: 'suggest_only', label: 'Suggest only — never executes' },
   { value: 'require_approval', label: 'Require approval (default)' },

@@ -314,19 +314,6 @@ export async function buildApplication(options: AppOptions): Promise<Application
   eventBus.subscribe(async (event: DomainEvent) => {
     await automation.handleEvent(event);
   });
-  const aiAgent = new AiAgentService(
-    { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals, agentDecisions: repos.agentDecisions },
-    rbac,
-    automation,
-    crm,
-    leadScoring,
-    auditLog,
-    marketing,
-    operations,
-    hr,
-    finance,
-  );
-
   const integrations = new IntegrationService(
     { connections: repos.integrationConnections, events: repos.integrationEvents },
     automation,
@@ -338,6 +325,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // is late-bound instead of a constructor dependency.
   automation.setIntegrationSender((companyId, provider, action, params, userId) =>
     integrations.send(companyId, provider as IntegrationConnection['provider'], action, params, userId),
+  );
+
+  const aiAgent = new AiAgentService(
+    { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals, agentDecisions: repos.agentDecisions },
+    rbac,
+    automation,
+    crm,
+    leadScoring,
+    auditLog,
+    marketing,
+    operations,
+    hr,
+    finance,
+    integrations,
+  );
+  // Wires the `ai_decide` action type — a workflow step (or a manual
+  // trigger) can hand a subject off to a specialized agent and let it
+  // choose + execute (via the exact same requestAction pipeline as any
+  // other AI action) its own next step. This is what connects Phase 1's
+  // Automation Engine, Phase 2's AI Agent Orchestration Layer, and Phase
+  // 3's Integration Layer into the cross-module workflows Phase 4 asks
+  // for — see the "Lead AI Outreach" workflow template.
+  automation.setAiDecider((companyId, agentKey, subjectId, requestedByUserId) =>
+    aiAgent.decide(agentKey, companyId, subjectId, requestedByUserId),
   );
 
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;

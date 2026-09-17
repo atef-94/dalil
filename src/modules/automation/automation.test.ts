@@ -90,6 +90,7 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
     crm,
     marketing,
     runs,
+    stepRuns,
     auditLogRepo,
     fetchCalls,
     setFetchImpl: (impl: typeof fetch) => {
@@ -393,6 +394,60 @@ test('assign_lead_owner action reassigns the lead through CrmService', async () 
   assert.equal(run!.status, 'completed');
   const updated = await h.crm.getLead(lead.id);
   assert.equal(updated!.ownerEmployeeUserId, 'emp-9');
+});
+
+test('ai_decide dispatches to the configured AI decider and returns its decision', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'ai_action' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+
+  const deciderCalls: { companyId: string; agentKey: string; subjectId: string; requestedByUserId: string }[] = [];
+  h.automation.setAiDecider(async (companyId, agentKey, subjectId, requestedByUserId) => {
+    deciderCalls.push({ companyId, agentKey, subjectId, requestedByUserId });
+    return {
+      id: 'decision-1',
+      companyId,
+      agentKey,
+      subjectType: 'lead',
+      subjectId,
+      confidence: 90,
+      reasoning: 'stubbed decision',
+      alternatives: [],
+      status: 'proceeded',
+      requestedByUserId,
+      createdAt: new Date().toISOString(),
+    };
+  });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Hand lead to AI',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'AI decides', action: { type: 'ai_decide', params: { agentKey: 'sales', subjectId: lead.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  assert.deepEqual(deciderCalls, [{ companyId: 'c1', agentKey: 'sales', subjectId: lead.id, requestedByUserId: 'owner-1' }]);
+
+  const savedStepRuns = await h.stepRuns.findAll((sr) => sr.runId === run!.id);
+  assert.equal(savedStepRuns[0]!.output?.reasoning, 'stubbed decision');
+});
+
+test('ai_decide fails clearly when no AI decider is configured for this deployment', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'ai_action' }]);
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Hand lead to AI',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'AI decides', action: { type: 'ai_decide', params: { agentKey: 'sales', subjectId: 'lead-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /no AI decider is configured/);
 });
 
 test('update_campaign_status action updates the real campaign through MarketingService', async () => {

@@ -12,6 +12,7 @@ import { OperationsService } from '../operations/operations.service.js';
 import { HrService } from '../hr/hr.service.js';
 import { FinanceService } from '../finance/finance.service.js';
 import { AutomationService } from '../automation/automation.service.js';
+import { IntegrationService } from '../integrations/integration.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
 import { AiAgentService } from './ai-agent.service.js';
 import type {
@@ -23,6 +24,8 @@ import type {
   AuditLogEntry,
   Campaign,
   Employee,
+  IntegrationConnection,
+  IntegrationEvent,
   Lead,
   LeaveRequest,
   MaintenanceTicket,
@@ -96,6 +99,24 @@ function freshHarness() {
   const policies = new InMemoryRepository<AiPolicy>();
   const agentDecisions = new InMemoryRepository<AgentDecision>();
 
+  const integrationConnections = new InMemoryRepository<IntegrationConnection>();
+  const integrationEvents = new InMemoryRepository<IntegrationEvent>();
+  const integrationFetchCalls: { url: string; init?: RequestInit }[] = [];
+  let integrationFetchImpl: typeof fetch = (async (url, init) => {
+    integrationFetchCalls.push({ url: String(url), init: init as RequestInit | undefined });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+  const integrations = new IntegrationService(
+    { connections: integrationConnections, events: integrationEvents },
+    automation,
+    auditLog,
+    ((url: Parameters<typeof fetch>[0], init?: RequestInit) => integrationFetchImpl(url, init)) as typeof fetch,
+    0,
+  );
+  automation.setIntegrationSender((companyId, provider, action, params, userId) =>
+    integrations.send(companyId, provider as IntegrationConnection['provider'], action, params, userId),
+  );
+
   const ai = new AiAgentService(
     { actionRequests, policies, approvals, agentDecisions },
     rbac,
@@ -107,9 +128,35 @@ function freshHarness() {
     operations,
     hr,
     finance,
+    integrations,
   );
 
-  return { rbac, ai, automation, users, roles, grants, userRoles, leads, crm, marketing, operations, hr, finance, employees, units, policies, auditLogRepo, scheduleLines, leaveRequests };
+  return {
+    rbac,
+    ai,
+    automation,
+    integrations,
+    integrationFetchCalls,
+    setIntegrationFetchImpl: (impl: typeof fetch) => {
+      integrationFetchImpl = impl;
+    },
+    users,
+    roles,
+    grants,
+    userRoles,
+    leads,
+    crm,
+    marketing,
+    operations,
+    hr,
+    finance,
+    employees,
+    units,
+    policies,
+    auditLogRepo,
+    scheduleLines,
+    leaveRequests,
+  };
 }
 
 async function seedUserWithGrants(
@@ -335,13 +382,99 @@ test('listTools returns the full tool registry, or a per-agent boundary-filtered
   const allTools = h.ai.listTools();
   assert.ok(allTools.length >= 7);
   const salesTools = h.ai.listTools('sales');
-  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message'].includes(t.actionType)));
+  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call'].includes(t.actionType)));
   assert.ok(!salesTools.some((t) => t.actionType === 'webhook_call'));
 });
 
 test('listTools rejects an unknown agent key', () => {
   const h = freshHarness();
   assert.throws(() => h.ai.listTools('not-a-real-agent'));
+});
+
+// ---- Cross-module: Sales agent reaching out via the Integration Layer ----
+
+const INTEGRATION_CALL_GRANT: { action: ActionName; resource: ResourceName } = { action: 'create', resource: 'integration_connection' };
+
+test('sales agent reaches out via a connected WhatsApp integration instead of only updating status', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
+  await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1');
+  await h.integrations.connect({
+    companyId: 'c1',
+    provider: 'whatsapp',
+    displayName: 'Company WhatsApp',
+    config: { phoneNumberId: 'pn-1' },
+    credentials: { access_token: 'tok' },
+    createdByUserId: 'human-1',
+  });
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'WA Client', phone: '0100' });
+
+  const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+
+  assert.equal(decision.chosenActionType, 'integration_call');
+  assert.equal(decision.params?.provider, 'whatsapp');
+  assert.equal(decision.params?.to, '0100');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(h.integrationFetchCalls.length, 1);
+  assert.match(h.integrationFetchCalls[0]!.url, /graph\.facebook\.com/);
+  // still unchanged — reaching out doesn't itself advance the funnel stage
+  const unchanged = await h.crm.getLead(lead.id);
+  assert.equal(unchanged!.status, 'new');
+});
+
+test('sales agent falls back to email when only an email integration is connected and the lead has no phone-eligible WhatsApp path', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
+  await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1');
+  await h.integrations.connect({
+    companyId: 'c1',
+    provider: 'email',
+    displayName: 'Company Email',
+    config: { fromAddress: 'sales@demo.local' },
+    credentials: { api_key: 'key' },
+    createdByUserId: 'human-1',
+  });
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Email Client', phone: '0100', email: 'client@example.com' });
+
+  const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+
+  assert.equal(decision.chosenActionType, 'integration_call');
+  assert.equal(decision.params?.provider, 'email');
+  assert.equal(decision.params?.to, 'client@example.com');
+});
+
+test('a lead is never messaged twice automatically — the second decision advances status instead', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
+  await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1');
+  await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
+  await h.integrations.connect({
+    companyId: 'c1',
+    provider: 'whatsapp',
+    displayName: 'Company WhatsApp',
+    config: { phoneNumberId: 'pn-1' },
+    credentials: { access_token: 'tok' },
+    createdByUserId: 'human-1',
+  });
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'WA Client 2', phone: '0200' });
+
+  // First decision: reaches out over WhatsApp (an 'executed' outcome, so
+  // it's stale for findRecentDecision's memoization — the second call
+  // below genuinely re-runs the rule set instead of replaying this one).
+  const first = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+  assert.equal(first.chosenActionType, 'integration_call');
+  assert.equal(first.resultActionStatus, 'executed');
+  assert.equal(h.integrationFetchCalls.length, 1);
+
+  // Second decision on the same still-'new' lead: hasAlreadyReachedOut now
+  // sees the prior IntegrationEvent and refuses to message again, so the
+  // agent falls back to its ordinary status-advance action instead.
+  const second = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+  assert.equal(second.chosenActionType, 'update_lead_status');
+  assert.equal(h.integrationFetchCalls.length, 1);
+
+  const updated = await h.crm.getLead(lead.id);
+  assert.equal(updated!.status, 'contacted');
 });
 
 test('a qualified lead escalates to a human instead of guessing at conversion', async () => {

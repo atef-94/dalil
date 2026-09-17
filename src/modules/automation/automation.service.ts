@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import type {
   ActionName,
+  AgentDecision,
   ApprovalRequest,
   ApprovalStatus,
   AutomationActionType,
@@ -154,6 +155,30 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     trigger: { type: 'event', eventType: 'leave_request.created' },
     steps: [{ name: 'Notify HR', action: { type: 'send_message', params: { subject: 'New leave request', body: 'A new leave request was submitted and needs review.' } } }],
   },
+  {
+    key: 'lead-ai-outreach',
+    name: 'Lead AI Outreach',
+    description:
+      'The full cross-module example: a new lead is handed to the Sales agent, which scores it and picks a next action — reaching out over a connected WhatsApp/Email integration when confident enough, otherwise a task — through the same permission/policy/approval/audit pipeline as any other AI action. A follow-up task is then created unconditionally as a safety net.',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [
+      { name: 'AI (Sales agent) decides the next action for this lead', action: { type: 'ai_decide', params: { agentKey: 'sales', subjectId: '{{id}}' } } },
+      {
+        name: 'Guaranteed follow-up task',
+        action: { type: 'create_task', params: { title: 'Follow up with {{fullName}}', relatedResource: 'lead', relatedResourceId: '{{id}}' } },
+      },
+    ],
+  },
+  {
+    key: 'customer-response-ai-followup',
+    name: 'Customer Response AI Follow-up',
+    description:
+      'Closes the loop on Lead AI Outreach: an inbound webhook (e.g. a WhatsApp/Email provider relaying a customer reply) hands the lead back to the Sales agent to re-score and decide the next action. POST { "leadId": "..." } to this workflow\'s webhook URL.',
+    trigger: { type: 'webhook', webhookSlug: 'customer-response' },
+    steps: [
+      { name: 'AI (Sales agent) re-evaluates the lead', action: { type: 'ai_decide', params: { agentKey: 'sales', subjectId: '{{leadId}}' } } },
+    ],
+  },
 ];
 
 const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
@@ -165,6 +190,7 @@ const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   update_campaign_status: 'campaign',
   webhook_call: 'secret',
   integration_call: 'integration_connection',
+  ai_decide: 'ai_action',
   require_approval: 'approval',
 };
 
@@ -177,6 +203,7 @@ const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   update_campaign_status: 'edit',
   webhook_call: 'view',
   integration_call: 'create',
+  ai_decide: 'create',
   require_approval: 'approve',
 };
 
@@ -209,6 +236,17 @@ export class AutomationService {
   // other direction would be circular. app.ts wires this once, right after
   // both services are constructed, via setIntegrationSender().
   private integrationSender?: (companyId: string, provider: string, action: string, params: Record<string, unknown>, userId: string) => Promise<Record<string, unknown>>;
+  // Same late-binding as integrationSender, and for the same reason: the AI
+  // Agent Orchestration layer (AiAgentService) is itself built on top of
+  // AutomationService (it dispatches every action it decides on through
+  // executeActionDirect), so a constructor-level dependency back onto it
+  // here would be circular. This is what lets an `ai_decide` workflow step
+  // hand a subject off to a specialized agent — Lead Created -> ai_decide
+  // (sales agent scores + picks the next action, itself going through the
+  // exact same permission/policy/approval/audit pipeline) -> the rest of
+  // the workflow continues (e.g. a guaranteed follow-up task) regardless of
+  // what the agent chose.
+  private aiDecider?: (companyId: string, agentKey: string, subjectId: string, requestedByUserId: string) => Promise<AgentDecision>;
 
   constructor(
     private readonly repos: AutomationRepos,
@@ -236,6 +274,13 @@ export class AutomationService {
     sender: (companyId: string, provider: string, action: string, params: Record<string, unknown>, userId: string) => Promise<Record<string, unknown>>,
   ): void {
     this.integrationSender = sender;
+  }
+
+  /** Wires the AI Agent Orchestration layer's decide() in as the executor
+   * for `ai_decide` steps — see the field comment above for why this is
+   * late-bound rather than a constructor dependency. */
+  setAiDecider(decider: (companyId: string, agentKey: string, subjectId: string, requestedByUserId: string) => Promise<AgentDecision>): void {
+    this.aiDecider = decider;
   }
 
   // ---- Workflow CRUD ----
@@ -844,6 +889,14 @@ export class AutomationService {
         const provider = this.requireString(params.provider, 'provider');
         const integrationAction = this.requireString(params.action, 'action');
         return this.integrationSender(companyId, provider, integrationAction, params, actorUserId);
+      }
+      case 'ai_decide': {
+        await this.requirePermission(actorUserId, action, companyId, actorUserId);
+        if (!this.aiDecider) throw new AutomationError('no AI decider is configured for this deployment');
+        const agentKey = this.requireString(params.agentKey, 'agentKey');
+        const subjectId = this.requireString(params.subjectId, 'subjectId');
+        const decision = await this.aiDecider(companyId, agentKey, subjectId, actorUserId);
+        return { ...decision };
       }
       default:
         throw new AutomationError(`unsupported action type: ${(action as WorkflowActionConfig).type}`);
