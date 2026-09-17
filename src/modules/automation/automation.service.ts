@@ -138,6 +138,15 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     ],
   },
   {
+    key: 'lead-sla-breach-notice',
+    name: 'Lead SLA Breach Notice',
+    description: 'Notifies the sales team internally whenever a lead misses its first-contact SLA and gets auto-reassigned by the Lead Distribution pool.',
+    trigger: { type: 'event', eventType: 'lead.sla_breached' },
+    steps: [
+      { name: 'Notify sales', action: { type: 'send_message', params: { subject: 'Lead SLA breached', body: 'A lead missed its first-contact SLA and was auto-reassigned.' } } },
+    ],
+  },
+  {
     key: 'weekly-campaign-review',
     name: 'Weekly Campaign Review Reminder',
     description: 'Creates a recurring weekly reminder task to review active campaign performance.',

@@ -12,6 +12,8 @@ export interface CreateLeadInput {
   email?: string;
   sourceId?: string;
   ownerEmployeeUserId?: string;
+  requiredSkill?: string;
+  firstContactSlaDueAt?: string;
 }
 
 const ORDER: LeadStatus[] = ['new', 'contacted', 'qualified', 'opportunity'];
@@ -43,6 +45,8 @@ export class CrmService {
       status: 'new',
       ownerEmployeeUserId: input.ownerEmployeeUserId,
       createdAt: new Date().toISOString(),
+      requiredSkill: input.requiredSkill?.trim() || undefined,
+      firstContactSlaDueAt: input.firstContactSlaDueAt,
     };
     return this.leads.save(lead);
   }

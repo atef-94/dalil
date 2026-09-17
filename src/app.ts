@@ -19,6 +19,7 @@ import type {
   Department,
   Employee,
   Lead,
+  LeadDistributionPool,
   LeaveRequest,
   LegalDocument,
   MaintenanceTicket,
@@ -69,6 +70,7 @@ import { filterByListScope, type ScopeOwnerKeys } from './modules/permissions/sc
 import { OrganizationService } from './modules/organization/organization.service.js';
 import { AuthService } from './modules/auth/auth.service.js';
 import { CrmService } from './modules/crm/crm.service.js';
+import { LeadDistributionService } from './modules/crm/lead-distribution.service.js';
 import { InventoryService } from './modules/inventory/inventory.service.js';
 import { PaymentPlansService } from './modules/payment-plans/payment-plans.service.js';
 import { SalesService } from './modules/sales/sales.service.js';
@@ -125,6 +127,7 @@ export interface Application {
     organization: OrganizationService;
     auth: AuthService;
     crm: CrmService;
+    leadDistribution: LeadDistributionService;
     inventory: InventoryService;
     paymentPlans: PaymentPlansService;
     sales: SalesService;
@@ -154,6 +157,12 @@ export interface Application {
      * do). `finance.sweepOverdue()` itself stays event-free for existing
      * callers/tests that only care about the count. */
     sweepOverdueAndEmit: () => Promise<number>;
+    /** Auto-reassigns leads that breached their first-contact SLA and
+     * emits one `lead.sla_breached` event per breach — use this instead
+     * of `leadDistribution.sweepSlaBreaches()` wherever the sweep should
+     * also feed the Automation Engine (the HTTP route and main.ts's tick
+     * both do), mirroring sweepOverdueAndEmit above. */
+    sweepSlaBreachesAndEmit: () => Promise<number>;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -207,6 +216,7 @@ function buildRepos(db?: DatabaseSync) {
     agentDecisions: repo<AgentDecision>('agent_decisions'),
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
+    leadDistributionPools: repo<LeadDistributionPool>('lead_distribution_pools'),
   };
 }
 
@@ -284,6 +294,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
   const auth = new AuthService(repos.users, options.tokenSecret);
   const crm = new CrmService(repos.leads);
+  const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm);
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
@@ -415,6 +426,21 @@ export async function buildApplication(options: AppOptions): Promise<Application
       });
     }
     return swept.length;
+  };
+
+  // Same shared-by-manual-route-and-tick shape as sweepOverdueAndEmit
+  // above, for the SLA sweep instead of the payment-overdue sweep.
+  const sweepSlaBreachesAndEmit = async (): Promise<number> => {
+    const breaches = await leadDistribution.sweepSlaBreaches();
+    for (const breach of breaches) {
+      await emitEvent({
+        companyId: breach.companyId,
+        type: 'lead.sla_breached',
+        payload: { ...breach },
+        dedupeKey: `lead.sla_breached:${breach.leadId}:${breach.reassignmentCount}`,
+      });
+    }
+    return breaches.length;
   };
 
   const employeeScopeKeys = async (ownerUserId: string | undefined): Promise<ScopeOwnerKeys> => {
@@ -983,11 +1009,81 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
       throw new ForbiddenError('missing create:lead permission');
     }
-    const body = parseJsonBody<{ fullName: string; phone: string; email?: string; sourceId?: string }>(ctx.body);
-    const lead = await crm.createLead({ companyId: actor.companyId, ownerEmployeeUserId: actor.userId, ...body });
+    const body = parseJsonBody<{
+      fullName: string;
+      phone: string;
+      email?: string;
+      sourceId?: string;
+      ownerEmployeeUserId?: string;
+      requiredSkill?: string;
+    }>(ctx.body);
+    // An explicit ownerEmployeeUserId always wins. Otherwise, if this
+    // company has configured a Lead Distribution pool, hand the lead to
+    // whichever employee is next in rotation (round-robin, or the next
+    // matching skill_based candidate) and start its first-contact SLA
+    // clock; a company that never configures a pool sees the exact same
+    // "creator owns it" behavior this route always had.
+    let ownerEmployeeUserId = body.ownerEmployeeUserId;
+    let firstContactSlaDueAt: string | undefined;
+    if (!ownerEmployeeUserId) {
+      const assignment = await leadDistribution.pickOwnerForNewLead(actor.companyId, body.requiredSkill);
+      if (assignment) {
+        ownerEmployeeUserId = assignment.ownerUserId;
+        firstContactSlaDueAt = assignment.firstContactSlaDueAt;
+      }
+    }
+    const lead = await crm.createLead({
+      companyId: actor.companyId,
+      fullName: body.fullName,
+      phone: body.phone,
+      email: body.email,
+      sourceId: body.sourceId,
+      requiredSkill: body.requiredSkill,
+      ownerEmployeeUserId: ownerEmployeeUserId ?? actor.userId,
+      firstContactSlaDueAt,
+    });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
+  });
+
+  // ---- Lead Distribution + SLA ----
+  // Configuring/viewing the pool is a company-wide edit on the lead
+  // resource — the same permission assign_lead_owner already maps to
+  // (see automation.service.ts ACTION_RESOURCE/ACTION_VERB) — rather than
+  // a new resource, since this is still "how leads get owned," just
+  // automated instead of manual.
+  httpServer.post('/api/crm/lead-distribution/pool', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'lead'))) {
+      throw new ForbiddenError('missing edit:lead permission');
+    }
+    const body = parseJsonBody<{ mode: 'round_robin' | 'skill_based'; memberUserIds: string[]; slaMinutes: number }>(ctx.body);
+    const pool = await leadDistribution.configurePool({ companyId: actor.companyId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'lead', resourceId: pool.id, metadata: { leadDistributionPool: true } });
+    return { status: 200, body: pool };
+  });
+
+  httpServer.get('/api/crm/lead-distribution/pool', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'lead'))) {
+      throw new ForbiddenError('missing view:lead permission');
+    }
+    const pool = await leadDistribution.getPool(actor.companyId);
+    if (!pool) return { status: 404, body: { error: 'no lead distribution pool configured for this company' } };
+    return { status: 200, body: pool };
+  });
+
+  // Manual trigger for the same sweep main.ts's periodic tick runs — lets
+  // an admin (or a test) force an immediate pass instead of waiting for
+  // leads to actually breach on the clock.
+  httpServer.post('/api/crm/lead-distribution/sweep', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'lead'))) {
+      throw new ForbiddenError('missing edit:lead permission');
+    }
+    const swept = await sweepSlaBreachesAndEmit();
+    return { status: 200, body: { swept } };
   });
 
   // Bulk CSV import — one real crm.createLead() call per row, same
@@ -2513,9 +2609,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, leadDistribution, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, aiAgent, integrations,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
     },
     seedResult,
   };

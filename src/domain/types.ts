@@ -40,6 +40,13 @@ export interface Employee {
   status: EmployeeStatus;
   createdAt: string;
   terminatedAt?: string;
+  /** Tags used by skill-based Lead Distribution to match this employee
+   * against a lead's requiredSkill (e.g. ["luxury", "arabic"]). */
+  skills?: string[];
+  /** Accumulates one point every time a lead assigned to this employee
+   * breaches its first-contact SLA and gets auto-reassigned or
+   * re-flagged. Never decremented automatically — a manager resets it. */
+  slaPenaltyPoints?: number;
 }
 
 export type UserType =
@@ -255,6 +262,43 @@ export interface Lead {
   lostReason?: string;
   ownerEmployeeUserId?: string;
   createdAt: string;
+  /** A skill tag (e.g. "luxury") the Lead Distribution pool can match
+   * against Employee.skills for skill-based routing. Optional — leads
+   * created without one always route by plain round-robin. */
+  requiredSkill?: string;
+  /** Set when a distribution pool assigns (or auto-reassigns) this lead —
+   * the deadline by which its owner must move it past 'new' before the
+   * SLA sweep treats it as breached. Absent when no pool is configured. */
+  firstContactSlaDueAt?: string;
+  /** Timestamp of the most recent SLA breach sweep that touched this
+   * lead, if any — purely informational (the sweep itself is idempotent
+   * per cycle via firstContactSlaDueAt, not via this field). */
+  slaBreachedAt?: string;
+  /** How many times the SLA sweep has auto-reassigned or re-flagged this
+   * lead for missing first contact. */
+  reassignmentCount?: number;
+}
+
+export type LeadDistributionMode = 'round_robin' | 'skill_based';
+
+/**
+ * One per company: the pool of employee-users new leads are auto-assigned
+ * across, plus the SLA window their owner has to make first contact
+ * before the sweep (sweepSlaBreachesAndEmit, on the same 60s tick as the
+ * payment-overdue sweep) auto-reassigns them and penalizes the original
+ * owner. `memberUserIds` holds employee_user User ids — the same id shape
+ * Lead.ownerEmployeeUserId already uses — in a fixed order that both
+ * round-robin and skill-based fall back to for fair rotation.
+ */
+export interface LeadDistributionPool {
+  id: string; // === companyId; one pool per company
+  companyId: string;
+  mode: LeadDistributionMode;
+  memberUserIds: string[];
+  slaMinutes: number;
+  lastAssignedIndex: number; // index into memberUserIds; -1 before first assignment
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---- Sales ----
@@ -545,6 +589,7 @@ export type TriggerType = 'event' | 'scheduled' | 'webhook';
 export type DomainEventType =
   | 'lead.created'
   | 'lead.status_changed'
+  | 'lead.sla_breached'
   | 'opportunity.created'
   | 'contract.signed'
   | 'contract.cancelled'
