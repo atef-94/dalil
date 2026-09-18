@@ -718,6 +718,46 @@ export interface Task {
   completedAt?: string;
 }
 
+// ---- File Import Pipeline ----
+// Shared by Lead Import, Inventory Import, and Payment Import — one staged
+// upload -> parse -> map -> preview -> confirm pipeline, not three separate
+// import systems. Each specific importer (see modules/imports) owns its own
+// field dictionary, duplicate/conflict detection, and write path (e.g.
+// CrmService.createLead) — this type only carries the shared parsing/mapping
+// state common to all of them.
+
+export type ImportTargetType = 'lead' | 'inventory_unit' | 'payment';
+export type ImportFileType = 'csv' | 'xlsx' | 'pdf';
+export type ImportSessionStatus = 'uploaded' | 'mapped' | 'confirmed' | 'failed';
+
+export interface ImportSession {
+  id: string;
+  companyId: string;
+  createdByUserId: string;
+  targetType: ImportTargetType;
+  fileName: string;
+  fileType: ImportFileType;
+  status: ImportSessionStatus;
+  /** Column headers as detected in the source file, in original order. */
+  detectedColumns: string[];
+  /** detectedColumn -> target field key, guessed by fuzzy header matching.
+   * Never applied silently — the frontend always shows this for the user to
+   * confirm or correct before anything is imported (see field-mapping.ts). */
+  suggestedMapping: Record<string, string | null>;
+  /** Set once the user confirms (or edits) the mapping via the preview step. */
+  confirmedMapping?: Record<string, string | null>;
+  /** Parsed data rows keyed by detectedColumns header — the raw, unmapped
+   * values exactly as read from the file. */
+  rawRows: Record<string, string>[];
+  /** Populated for PDF imports whose table reconstruction is a best-effort
+   * heuristic — see pdf-parser.ts's assessTableConfidence. When false the
+   * frontend must show a clear error rather than let the user import
+   * fabricated/misaligned data. */
+  reliable: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
 // ---- Automation Engine ----
 
 export type TriggerType = 'event' | 'scheduled' | 'webhook';

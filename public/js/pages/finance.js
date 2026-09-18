@@ -1,11 +1,26 @@
 import { el, clear, table, toast, errorBanner, statusBadge, selectInput, confirmModal } from '../ui.js';
 import { api } from '../api.js';
+import { can } from '../state.js';
+import { openImportWizard } from '../import-wizard.js';
 
 export async function renderFinance(container) {
   clear(container);
+  const headerActions = el('div');
   container.appendChild(el('div', { class: 'page-header' }, [
     el('h1', {}, 'Finance & Collections'),
+    headerActions,
   ]));
+  if (can('payment_schedule', 'edit')) {
+    const importBtn = el('button', {}, 'Import Payments');
+    importBtn.addEventListener('click', () => {
+      openImportWizard({
+        title: 'Import Payments',
+        uploadPath: '/api/finance/payments/import/upload',
+        onImported: () => { load(); },
+      });
+    });
+    headerActions.appendChild(importBtn);
+  }
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

@@ -1,0 +1,133 @@
+import { randomUUID } from 'node:crypto';
+import type { ImportSession, ImportFileType, ImportTargetType } from '../../domain/types.js';
+import type { Repository } from '../../infra/repository.js';
+import { NotFoundError, ValidationError } from '../../infra/errors.js';
+import { parseCsvRecords } from '../../infra/csv.js';
+import { parseXlsx } from '../../infra/xlsx-parser.js';
+import { parsePdfTable } from '../../infra/pdf-parser.js';
+import { suggestMapping, type ImportFieldDef } from '../../infra/field-mapping.js';
+
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24h — long enough to map/preview/confirm without racing an expiry
+
+export interface CreateImportSessionInput {
+  companyId: string;
+  createdByUserId: string;
+  targetType: ImportTargetType;
+  fileName: string;
+  fileBuffer: Buffer;
+  contentType: string;
+  /** The target field dictionary for this import (Lead/Inventory/Payment
+   * each own theirs) — used only to suggest a mapping; validation and
+   * duplicate/conflict detection stay the caller's own responsibility. */
+  fields: ImportFieldDef[];
+}
+
+/**
+ * The one shared upload -> parse -> detect-columns -> suggest-mapping
+ * pipeline stage reused by Lead Import, Inventory Import, and Payment
+ * Import — so there are three field dictionaries and three
+ * validate/dedupe/write paths, not three copies of "how do I read an
+ * uploaded file". Everything past this point (preview, duplicate
+ * detection, conflict detection, confirm) is target-specific and lives in
+ * each importer's own service.
+ */
+export class ImportSessionService {
+  constructor(private readonly sessions: Repository<ImportSession>) {}
+
+  private detectFileType(fileName: string, contentType: string): ImportFileType {
+    const ext = fileName.toLowerCase().split('.').pop() ?? '';
+    if (ext === 'csv' || contentType.includes('csv')) return 'csv';
+    if (ext === 'xlsx' || ext === 'xls' || contentType.includes('spreadsheet') || contentType.includes('excel')) return 'xlsx';
+    if (ext === 'pdf' || contentType.includes('pdf')) return 'pdf';
+    throw new ValidationError(`unsupported file "${fileName}" — only .csv, .xlsx/.xls, and .pdf are supported`);
+  }
+
+  async createSession(input: CreateImportSessionInput): Promise<ImportSession> {
+    const fileType = this.detectFileType(input.fileName, input.contentType);
+
+    let headers: string[];
+    let rows: Record<string, string>[];
+    let reliable = true;
+
+    if (fileType === 'csv') {
+      rows = parseCsvRecords(input.fileBuffer.toString('utf8'));
+      headers = rows.length > 0 ? Object.keys(rows[0]!) : [];
+    } else if (fileType === 'xlsx') {
+      const parsed = await parseXlsx(input.fileBuffer);
+      headers = parsed.headers;
+      rows = parsed.rows;
+    } else {
+      const parsed = await parsePdfTable(input.fileBuffer);
+      headers = parsed.headers;
+      rows = parsed.rows;
+      reliable = parsed.reliable;
+    }
+
+    if (headers.length === 0) {
+      throw new ValidationError('could not detect any columns in this file — check that it has a header row and real tabular data');
+    }
+    if (!reliable) {
+      throw new ValidationError(
+        'this PDF\'s layout could not be reliably read as a table (common for scanned/image PDFs) — try exporting it as Excel/CSV instead, or a cleaner PDF export',
+      );
+    }
+
+    const now = Date.now();
+    const session: ImportSession = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      createdByUserId: input.createdByUserId,
+      targetType: input.targetType,
+      fileName: input.fileName,
+      fileType,
+      status: 'uploaded',
+      detectedColumns: headers,
+      suggestedMapping: suggestMapping(headers, input.fields),
+      rawRows: rows,
+      reliable,
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + SESSION_TTL_MS).toISOString(),
+    };
+    return this.sessions.save(session);
+  }
+
+  async getSession(id: string, companyId: string): Promise<ImportSession> {
+    const session = await this.sessions.findById(id);
+    if (!session || session.companyId !== companyId) throw new NotFoundError('import session not found');
+    if (Date.parse(session.expiresAt) < Date.now() && session.status !== 'confirmed') {
+      throw new ValidationError('this import session has expired — please re-upload the file');
+    }
+    return session;
+  }
+
+  async confirmMapping(id: string, companyId: string, mapping: Record<string, string | null>): Promise<ImportSession> {
+    const session = await this.getSession(id, companyId);
+    const updated: ImportSession = { ...session, confirmedMapping: mapping, status: 'mapped' };
+    return this.sessions.save(updated);
+  }
+
+  async markConfirmed(id: string, companyId: string): Promise<ImportSession> {
+    const session = await this.getSession(id, companyId);
+    const updated: ImportSession = { ...session, status: 'confirmed' };
+    return this.sessions.save(updated);
+  }
+
+  /**
+   * Re-keys every raw row from detected-file-column-names to
+   * target-field-keys using the confirmed mapping (falling back to the
+   * suggested one before confirmation, e.g. for an early preview). A
+   * column mapped to null is dropped. This is the shape every specific
+   * importer's validation/dedupe/conflict logic reads.
+   */
+  mapRows(session: ImportSession): Record<string, string>[] {
+    const mapping = session.confirmedMapping ?? session.suggestedMapping;
+    return session.rawRows.map((row) => {
+      const mapped: Record<string, string> = {};
+      for (const [column, fieldKey] of Object.entries(mapping)) {
+        if (!fieldKey) continue;
+        mapped[fieldKey] = row[column] ?? '';
+      }
+      return mapped;
+    });
+  }
+}

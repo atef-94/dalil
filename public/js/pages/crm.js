@@ -2,6 +2,7 @@ import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationCon
 import { api } from '../api.js';
 import { can } from '../state.js';
 import { setAiContext, clearAiContext } from './ai-panel.js';
+import { openImportWizard } from '../import-wizard.js';
 
 const TIMELINE_ICONS = {
   lead_created: '✦', status_changed: '↳', owner_changed: '⇄', message: '✉',
@@ -57,6 +58,16 @@ export async function renderCrm(container) {
       const addLeadBtn = el('button', { class: 'primary' }, '+ Add New Lead');
       addLeadBtn.addEventListener('click', openAddLeadModal);
       toolbarSlot.appendChild(addLeadBtn);
+
+      const importBtn = el('button', {}, 'Import Leads');
+      importBtn.addEventListener('click', () => {
+        openImportWizard({
+          title: 'Import Leads',
+          uploadPath: '/api/crm/leads/import/upload',
+          onImported: () => { renderBody(); },
+        });
+      });
+      toolbarSlot.appendChild(importBtn);
     }
     if (can('crm_stage', 'create')) {
       const addStageBtn = el('button', {}, '+ Add CRM Section');

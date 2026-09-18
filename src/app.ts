@@ -35,6 +35,7 @@ import type {
   ActionApproval,
   ApprovableActionType,
   DiscountApprovalPolicy,
+  ImportSession,
   PurchaseOrder,
   Receipt,
   Refund,
@@ -105,6 +106,11 @@ import { AiAgentService } from './modules/ai/ai-agent.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
 import { ForecastingService } from './modules/forecasting/forecasting.service.js';
 import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
+import { ImportSessionService } from './modules/imports/import-session.service.js';
+import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
+import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
+import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
+import type { MultipartBody } from './infra/multipart.js';
 
 export interface AppOptions {
   nodeEnv: string;
@@ -153,6 +159,9 @@ export interface Application {
     approvalEngine: ApprovalEngineService;
     forecasting: ForecastingService;
     scenarioSimulation: ScenarioSimulationService;
+    importSessions: ImportSessionService;
+    leadImport: LeadImportService;
+    paymentImport: PaymentImportService;
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
@@ -243,6 +252,7 @@ function buildRepos(db?: DatabaseSync) {
     actionApprovals: repo<ActionApproval>('action_approvals'),
     discountApprovalPolicies: repo<DiscountApprovalPolicy>('discount_approval_policies'),
     refunds: repo<Refund>('refunds'),
+    importSessions: repo<ImportSession>('import_sessions'),
   };
 }
 
@@ -321,6 +331,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const auth = new AuthService(repos.users, options.tokenSecret);
   const crmStages = new CrmStageService(repos.crmStages);
   const crm = new CrmService(repos.leads, crmStages);
+  const importSessions = new ImportSessionService(repos.importSessions);
+  const leadImport = new LeadImportService(repos.leads, repos.users, crm);
   const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
   const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
@@ -328,10 +340,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
+  const paymentImport = new PaymentImportService(repos.leads, inventory, sales, paymentPlans, finance);
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
-  const onboarding = new OnboardingService(organization, auth, roleManagement);
+  const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
   const hr = new HrService(repos.leaveRequests, repos.employees);
   const operations = new OperationsService(repos.maintenanceTickets, repos.units);
   const legal = new LegalService(repos.legalDocuments, repos.contracts);
@@ -1372,6 +1385,87 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: result };
   });
 
+  // ---- Lead Import pipeline (staged: upload -> preview -> confirm) ----
+  // A richer alternative to the one-shot bulk-CSV route above, for real
+  // Excel/CSV/PDF exports with unpredictable column headers: upload parses
+  // the file and suggests a mapping, preview shows exactly what would be
+  // imported (including duplicates/invalid rows) without writing anything,
+  // and confirm is the only step that actually calls crm.createLead.
+
+  httpServer.post(
+    '/api/crm/leads/import/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+        throw new ForbiddenError('missing create:lead permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+
+      const session = await importSessions.createSession({
+        companyId: actor.companyId,
+        createdByUserId: actor.userId,
+        targetType: 'lead',
+        fileName: file.filename,
+        fileBuffer: file.data,
+        contentType: file.contentType,
+        fields: LEAD_IMPORT_FIELDS,
+      });
+      return {
+        status: 200,
+        body: {
+          sessionId: session.id,
+          fileName: session.fileName,
+          fileType: session.fileType,
+          detectedColumns: session.detectedColumns,
+          suggestedMapping: session.suggestedMapping,
+          sampleRows: session.rawRows.slice(0, 5),
+          totalRows: session.rawRows.length,
+          fields: LEAD_IMPORT_FIELDS,
+        },
+      };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.post('/api/crm/leads/import/:sessionId/preview', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const body = parseJsonBody<{ mapping: Record<string, string | null> }>(ctx.body);
+    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping);
+    const mappedRows = importSessions.mapRows(session);
+    const preview = await leadImport.buildPreview(actor.companyId, mappedRows);
+    return { status: 200, body: preview };
+  });
+
+  httpServer.post('/api/crm/leads/import/:sessionId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const session = await importSessions.getSession(ctx.params.sessionId!, actor.companyId);
+    if (!session.confirmedMapping) {
+      throw new ValidationError('this import session has not been mapped yet — call the preview step first');
+    }
+    const mappedRows = importSessions.mapRows(session);
+    const result = await leadImport.importRows(actor.companyId, actor.userId, mappedRows, async (lead) => {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'create',
+        resource: 'lead',
+        resourceId: lead.id,
+        metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+      });
+      await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
+    });
+    await importSessions.markConfirmed(session.id, actor.companyId);
+    return { status: 200, body: result };
+  });
+
   httpServer.get('/api/crm/leads', async (ctx) => {
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'lead');
@@ -1876,6 +1970,95 @@ export async function buildApplication(options: AppOptions): Promise<Application
         return recorded.payment;
       },
     );
+    return { status: 200, body: result };
+  });
+
+  // ---- Payment Import pipeline (staged: upload -> preview -> confirm) ----
+  // The richer alternative to the bulk-CSV route above, for real Excel/PDF
+  // exports with unpredictable headers. Same resolution rules (Phone or
+  // Project+Unit -> contract, Installment Number -> schedule line) and the
+  // same single write path (finance.recordPayment), just reachable through
+  // upload/preview/confirm so the user sees exactly what would be recorded
+  // — including conflicts (already-paid/overpaying installments) — before
+  // anything actually happens.
+
+  httpServer.post(
+    '/api/finance/payments/import/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+        throw new ForbiddenError('missing edit:payment_schedule permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+
+      const session = await importSessions.createSession({
+        companyId: actor.companyId,
+        createdByUserId: actor.userId,
+        targetType: 'payment',
+        fileName: file.filename,
+        fileBuffer: file.data,
+        contentType: file.contentType,
+        fields: PAYMENT_IMPORT_FIELDS,
+      });
+      return {
+        status: 200,
+        body: {
+          sessionId: session.id,
+          fileName: session.fileName,
+          fileType: session.fileType,
+          detectedColumns: session.detectedColumns,
+          suggestedMapping: session.suggestedMapping,
+          sampleRows: session.rawRows.slice(0, 5),
+          totalRows: session.rawRows.length,
+          fields: PAYMENT_IMPORT_FIELDS,
+        },
+      };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.post('/api/finance/payments/import/:sessionId/preview', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const body = parseJsonBody<{ mapping: Record<string, string | null> }>(ctx.body);
+    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping);
+    const mappedRows = importSessions.mapRows(session);
+    const preview = await paymentImport.buildPreview(actor.companyId, mappedRows);
+    return { status: 200, body: preview };
+  });
+
+  httpServer.post('/api/finance/payments/import/:sessionId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const session = await importSessions.getSession(ctx.params.sessionId!, actor.companyId);
+    if (!session.confirmedMapping) {
+      throw new ValidationError('this import session has not been mapped yet — call the preview step first');
+    }
+    const mappedRows = importSessions.mapRows(session);
+    const result = await paymentImport.importRows(actor.companyId, actor.userId, mappedRows, async (recorded) => {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'payment_schedule',
+        resourceId: recorded.line.id,
+        metadata: { amount: recorded.payment.amount, importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+      });
+      await emitEvent({
+        companyId: actor.companyId,
+        type: 'payment.recorded',
+        payload: { ...recorded },
+        actorUserId: actor.userId,
+        dedupeKey: `payment.recorded:${recorded.payment.id}`,
+      });
+    });
+    await importSessions.markConfirmed(session.id, actor.companyId);
     return { status: 200, body: result };
   });
 
@@ -3308,6 +3491,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
+      importSessions, leadImport, paymentImport,
     },
     seedResult,
   };

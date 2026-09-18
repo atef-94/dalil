@@ -5,9 +5,10 @@ import { OrganizationService } from '../organization/organization.service.js';
 import { AuthService } from '../auth/auth.service.js';
 import { RoleManagementService } from '../permissions/role-management.service.js';
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
+import { CrmStageService } from '../crm/crm-stage.service.js';
 import { OnboardingService } from './onboarding.service.js';
 import { RESOURCES, ACTIONS } from '../permissions/manifest.builder.js';
-import type { Branch, Company, Department, Employee, PermissionGrant, PermissionOverride, Role, User, UserRole } from '../../domain/types.js';
+import type { Branch, Company, CrmStage, Department, Employee, PermissionGrant, PermissionOverride, Role, User, UserRole } from '../../domain/types.js';
 
 function freshOnboarding() {
   const repos = {
@@ -20,13 +21,15 @@ function freshOnboarding() {
     overrides: new InMemoryRepository<PermissionOverride>(),
     branches: new InMemoryRepository<Branch>(),
     departments: new InMemoryRepository<Department>(),
+    crmStages: new InMemoryRepository<CrmStage>(),
   };
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
   const auth = new AuthService(repos.users, 'test-secret');
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
   const rbac = new RbacEvaluator(repos);
-  const onboarding = new OnboardingService(organization, auth, roleManagement);
-  return { onboarding, rbac, repos };
+  const crmStages = new CrmStageService(repos.crmStages);
+  const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
+  return { onboarding, rbac, repos, crmStages };
 }
 
 test('signup creates a company, a founding employee, a user, and a token', async () => {
@@ -77,6 +80,23 @@ test('a second company signed up independently is fully isolated from the first'
   assert.notEqual(first.company.id, second.company.id);
   const crossTenantAccess = await rbac.can(second.user.id, 'view', 'lead', { companyId: first.company.id });
   assert.equal(crossTenantAccess, false);
+});
+
+test('a freshly signed-up company has a working CRM pipeline (default stage seeded), not just RBAC access', async () => {
+  const { onboarding, crmStages } = freshOnboarding();
+  const result = await onboarding.signupNewCompany({
+    companyName: 'Acme Realty',
+    fullName: 'Jordan Owner',
+    email: 'jordan@acme.example',
+    password: 'longenough1',
+  });
+  // This is the real regression this test guards: without seeding, a real
+  // signup's CrmService.createLead() call fails with "no default CRM
+  // stage configured for this company" — the CRM feature would be
+  // completely unusable for every non-demo tenant.
+  const defaultStage = await crmStages.getDefaultStage(result.company.id);
+  assert.ok(defaultStage);
+  assert.equal(defaultStage.isDefault, true);
 });
 
 test('signup rejects a weak password via the same validation AuthService.register enforces', async () => {
