@@ -1748,6 +1748,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:payment_schedule permission');
     }
     const body = parseJsonBody<{ contractId: string; paymentScheduleLineId: string; amount: number; reason: string }>(ctx.body);
+    // Fixed real cross-tenant gap found during audit: unlike every other
+    // approval-gated route (discount_override validates the reservation,
+    // contract_amendment validates the contract), this one created a real
+    // ApprovalRequest for any contractId/paymentScheduleLineId string with
+    // no check that it belongs to the actor's own company — the request
+    // would only ever fail later, at approval time, instead of being
+    // rejected up front like everywhere else.
+    const line = await finance.getScheduleLine(body.paymentScheduleLineId, actor.companyId);
+    if (!line || line.contractId !== body.contractId) {
+      throw new NotFoundError('payment schedule line not found for this contract');
+    }
     const refundContext = { contractId: body.contractId, paymentScheduleLineId: body.paymentScheduleLineId, amount: body.amount, reason: body.reason };
     const approval = await approvalEngine.requestApproval({
       companyId: actor.companyId,
