@@ -256,6 +256,52 @@ docker compose up -d app   # SQLite persists to the app-data volume
 # does not connect to it yet.
 ```
 
+The Docker image itself (multi-stage build, non-root `node` user, a
+`docker-entrypoint.sh` that `chown`s a freshly mounted volume before
+dropping root via `gosu`) has been hand-reviewed but **not build-tested in
+this environment** — outbound access to Docker Hub's registry CDN is
+blocked by this sandbox's network policy. Validate `docker build .` once
+yourself before relying on it for anything beyond `docker compose` local
+dev.
+
+## Deploy to Railway
+
+`railway.json` at the repo root pins the build to Railway's Nixpacks
+builder (not the Dockerfile above — this is the path actually verified
+live in this environment: `npm run build` then `npm start`), plus a
+`/health` healthcheck and an on-failure restart policy.
+
+1. On [railway.app](https://railway.app), **New Project → Deploy from
+   GitHub repo** → pick `atef-94/dalil`, branch
+   `claude/active-operating-system-9c00k3` (or `main`, once this PR is
+   merged).
+2. **Add a Volume** to the service — without this, the SQLite database
+   resets on every redeploy. `SQLITE_PATH` defaults to
+   `./data/active-os.db` relative to the compiled app (typically
+   `/app/data/active-os.db` under Nixpacks' default `/app` working
+   directory). Mount the volume there, or set `SQLITE_PATH` explicitly to
+   an absolute path inside wherever you mount it if Railway places the app
+   somewhere else — check the deploy logs' first line
+   (`persistent storage: <path>`) to confirm where it actually landed.
+3. **Set environment variables** on the service:
+   - `NODE_ENV=production`
+   - `TOKEN_SECRET` — a real random secret (e.g. `openssl rand -hex 32`).
+     The app **refuses to boot** in production without this (see
+     `src/app.ts`) — it will never silently fall back to the insecure dev
+     default.
+   - `ALLOWED_ORIGINS` — your Railway-assigned domain, once you have it
+     (e.g. `https://your-app.up.railway.app`).
+   - Everything else in `.env.example` is optional; Railway injects `PORT`
+     automatically and the app already reads it.
+4. Deploy. Railway gives you the real public URL — open it, and the login
+   screen is the same one verified locally in this session (Company ID
+   `company-demo`, the four demo accounts, or self-service signup for a
+   brand-new tenant).
+
+I could not perform this connection myself in this session — no Railway
+CLI session or API token is available here — so steps 1-4 are for you to
+run from the Railway dashboard.
+
 ## Status
 
 **Deployment ready** for a single-instance deployment: real persistent
