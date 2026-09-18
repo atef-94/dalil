@@ -3,21 +3,24 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { CrmService } from './crm.service.js';
+import { CrmStageService } from './crm-stage.service.js';
 import { LeadDistributionService } from './lead-distribution.service.js';
-import type { Employee, Lead, LeadDistributionPool, User } from '../../domain/types.js';
+import type { CrmStage, Employee, Lead, LeadDistributionPool, User } from '../../domain/types.js';
 
-function freshHarness() {
+async function freshHarness(companyId = 'c1') {
   const leads = new InMemoryRepository<Lead>();
   const users = new InMemoryRepository<User>();
   const employees = new InMemoryRepository<Employee>();
   const pools = new InMemoryRepository<LeadDistributionPool>();
-  const crm = new CrmService(leads);
-  const svc = new LeadDistributionService(pools, users, employees, leads, crm);
-  return { leads, users, employees, pools, crm, svc };
+  const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
+  await crmStages.seedDefaultStages(companyId);
+  const crm = new CrmService(leads, crmStages);
+  const svc = new LeadDistributionService(pools, users, employees, leads, crm, crmStages);
+  return { leads, users, employees, pools, crm, crmStages, svc };
 }
 
 async function seedEmployeeUser(
-  h: ReturnType<typeof freshHarness>,
+  h: Awaited<ReturnType<typeof freshHarness>>,
   companyId: string,
   opts: { skills?: string[] } = {},
 ): Promise<{ userId: string; employeeId: string }> {
@@ -48,19 +51,19 @@ async function seedEmployeeUser(
 }
 
 test('configurePool rejects a member who is not an employee_user of this company', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await assert.rejects(() => h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: ['nope'], slaMinutes: 15 }));
 });
 
 test('configurePool rejects an empty pool or non-positive SLA', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const agent = await seedEmployeeUser(h, 'c1');
   await assert.rejects(() => h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [], slaMinutes: 15 }));
   await assert.rejects(() => h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [agent.userId], slaMinutes: 0 }));
 });
 
 test('pickOwnerForNewLead round-robins fairly across the pool', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const a = await seedEmployeeUser(h, 'c1');
   const b = await seedEmployeeUser(h, 'c1');
   const c = await seedEmployeeUser(h, 'c1');
@@ -75,7 +78,7 @@ test('pickOwnerForNewLead round-robins fairly across the pool', async () => {
 });
 
 test('pickOwnerForNewLead sets a real SLA deadline slaMinutes in the future', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const a = await seedEmployeeUser(h, 'c1');
   await h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [a.userId], slaMinutes: 30 });
   const before = Date.now();
@@ -85,13 +88,13 @@ test('pickOwnerForNewLead sets a real SLA deadline slaMinutes in the future', as
 });
 
 test('pickOwnerForNewLead returns undefined when no pool is configured', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const assignment = await h.svc.pickOwnerForNewLead('c1');
   assert.equal(assignment, undefined);
 });
 
 test('skill-based pool narrows to matching members, falling back to the full pool if nobody matches', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const luxury = await seedEmployeeUser(h, 'c1', { skills: ['luxury'] });
   const general = await seedEmployeeUser(h, 'c1', { skills: [] });
   await h.svc.configurePool({ companyId: 'c1', mode: 'skill_based', memberUserIds: [general.userId, luxury.userId], slaMinutes: 15 });
@@ -104,7 +107,7 @@ test('skill-based pool narrows to matching members, falling back to the full poo
 });
 
 test('sweepSlaBreaches reassigns a breached lead to the next pool member and penalizes the original owner', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const a = await seedEmployeeUser(h, 'c1');
   const b = await seedEmployeeUser(h, 'c1');
   await h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [a.userId, b.userId], slaMinutes: 15 });
@@ -139,7 +142,7 @@ test('sweepSlaBreaches reassigns a breached lead to the next pool member and pen
 });
 
 test('sweepSlaBreaches never touches a lead that already moved past new', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const a = await seedEmployeeUser(h, 'c1');
   await h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [a.userId], slaMinutes: 15 });
   const assignment = await h.svc.pickOwnerForNewLead('c1');
@@ -150,7 +153,8 @@ test('sweepSlaBreaches never touches a lead that already moved past new', async 
     ownerEmployeeUserId: assignment!.ownerUserId,
     firstContactSlaDueAt: assignment!.firstContactSlaDueAt,
   });
-  await h.crm.updateStatus(lead.id, 'contacted');
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'contacted')!;
+  await h.crm.moveToStage(lead.id, 'c1', contacted.id);
 
   const future = new Date(Date.now() + 20 * 60_000);
   const breaches = await h.svc.sweepSlaBreaches(future);
@@ -158,7 +162,7 @@ test('sweepSlaBreaches never touches a lead that already moved past new', async 
 });
 
 test('sweepSlaBreaches with a single-member pool re-flags the lead and still penalizes, without reassigning', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const a = await seedEmployeeUser(h, 'c1');
   await h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [a.userId], slaMinutes: 15 });
   const assignment = await h.svc.pickOwnerForNewLead('c1');
@@ -185,7 +189,7 @@ test('sweepSlaBreaches with a single-member pool re-flags the lead and still pen
 });
 
 test('sweepSlaBreaches is repeatable: a lead that keeps missing SLA keeps cycling instead of being processed once and ignored', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const a = await seedEmployeeUser(h, 'c1');
   const b = await seedEmployeeUser(h, 'c1');
   await h.svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [a.userId, b.userId], slaMinutes: 15 });

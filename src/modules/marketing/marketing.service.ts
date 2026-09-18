@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Campaign, CampaignChannel, CampaignStatus, Lead } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { NotFoundError, ValidationError } from '../../infra/errors.js';
+import type { CrmStageService } from '../crm/crm-stage.service.js';
 
 export interface CreateCampaignInput {
   companyId: string;
@@ -32,6 +33,7 @@ export class MarketingService {
   constructor(
     private readonly campaigns: Repository<Campaign>,
     private readonly leads: Repository<Lead>,
+    private readonly crmStages: CrmStageService,
   ) {}
 
   async createCampaign(input: CreateCampaignInput): Promise<Campaign> {
@@ -74,15 +76,25 @@ export class MarketingService {
    * Attributes leads to a campaign via Lead.sourceId === campaign.id — the
    * frontend passes the campaign's own id as the source when creating a
    * lead from a campaign-tracked channel, so no separate join table is
-   * needed.
+   * needed. "Qualified"/"converted" are generalized to the company's real
+   * pipeline (no hardcoded stage names): qualified = moved past the
+   * default (Fresh Leads) stage without being lost; converted = reached
+   * an isWon-flagged stage — see AnalyticsService for the same pattern.
    */
   async campaignPerformance(id: string, companyId: string): Promise<CampaignPerformance> {
     const campaign = await this.campaigns.findById(id);
     if (!campaign || campaign.companyId !== companyId) throw new NotFoundError('campaign not found');
 
-    const attributedLeads = await this.leads.findAll((l) => l.companyId === companyId && l.sourceId === campaign.id);
-    const qualifiedCount = attributedLeads.filter((l) => l.status === 'qualified' || l.status === 'opportunity').length;
-    const convertedCount = attributedLeads.filter((l) => l.status === 'opportunity').length;
+    const [attributedLeads, stages] = await Promise.all([
+      this.leads.findAll((l) => l.companyId === companyId && l.sourceId === campaign.id),
+      this.crmStages.listStages(companyId, true),
+    ]);
+    const stageById = new Map(stages.map((s) => [s.id, s]));
+    const qualifiedCount = attributedLeads.filter((l) => {
+      const stage = stageById.get(l.stageId);
+      return !!stage && !stage.isLost && !stage.isDefault;
+    }).length;
+    const convertedCount = attributedLeads.filter((l) => stageById.get(l.stageId)?.isWon).length;
 
     return {
       campaignId: campaign.id,

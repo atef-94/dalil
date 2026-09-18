@@ -7,6 +7,7 @@ import { AuditLog } from '../../infra/audit-log.js';
 import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
+import { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
 import { OperationsService } from '../operations/operations.service.js';
 import { HrService } from '../hr/hr.service.js';
@@ -34,6 +35,7 @@ import type {
   MaintenanceTicket,
   Message,
   Contract,
+  CrmStage,
   Opportunity,
   Payment,
   PaymentPlanTemplate,
@@ -57,7 +59,7 @@ import type {
   WorkflowStepRun,
 } from '../../domain/types.js';
 
-function freshHarness() {
+async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const users = new InMemoryRepository<User>();
   const employees = new InMemoryRepository<Employee>();
   const roles = new InMemoryRepository<Role>();
@@ -91,12 +93,16 @@ function freshHarness() {
   const projects = new InMemoryRepository<Project>();
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
 
+  const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
+  for (const companyId of companyIds) {
+    await crmStages.seedDefaultStages(companyId);
+  }
   const tasks = new TaskService(tasksRepo);
   const communication = new CommunicationService(messages);
-  const crm = new CrmService(leads);
-  const marketing = new MarketingService(campaigns, leads);
+  const crm = new CrmService(leads, crmStages);
+  const marketing = new MarketingService(campaigns, leads, crmStages);
   const auditLog = new AuditLog(auditLogRepo);
-  const leadScoring = new LeadScoringService(leads);
+  const leadScoring = new LeadScoringService(leads, crmStages);
   const operations = new OperationsService(maintenanceTickets, units);
   const hr = new HrService(leaveRequests, employees);
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
@@ -110,6 +116,7 @@ function freshHarness() {
     tasks,
     communication,
     crm,
+    crmStages,
     marketing,
     finance,
     sales,
@@ -144,6 +151,7 @@ function freshHarness() {
     rbac,
     automation,
     crm,
+    crmStages,
     leadScoring,
     auditLog,
     marketing,
@@ -168,6 +176,7 @@ function freshHarness() {
     userRoles,
     leads,
     crm,
+    crmStages,
     marketing,
     operations,
     hr,
@@ -181,8 +190,15 @@ function freshHarness() {
   };
 }
 
+async function stageByKey(crmStages: CrmStageService, companyId: string, key: string): Promise<CrmStage> {
+  const stages = await crmStages.listStages(companyId, true);
+  const stage = stages.find((s) => s.key === key);
+  if (!stage) throw new Error(`no seeded stage with key "${key}" for ${companyId}`);
+  return stage;
+}
+
 async function seedUserWithGrants(
-  h: ReturnType<typeof freshHarness>,
+  h: Awaited<ReturnType<typeof freshHarness>>,
   companyId: string,
   userId: string,
   grantList: { action: ActionName; resource: ResourceName; scope?: 'own' | 'department' | 'company' }[],
@@ -210,7 +226,7 @@ const EDIT_LEAD_GRANT: { action: ActionName; resource: ResourceName } = { action
 const APPROVE_GRANT: { action: ActionName; resource: ResourceName } = { action: 'approve', resource: 'approval' };
 
 test('an AI action request without the required RBAC grant is denied and never executes', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', []); // no grants
   const request = await h.ai.requestAction({
     companyId: 'c1',
@@ -224,7 +240,7 @@ test('an AI action request without the required RBAC grant is denied and never e
 });
 
 test('with permission but no AiPolicy set, an action defaults to require_approval and pauses', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const request = await h.ai.requestAction({
     companyId: 'c1',
@@ -238,7 +254,7 @@ test('with permission but no AiPolicy set, an action defaults to require_approva
 });
 
 test('approving a pending AI action executes it through the automation engine', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await seedUserWithGrants(h, 'c1', 'approver-1', [APPROVE_GRANT]);
   const request = await h.ai.requestAction({
@@ -252,7 +268,7 @@ test('approving a pending AI action executes it through the automation engine', 
 });
 
 test('rejecting a pending AI action denies it and never executes anything', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await seedUserWithGrants(h, 'c1', 'approver-1', [APPROVE_GRANT]);
   const request = await h.ai.requestAction({
@@ -267,7 +283,7 @@ test('rejecting a pending AI action denies it and never executes anything', asyn
 });
 
 test('a suggest_only policy never executes, even with full permission', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await h.ai.setPolicy('c1', 'create_task', 'suggest_only', 'human-1');
   const request = await h.ai.requestAction({
@@ -280,7 +296,7 @@ test('a suggest_only policy never executes, even with full permission', async ()
 });
 
 test('an auto_execute policy runs the action immediately with no approval step', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await h.ai.setPolicy('c1', 'create_task', 'auto_execute', 'human-1');
   const request = await h.ai.requestAction({
@@ -293,7 +309,7 @@ test('an auto_execute policy runs the action immediately with no approval step',
 });
 
 test('an auto_execute action that fails validation is recorded as denied_policy, not silently dropped', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await h.ai.setPolicy('c1', 'create_task', 'auto_execute', 'human-1');
   const request = await h.ai.requestAction({
@@ -307,7 +323,7 @@ test('an auto_execute action that fails validation is recorded as denied_policy,
 });
 
 test('AI can never auto-execute an action the human lacks permission for, regardless of policy', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', []); // no grants at all
   await h.ai.setPolicy('c1', 'create_task', 'auto_execute', 'human-1');
   const request = await h.ai.requestAction({
@@ -320,7 +336,7 @@ test('AI can never auto-execute an action the human lacks permission for, regard
 });
 
 test('approving an AI action from a different company is rejected (cross-tenant)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await seedUserWithGrants(h, 'c2', 'approver-2', [APPROVE_GRANT]);
   const request = await h.ai.requestAction({
@@ -340,7 +356,7 @@ test('approving an AI action from a different company is rejected (cross-tenant)
 // silently deny_permission for exactly the users it's meant to serve.
 
 test('an own-scoped grant permits an AI action when the real resource owner is supplied', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'create', resource: 'task', scope: 'own' }]);
   const request = await h.ai.requestAction({
     companyId: 'c1',
@@ -353,7 +369,7 @@ test('an own-scoped grant permits an AI action when the real resource owner is s
 });
 
 test('an own-scoped grant is not enough when no owner is supplied (sanity check for the bug this guards)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'create', resource: 'task', scope: 'own' }]);
   const request = await h.ai.requestAction({
     companyId: 'c1',
@@ -366,7 +382,7 @@ test('an own-scoped grant is not enough when no owner is supplied (sanity check 
 });
 
 test('an own-scoped grant does not permit acting on someone else\'s resource', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'create', resource: 'task', scope: 'own' }]);
   const request = await h.ai.requestAction({
     companyId: 'c1',
@@ -379,7 +395,7 @@ test('an own-scoped grant does not permit acting on someone else\'s resource', a
 });
 
 test('decide() threads the lead\'s real owner through so an own-scoped Sales Agent grant actually works end-to-end', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   // Only an 'own'-scoped grant — the realistic real-world Sales Agent
   // grant (see infra/seed.ts), not the broader 'company' scope every
   // other test in this file uses.
@@ -394,7 +410,7 @@ test('decide() threads the lead\'s real owner through so an own-scoped Sales Age
 });
 
 test('decide() does not let an own-scoped grant reach across to a lead owned by someone else', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'edit', resource: 'lead', scope: 'own' }]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Other Owner Client', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'someone-else' });
 
@@ -405,47 +421,50 @@ test('decide() does not let an own-scoped grant reach across to a lead owned by 
 });
 
 test('getActionRequest rejects a request belonging to a different company (cross-tenant)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const request = await h.ai.requestAction({ companyId: 'c1', requestedByUserId: 'human-1', actionType: 'create_task', params: { title: 'x' } });
   await assert.rejects(() => h.ai.getActionRequest(request.id, 'c2'));
 });
 
 test('suggestNextAction proposes advancing a well-scored new lead to contacted', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Promising Client', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'human-1' });
+  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
   const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
   assert.equal(decision.status, 'proceeded');
   assert.equal(decision.chosenActionType, 'update_lead_status');
-  assert.equal((decision.params as { status: string }).status, 'contacted');
+  assert.equal((decision.params as { stageId: string }).stageId, contacted.id);
   assert.match(decision.reasoning, /score/i);
 });
 
 test('suggestNextAction reports no_action for a lead already lost, without proposing anything', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Gone Cold', phone: '0100' });
-  await h.crm.updateStatus(lead.id, 'lost', 'went with a competitor');
+  const lost = await stageByKey(h.crmStages, 'c1', 'lost');
+  await h.crm.moveToStage(lead.id, 'c1', lost.id, 'went with a competitor');
   const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
   assert.equal(decision.status, 'no_action');
   assert.equal(decision.chosenActionType, undefined);
 });
 
 test('suggestNextAction executes automatically when the company opts a lead action into auto_execute', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Hot Lead', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'human-1' });
+  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
   const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
   assert.equal(decision.status, 'proceeded');
   assert.equal(decision.resultActionStatus, 'executed');
   const updated = await h.crm.getLead(lead.id);
-  assert.equal(updated!.status, 'contacted');
+  assert.equal(updated!.stageId, contacted.id);
 });
 
 test('setPolicy overwrites an existing policy for the same company and action type rather than duplicating it', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await h.ai.setPolicy('c1', 'create_task', 'suggest_only', 'human-1');
   await h.ai.setPolicy('c1', 'create_task', 'auto_execute', 'human-1');
   const policies = await h.ai.listPolicies('c1');
@@ -455,7 +474,7 @@ test('setPolicy overwrites an existing policy for the same company and action ty
 });
 
 test('every AI action request is recorded in the audit log with executedByAI metadata', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', []);
   await h.ai.requestAction({ companyId: 'c1', requestedByUserId: 'human-1', actionType: 'create_task', params: { title: 'x' } });
   const list = await h.ai.listActionRequests('c1');
@@ -465,14 +484,14 @@ test('every AI action request is recorded in the audit log with executedByAI met
 
 // ---- Phase 2: Agent Orchestration Layer ----
 
-test('listAgents returns the 5 specialized business-function agents', () => {
-  const h = freshHarness();
+test('listAgents returns the 5 specialized business-function agents', async () => {
+  const h = await freshHarness();
   const keys = h.ai.listAgents().map((a) => a.key);
   assert.deepEqual(keys.sort(), ['finance', 'hr', 'marketing', 'sales', 'support']);
 });
 
-test('listTools returns the full tool registry, or a per-agent boundary-filtered subset', () => {
-  const h = freshHarness();
+test('listTools returns the full tool registry, or a per-agent boundary-filtered subset', async () => {
+  const h = await freshHarness();
   const allTools = h.ai.listTools();
   assert.ok(allTools.length >= 7);
   const salesTools = h.ai.listTools('sales');
@@ -480,8 +499,8 @@ test('listTools returns the full tool registry, or a per-agent boundary-filtered
   assert.ok(!salesTools.some((t) => t.actionType === 'webhook_call'));
 });
 
-test('listTools rejects an unknown agent key', () => {
-  const h = freshHarness();
+test('listTools rejects an unknown agent key', async () => {
+  const h = await freshHarness();
   assert.throws(() => h.ai.listTools('not-a-real-agent'));
 });
 
@@ -490,7 +509,7 @@ test('listTools rejects an unknown agent key', () => {
 const INTEGRATION_CALL_GRANT: { action: ActionName; resource: ResourceName } = { action: 'create', resource: 'integration_connection' };
 
 test('sales agent reaches out via a connected WhatsApp integration instead of only updating status', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
   await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1');
   await h.integrations.connect({
@@ -511,13 +530,14 @@ test('sales agent reaches out via a connected WhatsApp integration instead of on
   assert.equal(decision.status, 'proceeded');
   assert.equal(h.integrationFetchCalls.length, 1);
   assert.match(h.integrationFetchCalls[0]!.url, /graph\.facebook\.com/);
-  // still unchanged — reaching out doesn't itself advance the funnel stage
+  // still unchanged — reaching out doesn't itself advance the pipeline stage
+  const fresh = await stageByKey(h.crmStages, 'c1', 'fresh');
   const unchanged = await h.crm.getLead(lead.id);
-  assert.equal(unchanged!.status, 'new');
+  assert.equal(unchanged!.stageId, fresh.id);
 });
 
 test('sales agent falls back to email when only an email integration is connected and the lead has no phone-eligible WhatsApp path', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
   await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1');
   await h.integrations.connect({
@@ -538,7 +558,7 @@ test('sales agent falls back to email when only an email integration is connecte
 });
 
 test('a lead is never messaged twice automatically — the second decision advances status instead', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
   await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1');
   await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
@@ -567,23 +587,24 @@ test('a lead is never messaged twice automatically — the second decision advan
   assert.equal(second.chosenActionType, 'update_lead_status');
   assert.equal(h.integrationFetchCalls.length, 1);
 
+  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
   const updated = await h.crm.getLead(lead.id);
-  assert.equal(updated!.status, 'contacted');
+  assert.equal(updated!.stageId, contacted.id);
 });
 
-test('a qualified lead escalates to a human instead of guessing at conversion', async () => {
-  const h = freshHarness();
+test('a lead at the last stage before a Won/Lost decision escalates to a human instead of guessing at conversion', async () => {
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Qualified Client', phone: '0100' });
-  await h.crm.updateStatus(lead.id, 'contacted');
-  await h.crm.updateStatus(lead.id, 'qualified');
+  const recycle = await stageByKey(h.crmStages, 'c1', 'recycle');
+  await h.crm.moveToStage(lead.id, 'c1', recycle.id);
   const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
   assert.equal(decision.status, 'escalated');
   assert.equal(decision.confidence, 15);
 });
 
 test('a repeat decision within the cooldown window reuses the prior decision instead of re-deciding', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Repeat Client', phone: '0100' });
   const first = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
@@ -592,14 +613,14 @@ test('a repeat decision within the cooldown window reuses the prior decision ins
 });
 
 test('decide throws for an unknown agent key', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await assert.rejects(() => h.ai.decide('not-a-real-agent', 'c1', 'subject-1', 'human-1'));
 });
 
 // ---- Marketing Agent ----
 
 test('marketing agent flags a low-converting, high-volume campaign for review', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const campaign = await h.marketing.createCampaign({ companyId: 'c1', name: 'Underperformer', channel: 'digital', budget: 5000, startDate: '2026-01-01' });
   await h.marketing.updateStatus(campaign.id, 'c1', 'active');
@@ -613,7 +634,7 @@ test('marketing agent flags a low-converting, high-volume campaign for review', 
 });
 
 test('marketing agent reports no_action for a healthy or non-active campaign', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const campaign = await h.marketing.createCampaign({ companyId: 'c1', name: 'Planned Campaign', channel: 'digital', budget: 1000, startDate: '2026-01-01' });
   const decision = await h.ai.decide('marketing', 'c1', campaign.id, 'human-1');
@@ -623,7 +644,7 @@ test('marketing agent reports no_action for a healthy or non-active campaign', a
 // ---- Finance Agent ----
 
 test('finance agent recommends a collections follow-up for an overdue payment line', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const overdueDate = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
   const line = await h.scheduleLines.save({
@@ -637,7 +658,7 @@ test('finance agent recommends a collections follow-up for an overdue payment li
 });
 
 test('finance agent reports no_action for a payment line that is not overdue', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const line = await h.scheduleLines.save({
     id: 'line-2', companyId: 'c1', contractId: 'contract-1', sourceTemplateId: 'tpl-1', sourceTemplateVersion: 1,
@@ -649,7 +670,7 @@ test('finance agent reports no_action for a payment line that is not overdue', a
 
 // ---- Support / Customer Service Agent ----
 
-async function seedUnit(h: ReturnType<typeof freshHarness>, companyId = 'c1'): Promise<Unit> {
+async function seedUnit(h: Awaited<ReturnType<typeof freshHarness>>, companyId = 'c1'): Promise<Unit> {
   return h.units.save({
     id: 'unit-1', companyId, projectId: 'project-1', code: 'A-101', unitType: 'apartment',
     areaSqm: 100, listPrice: 1000000, status: 'available', createdAt: new Date().toISOString(),
@@ -657,7 +678,7 @@ async function seedUnit(h: ReturnType<typeof freshHarness>, companyId = 'c1'): P
 }
 
 test('support agent flags an urgent unassigned ticket for prompt assignment', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const unit = await seedUnit(h);
   const ticket = await h.operations.createTicket({ companyId: 'c1', unitId: unit.id, title: 'Burst pipe', priority: 'urgent', reportedByUserId: 'human-1' });
@@ -668,7 +689,7 @@ test('support agent flags an urgent unassigned ticket for prompt assignment', as
 });
 
 test('support agent reports no_action for a low-priority assigned ticket', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   const unit = await seedUnit(h);
   const ticket = await h.operations.createTicket({ companyId: 'c1', unitId: unit.id, title: 'Squeaky door', priority: 'low', reportedByUserId: 'human-1' });
@@ -680,7 +701,7 @@ test('support agent reports no_action for a low-priority assigned ticket', async
 // ---- HR Agent ----
 
 test('hr agent recommends a reminder for a leave request pending too long', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await h.employees.save({ id: 'emp-1', companyId: 'c1', fullName: 'Test Employee', email: 'e@c1.com', title: 'Agent', status: 'active', createdAt: new Date().toISOString() });
   const leave = await h.hr.requestLeave({ companyId: 'c1', employeeId: 'emp-1', type: 'annual', startDate: '2026-03-01', endDate: '2026-03-05' });
@@ -695,7 +716,7 @@ test('hr agent recommends a reminder for a leave request pending too long', asyn
 });
 
 test('hr agent reports no_action for a leave request still within the normal review window', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
   await h.employees.save({ id: 'emp-1', companyId: 'c1', fullName: 'Test Employee', email: 'e@c1.com', title: 'Agent', status: 'active', createdAt: new Date().toISOString() });
   const leave = await h.hr.requestLeave({ companyId: 'c1', employeeId: 'emp-1', type: 'annual', startDate: '2026-03-01', endDate: '2026-03-05' });
@@ -706,12 +727,12 @@ test('hr agent reports no_action for a leave request still within the normal rev
 // ---- Execution history / monitoring ----
 
 test('listAgentDecisions and getAgentStats reflect decisions across agents', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT, EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Stats Lead', phone: '0100' });
-  await h.crm.updateStatus(lead.id, 'contacted');
-  await h.crm.updateStatus(lead.id, 'qualified');
-  await h.ai.decide('sales', 'c1', lead.id, 'human-1'); // escalates (qualified lead)
+  const recycle = await stageByKey(h.crmStages, 'c1', 'recycle');
+  await h.crm.moveToStage(lead.id, 'c1', recycle.id);
+  await h.ai.decide('sales', 'c1', lead.id, 'human-1'); // escalates (last stage before Won/Lost)
 
   const campaign = await h.marketing.createCampaign({ companyId: 'c1', name: 'Stats Campaign', channel: 'digital', budget: 100, startDate: '2026-01-01' });
   await h.ai.decide('marketing', 'c1', campaign.id, 'human-1'); // no_action (planned, not active)
@@ -728,7 +749,7 @@ test('listAgentDecisions and getAgentStats reflect decisions across agents', asy
 });
 
 test('getAgentDecision rejects a decision belonging to a different company (cross-tenant)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Tenant Lead', phone: '0100' });
   const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');

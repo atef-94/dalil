@@ -21,7 +21,7 @@ function freshService() {
 }
 
 async function seedLead(leads: InMemoryRepository<Lead>, companyId = 'c1'): Promise<Lead> {
-  return leads.save({ id: 'lead-1', companyId, fullName: 'Portal Client', phone: '0555-1234', status: 'opportunity', createdAt: new Date().toISOString() });
+  return leads.save({ id: 'lead-1', companyId, fullName: 'Portal Client', phone: '0555-1234', stageId: 'stage-won', createdAt: new Date().toISOString() });
 }
 
 test('granting portal access for a nonexistent lead is rejected', async () => {
@@ -45,7 +45,7 @@ test('granting portal access twice for the same lead is rejected', async () => {
 test('listCustomers returns only this company\'s customers', async () => {
   const { svc, leads } = freshService();
   await seedLead(leads, 'c1');
-  await leads.save({ id: 'lead-2', companyId: 'c2', fullName: 'Other Co Client', phone: '0555-9999', status: 'opportunity', createdAt: new Date().toISOString() });
+  await leads.save({ id: 'lead-2', companyId: 'c2', fullName: 'Other Co Client', phone: '0555-9999', stageId: 'stage-won', createdAt: new Date().toISOString() });
   await svc.grantPortalAccess({ companyId: 'c1', leadId: 'lead-1', email: 'client@example.com', password: 'password123' });
   await svc.grantPortalAccess({ companyId: 'c2', leadId: 'lead-2', email: 'other@example.com', password: 'password123' });
 

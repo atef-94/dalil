@@ -15,6 +15,7 @@ import type {
   CommissionRule,
   Company,
   Contract,
+  CrmStage,
   Customer,
   Department,
   Employee,
@@ -77,6 +78,7 @@ import { filterByListScope, type ScopeOwnerKeys } from './modules/permissions/sc
 import { OrganizationService } from './modules/organization/organization.service.js';
 import { AuthService } from './modules/auth/auth.service.js';
 import { CrmService } from './modules/crm/crm.service.js';
+import { CrmStageService } from './modules/crm/crm-stage.service.js';
 import { LeadDistributionService } from './modules/crm/lead-distribution.service.js';
 import { LeadTimelineService } from './modules/crm/lead-timeline.service.js';
 import { InventoryService } from './modules/inventory/inventory.service.js';
@@ -139,6 +141,7 @@ export interface Application {
     organization: OrganizationService;
     auth: AuthService;
     crm: CrmService;
+    crmStages: CrmStageService;
     leadDistribution: LeadDistributionService;
     leadTimeline: LeadTimelineService;
     inventory: InventoryService;
@@ -200,6 +203,7 @@ function buildRepos(db?: DatabaseSync) {
     userRoles: repo<UserRole>('user_roles'),
     overrides: repo<import('./domain/types.js').PermissionOverride>('permission_overrides'),
     leads: repo<Lead>('leads'),
+    crmStages: repo<CrmStage>('crm_stages'),
     units: repo<Unit>('units'),
     unitHolds: repo<UnitHold>('unit_holds'),
     reservations: repo<Reservation>('reservations'),
@@ -315,8 +319,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const auditLog = new AuditLog(repos.auditEntries);
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
   const auth = new AuthService(repos.users, options.tokenSecret);
-  const crm = new CrmService(repos.leads);
-  const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm);
+  const crmStages = new CrmStageService(repos.crmStages);
+  const crm = new CrmService(repos.leads, crmStages);
+  const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
   const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
@@ -331,12 +336,12 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const operations = new OperationsService(repos.maintenanceTickets, repos.units);
   const legal = new LegalService(repos.legalDocuments, repos.contracts);
   const purchasing = new PurchasingService(repos.vendors, repos.purchaseOrders);
-  const marketing = new MarketingService(repos.campaigns, repos.leads);
+  const marketing = new MarketingService(repos.campaigns, repos.leads, crmStages);
   const communication = new CommunicationService(repos.messages);
-  const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions, repos.auditEntries, repos.campaigns);
+  const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions, repos.auditEntries, repos.campaigns, crmStages);
   const forecasting = new ForecastingService(repos.contracts, repos.scheduleLines, repos.payments, repos.units);
   const scenarioSimulation = new ScenarioSimulationService(repos.templates);
-  const leadScoring = new LeadScoringService(repos.leads);
+  const leadScoring = new LeadScoringService(repos.leads, crmStages);
   const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth, repos.opportunities, repos.legalDocuments, repos.messages, repos.tasks);
   const tasks = new TaskService(repos.tasks);
   const eventBus = new EventBus();
@@ -346,6 +351,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     tasks,
     communication,
     crm,
+    crmStages,
     marketing,
     finance,
     sales,
@@ -380,6 +386,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     rbac,
     automation,
     crm,
+    crmStages,
     leadScoring,
     auditLog,
     marketing,
@@ -408,6 +415,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       roles: repos.roles,
       grants: repos.grants,
       userRoles: repos.userRoles,
+      crmStages: repos.crmStages,
+      leads: repos.leads,
     });
   }
 
@@ -1183,6 +1192,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email?: string;
       nationalId?: string;
       sourceId?: string;
+      stageId?: string;
+      tags?: string[];
+      priority?: Lead['priority'];
       ownerEmployeeUserId?: string;
       requiredSkill?: string;
     }>(ctx.body);
@@ -1208,6 +1220,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email: body.email,
       nationalId: body.nationalId,
       sourceId: body.sourceId,
+      stageId: body.stageId,
+      tags: body.tags,
+      priority: body.priority,
       requiredSkill: body.requiredSkill,
       ownerEmployeeUserId: ownerEmployeeUserId ?? actor.userId,
       firstContactSlaDueAt,
@@ -1215,6 +1230,75 @@ export async function buildApplication(options: AppOptions): Promise<Application
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
+  });
+
+  // ---- CRM Stages ----
+  // The configurable pipeline behind the CRM workspace's tabs/cards — an
+  // admin can add, edit, reorder, and archive stages with zero code
+  // changes; every place that classifies a Lead (scoring, automation, AI,
+  // analytics) reads the isDefault/isWon/isLost/order flags, never a
+  // hardcoded stage name, so a custom stage behaves correctly immediately.
+  httpServer.get('/api/crm/stages', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'crm_stage'))) {
+      throw new ForbiddenError('missing view:crm_stage permission');
+    }
+    const includeInactive = ctx.query.get('includeInactive') === 'true';
+    const stages = await crmStages.listStages(actor.companyId, includeInactive);
+    return { status: 200, body: stages };
+  });
+
+  httpServer.post('/api/crm/stages', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'crm_stage'))) {
+      throw new ForbiddenError('missing create:crm_stage permission');
+    }
+    const body = parseJsonBody<Parameters<CrmStageService['createStage']>[0]>(ctx.body);
+    const stage = await crmStages.createStage({ ...body, companyId: actor.companyId });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'crm_stage', resourceId: stage.id });
+    return { status: 201, body: stage };
+  });
+
+  httpServer.patch('/api/crm/stages/:stageId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'crm_stage'))) {
+      throw new ForbiddenError('missing edit:crm_stage permission');
+    }
+    const body = parseJsonBody<Parameters<CrmStageService['updateStage']>[2]>(ctx.body);
+    const stage = await crmStages.updateStage(ctx.params.stageId!, actor.companyId, body);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'crm_stage', resourceId: stage.id });
+    return { status: 200, body: stage };
+  });
+
+  httpServer.post('/api/crm/stages/reorder', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'crm_stage'))) {
+      throw new ForbiddenError('missing edit:crm_stage permission');
+    }
+    const body = parseJsonBody<{ orderedStageIds: string[] }>(ctx.body);
+    const stages = await crmStages.reorderStages(actor.companyId, body.orderedStageIds);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'crm_stage', resourceId: actor.companyId, metadata: { reordered: true } });
+    return { status: 200, body: stages };
+  });
+
+  httpServer.post('/api/crm/stages/:stageId/set-default', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'crm_stage'))) {
+      throw new ForbiddenError('missing edit:crm_stage permission');
+    }
+    const stage = await crmStages.setDefaultStage(ctx.params.stageId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'crm_stage', resourceId: stage.id, metadata: { setDefault: true } });
+    return { status: 200, body: stage };
+  });
+
+  httpServer.post('/api/crm/stages/:stageId/archive', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'delete', 'crm_stage'))) {
+      throw new ForbiddenError('missing delete:crm_stage permission');
+    }
+    const stage = await crmStages.archiveStage(ctx.params.stageId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'crm_stage', resourceId: stage.id });
+    return { status: 200, body: stage };
   });
 
   // ---- Lead Distribution + SLA ----
@@ -1292,12 +1376,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'lead');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:lead permission' } };
-    const leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
+    let leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
+    const stageId = ctx.query.get('stageId');
+    if (stageId) leads = leads.filter((l) => l.stageId === stageId);
     const filtered = searchFilter(leads, ['fullName', 'phone', 'email'], ctx.query.get('q'));
     return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
-  httpServer.patch('/api/crm/leads/:leadId/status', async (ctx) => {
+  httpServer.get('/api/crm/leads/:leadId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'view', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing view:lead permission for this lead');
+    return { status: 200, body: lead };
+  });
+
+  httpServer.patch('/api/crm/leads/:leadId/stage', async (ctx) => {
     const actor = await actorOf(ctx);
     const lead = await crm.getLead(ctx.params.leadId!);
     if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
@@ -1310,27 +1412,46 @@ export async function buildApplication(options: AppOptions): Promise<Application
       managerEmployeeId: ownerKeys.managerEmployeeId,
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
-    const body = parseJsonBody<{ status: Lead['status']; lostReason?: string }>(ctx.body);
-    const fromStatus = lead.status;
-    const updated = await crm.updateStatus(ctx.params.leadId!, body.status, body.lostReason);
+    const body = parseJsonBody<{ stageId: string; lostReason?: string }>(ctx.body);
+    const fromStageId = lead.stageId;
+    const updated = await crm.moveToStage(ctx.params.leadId!, actor.companyId, body.stageId, body.lostReason);
+    const stage = await crmStages.getStage(updated.stageId, actor.companyId);
     // Previously-unfixed gap: this route never wrote to the audit trail at
-    // all, so a lead's status history had no persisted record beyond its
-    // current value — the Lead Timeline (GET .../timeline below) reads
-    // this metadata to reconstruct that history.
+    // all, so a lead's stage history had no persisted record beyond its
+    // current value — the Lead Timeline (GET .../timeline below) and
+    // AnalyticsService.speedToFirstContact both read this `toStageId`
+    // metadata to reconstruct that history.
     await auditLog.record({
       companyId: actor.companyId,
       actorUserId: actor.userId,
       action: 'edit',
       resource: 'lead',
       resourceId: updated.id,
-      metadata: { fromStatus, toStatus: updated.status, lostReason: updated.lostReason },
+      // toStatus is kept (as the new stage's display name, not a legacy
+      // enum value) purely so LeadTimelineService's existing
+      // `typeof meta.toStatus === 'string'` detection — intentionally left
+      // unmodified, see the CRM restructuring plan — still renders a
+      // readable "Status changed to ..." timeline entry for stage moves.
+      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason },
     });
+    // Both events fire together during the transition period: 'status_changed'
+    // keeps any pre-existing workflow/AiPolicy row triggered on the legacy
+    // name working unchanged, while 'stage_changed' (carrying the
+    // human-readable stageKey/stageName at the top level, for simple
+    // workflow-condition matching) is what new templates should target.
     await emitEvent({
       companyId: actor.companyId,
       type: 'lead.status_changed',
       payload: { ...updated },
       actorUserId: actor.userId,
-      dedupeKey: `lead.status_changed:${updated.id}:${updated.status}`,
+      dedupeKey: `lead.status_changed:${updated.id}:${updated.stageId}`,
+    });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'lead.stage_changed',
+      payload: { ...updated, stageKey: stage.key, stageName: stage.name },
+      actorUserId: actor.userId,
+      dedupeKey: `lead.stage_changed:${updated.id}:${updated.stageId}`,
     });
     return { status: 200, body: updated };
   });
@@ -1363,6 +1484,43 @@ export async function buildApplication(options: AppOptions): Promise<Application
       preferredTransferMethod?: string;
     }>(ctx.body);
     const updated = await crm.updateCustomFields(ctx.params.leadId!, actor.companyId, body);
+    return { status: 200, body: updated };
+  });
+
+  httpServer.patch('/api/crm/leads/:leadId/owner', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'edit', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
+    const body = parseJsonBody<{ ownerEmployeeUserId: string }>(ctx.body);
+    const updated = await crm.assignOwner(ctx.params.leadId!, actor.companyId, body.ownerEmployeeUserId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'assign', resource: 'lead', resourceId: updated.id, metadata: { newOwnerUserId: updated.ownerEmployeeUserId } });
+    return { status: 200, body: updated };
+  });
+
+  httpServer.patch('/api/crm/leads/:leadId/tags', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'edit', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
+    const body = parseJsonBody<{ tags?: string[]; priority?: Lead['priority'] }>(ctx.body);
+    const updated = await crm.updateTagsAndPriority(ctx.params.leadId!, actor.companyId, body);
     return { status: 200, body: updated };
   });
 
@@ -3147,7 +3305,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
     },

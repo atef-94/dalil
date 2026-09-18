@@ -101,7 +101,8 @@ export type ResourceName =
   | 'ai_action'
   | 'integration_connection'
   | 'sales_commission'
-  | 'forecast';
+  | 'forecast'
+  | 'crm_stage';
 
 export type ActionName =
   | 'view'
@@ -251,7 +252,51 @@ export interface Reservation {
 
 // ---- CRM ----
 
+/** @deprecated superseded by CrmStage (Lead.stageId) — kept only so old
+ * stored rows and any code still reading it don't lose data. Never written
+ * by new code. */
 export type LeadStatus = 'new' | 'contacted' | 'qualified' | 'opportunity' | 'lost';
+
+/**
+ * A company-configurable pipeline stage a Lead can sit in — replaces the
+ * old hardcoded LeadStatus union as the single source of truth for a
+ * lead's classification. Seeded with a default set (Fresh Leads,
+ * Contacted, Follow Up, Qualified, Meeting, Negotiation, Proposal,
+ * Booking, Won, Lost, Unqualified, Recycle — see
+ * CrmStageService.seedDefaultStages) but an admin can add/edit/reorder/
+ * deactivate their own without any code change: every place that used to
+ * branch on a literal status string now reads isDefault/isWon/isLost/
+ * order instead.
+ */
+export interface CrmStage {
+  id: string;
+  companyId: string;
+  /** Stable slug for the seeded defaults (e.g. 'fresh', 'won') — purely
+   * informational for custom admin-created stages, never branched on by
+   * business logic (which uses the flags below instead). */
+  key: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+  /** Pipeline position — lower sorts first. Drives tab ordering and the
+   * "advance to the next stage" logic in decideSales/lead-scoring. */
+  order: number;
+  isActive: boolean;
+  /** The stage a newly created Lead lands in unless a distribution rule
+   * says otherwise (exactly one per company; enforced by
+   * CrmStageService). This is what "Fresh Leads" means structurally. */
+  isDefault: boolean;
+  /** Terminal-success flag (e.g. "Won"). */
+  isWon: boolean;
+  /** Terminal-failure flag (e.g. "Lost") — moving a lead into any
+   * isLost-flagged stage requires a lostReason. */
+  isLost: boolean;
+  allowManualMove: boolean;
+  allowAutomationMove: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface Lead {
   id: string;
@@ -263,8 +308,15 @@ export interface Lead {
    * detection, since a phone or email can be swapped out but this can't. */
   nationalId?: string;
   sourceId?: string;
-  status: LeadStatus;
+  /** The lead's real classification — see CrmStage. Always set (defaults
+   * to the company's isDefault stage on creation). */
+  stageId: string;
+  /** @deprecated superseded by stageId. Left in place, never written by
+   * new code, so historical rows keep their original value. */
+  status?: LeadStatus;
   lostReason?: string;
+  tags?: string[];
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
   ownerEmployeeUserId?: string;
   /** Set once at creation and never changed afterward, even when
    * ownerEmployeeUserId is later reassigned — see
@@ -617,7 +669,7 @@ export interface Campaign {
 // ---- Communication ----
 
 export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket' | 'campaign' | 'payment_schedule_line' | 'leave_request';
-export type MessageChannel = 'internal' | 'email' | 'whatsapp' | 'sms';
+export type MessageChannel = 'internal' | 'email' | 'whatsapp' | 'sms' | 'call' | 'note';
 export type MessageStatus = 'sent' | 'read';
 
 export interface Message {
@@ -679,6 +731,7 @@ export type TriggerType = 'event' | 'scheduled' | 'webhook';
 export type DomainEventType =
   | 'lead.created'
   | 'lead.status_changed'
+  | 'lead.stage_changed'
   | 'lead.sla_breached'
   | 'opportunity.created'
   | 'contract.signed'

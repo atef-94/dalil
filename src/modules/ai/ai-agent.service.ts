@@ -17,6 +17,7 @@ import { AutomationError, ForbiddenError, NotFoundError, ValidationError } from 
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { CrmService } from '../crm/crm.service.js';
+import type { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
 import { OperationsService } from '../operations/operations.service.js';
 import { HrService } from '../hr/hr.service.js';
@@ -51,7 +52,7 @@ const TOOL_REGISTRY: ToolDefinition[] = [
   { actionType: 'create_task', name: 'Create Task', description: 'Creates a task/reminder/follow-up.', requiredParams: ['title'] },
   { actionType: 'create_lead', name: 'Create Lead', description: 'Creates a new CRM lead.', requiredParams: ['fullName', 'phone'] },
   { actionType: 'send_message', name: 'Send Message', description: 'Sends an internal message/notification.', requiredParams: ['subject', 'body'] },
-  { actionType: 'update_lead_status', name: 'Update Lead Status', description: "Advances a lead's funnel status.", requiredParams: ['leadId', 'status'] },
+  { actionType: 'update_lead_status', name: 'Move Lead Stage', description: "Moves a lead to a different CRM pipeline stage.", requiredParams: ['leadId', 'stageId'] },
   { actionType: 'assign_lead_owner', name: 'Assign Lead Owner', description: 'Reassigns a lead to a different owner.', requiredParams: ['leadId', 'ownerEmployeeUserId'] },
   { actionType: 'update_campaign_status', name: 'Update Campaign Status', description: "Changes a marketing campaign's status.", requiredParams: ['campaignId', 'status'] },
   { actionType: 'webhook_call', name: 'Call Webhook', description: 'Calls an external webhook/API endpoint.', requiredParams: ['url'] },
@@ -148,6 +149,7 @@ export class AiAgentService {
     private readonly rbac: RbacEvaluator,
     private readonly automation: AutomationService,
     private readonly crm: CrmService,
+    private readonly crmStages: CrmStageService,
     private readonly leadScoring: LeadScoringService,
     private readonly auditLog: AuditLog,
     private readonly marketing: MarketingService,
@@ -491,103 +493,104 @@ export class AiAgentService {
   }
 
   /** Sales Agent: turns LeadScoringService's deterministic score into a
-   * concrete next action. Thresholds are calibrated against the scorer's
-   * actual range per status (status weight alone caps 'new' at 10/100 and
-   * 'contacted' at 35/100 — the rest comes from recency/owner/source
-   * bonuses), not round numbers. */
+   * concrete next action. Stage-agnostic by design (works against
+   * whatever pipeline the company has configured, including custom
+   * admin-added stages), not name-based: a lead already in an isWon/
+   * isLost-flagged stage needs no further action; a lead at the last
+   * non-terminal stage escalates to a human (no reliable signal for a
+   * Won/Lost call); a lead in the company's default (Fresh Leads) stage
+   * gets the original cross-module outreach treatment; every other
+   * in-between stage gets the same "advance to the next stage or create
+   * a follow-up task" rule the old 'contacted' branch used. This
+   * generalizes what used to be three separate name-branches (new/
+   * contacted/qualified) into one rule that scales to any pipeline
+   * length. */
   private async decideSales(companyId: string, leadId: string): Promise<AgentDecisionResult> {
     const lead = await this.crm.getLead(leadId);
     if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
-    if (lead.status === 'lost' || lead.status === 'opportunity') {
-      return { confidence: 100, reasoning: `Lead is already ${lead.status}; no further action needed.`, alternatives: [] };
+
+    const stages = await this.crmStages.listStages(companyId, true);
+    const stage = stages.find((s) => s.id === lead.stageId);
+    if (!stage) throw new NotFoundError('lead has no valid CRM stage');
+
+    if (stage.isWon || stage.isLost) {
+      return { confidence: 100, reasoning: `Lead is already in "${stage.name}"; no further action needed.`, alternatives: [] };
     }
+
+    const nonTerminalStages = stages.filter((s) => !s.isWon && !s.isLost && s.isActive).sort((a, b) => a.order - b.order);
+    const currentIndex = nonTerminalStages.findIndex((s) => s.id === stage.id);
+    const nextStage = currentIndex >= 0 ? nonTerminalStages[currentIndex + 1] : undefined;
 
     const score = await this.leadScoring.scoreLead(leadId, companyId);
     const factorSummary = score.factors.map((f) => f.label).join(', ') || 'no positive signals yet';
     const alternatives: AgentAlternative[] = [];
 
-    if (lead.status === 'new') {
-      const advanceConfidence = Math.min(95, Math.round((score.score / 35) * 100));
-      if (advanceConfidence >= 50) {
-        // Cross-module reach-out: if the company has a connected WhatsApp or
-        // Email integration and hasn't already messaged this lead, reaching
-        // out directly through it is the concrete next action — the same
-        // "AI selects a permitted next action -> WhatsApp/Email" step the
-        // Lead AI Outreach workflow template demonstrates. This never fires
-        // twice for the same lead (see hasAlreadyReachedOut), so the
-        // *following* decide() call for this still-'new' lead falls through
-        // to the ordinary status-advance branch below.
-        const channel = !(await this.hasAlreadyReachedOut(companyId, lead.id)) ? await this.pickOutreachChannel(companyId, lead) : undefined;
-        if (channel) {
-          alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark contacted directly instead of reaching out first.' });
-          const greeting = `Hi ${lead.fullName}, thanks for your interest — one of our agents will follow up with you shortly!`;
-          return {
-            chosenActionType: 'integration_call',
-            params:
-              channel === 'whatsapp'
-                ? { provider: 'whatsapp', action: 'send_message', leadId: lead.id, to: lead.phone, body: greeting }
-                : { provider: 'email', action: 'send_message', leadId: lead.id, to: lead.email, subject: 'Thanks for your interest', body: greeting },
-            confidence: advanceConfidence,
-            reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to reach out directly via ${channel}.`,
-            alternatives,
-            ownerUserId: lead.ownerEmployeeUserId,
-          };
-        }
-        alternatives.push({ actionType: 'create_task', confidence: 100 - advanceConfidence, reasoning: 'Fallback: a manual follow-up task instead of advancing automatically.' });
-        return {
-          chosenActionType: 'update_lead_status',
-          params: { leadId, status: 'contacted' },
-          confidence: advanceConfidence,
-          reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to mark contacted.`,
-          alternatives,
-          ownerUserId: lead.ownerEmployeeUserId,
-        };
-      }
-      alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark contacted directly, but the score is not yet strong enough.' });
+    if (!nextStage) {
+      // Deliberately low confidence: whether a lead at the last stage
+      // before Won/Lost is ready for that call isn't something the lead
+      // score (a pipeline-position/recency/owner/source signal) has any
+      // real basis to judge — this always escalates to a human.
       return {
         chosenActionType: 'create_task',
-        params: { title: `Follow up with ${lead.fullName}`, relatedResource: 'lead', relatedResourceId: lead.id },
-        confidence: 100 - advanceConfidence,
-        reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not confident enough to auto-advance; recommend manual follow-up.`,
-        alternatives,
-        ownerUserId: lead.ownerEmployeeUserId,
-      };
-    }
-
-    if (lead.status === 'qualified') {
-      // Deliberately low confidence: whether a qualified lead is ready to
-      // convert to an Opportunity isn't something the lead score (a funnel-
-      // stage/recency/owner/source signal) has any real basis to judge —
-      // this always escalates to a human rather than guessing.
-      return {
-        chosenActionType: 'create_task',
-        params: { title: `Review qualified lead ${lead.fullName} for opportunity conversion`, relatedResource: 'lead', relatedResourceId: lead.id },
+        params: { title: `Review lead ${lead.fullName} — ready to move past "${stage.name}"?`, relatedResource: 'lead', relatedResourceId: lead.id },
         confidence: 15,
-        reasoning: 'Lead is qualified — recommend a human review for opportunity conversion; no reliable automatic signal for this transition.',
+        reasoning: `Lead is at the last stage before a Won/Lost decision ("${stage.name}") — recommend a human review; no reliable automatic signal for this transition.`,
         alternatives: [],
         ownerUserId: lead.ownerEmployeeUserId,
       };
     }
 
-    // status === 'contacted'
-    const advanceConfidence = Math.min(95, Math.round((score.score / 60) * 100));
-    if (advanceConfidence >= 60) {
-      alternatives.push({ actionType: 'create_task', confidence: 100 - advanceConfidence, reasoning: 'Fallback: a manual follow-up task instead of qualifying automatically.' });
+    // Thresholds are calibrated against the scorer's actual range: the
+    // default (Fresh Leads) stage caps at 35/100 from stage weight alone,
+    // every later stage caps at 60/100 — not round numbers.
+    const denominator = stage.isDefault ? 35 : 60;
+    const confidenceThreshold = stage.isDefault ? 50 : 60;
+    const advanceConfidence = Math.min(95, Math.round((score.score / denominator) * 100));
+
+    if (stage.isDefault && advanceConfidence >= confidenceThreshold) {
+      // Cross-module reach-out: if the company has a connected WhatsApp or
+      // Email integration and hasn't already messaged this lead, reaching
+      // out directly through it is the concrete next action — the same
+      // "AI selects a permitted next action -> WhatsApp/Email" step the
+      // Lead AI Outreach workflow template demonstrates. This never fires
+      // twice for the same lead (see hasAlreadyReachedOut), so the
+      // *following* decide() call for this still-fresh lead falls through
+      // to the ordinary stage-advance branch below.
+      const channel = !(await this.hasAlreadyReachedOut(companyId, lead.id)) ? await this.pickOutreachChannel(companyId, lead) : undefined;
+      if (channel) {
+        alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: `Could move directly to "${nextStage.name}" instead of reaching out first.` });
+        const greeting = `Hi ${lead.fullName}, thanks for your interest — one of our agents will follow up with you shortly!`;
+        return {
+          chosenActionType: 'integration_call',
+          params:
+            channel === 'whatsapp'
+              ? { provider: 'whatsapp', action: 'send_message', leadId: lead.id, to: lead.phone, body: greeting }
+              : { provider: 'email', action: 'send_message', leadId: lead.id, to: lead.email, subject: 'Thanks for your interest', body: greeting },
+          confidence: advanceConfidence,
+          reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to reach out directly via ${channel}.`,
+          alternatives,
+          ownerUserId: lead.ownerEmployeeUserId,
+        };
+      }
+    }
+
+    if (advanceConfidence >= confidenceThreshold) {
+      alternatives.push({ actionType: 'create_task', confidence: 100 - advanceConfidence, reasoning: `Fallback: a manual follow-up task instead of advancing to "${nextStage.name}" automatically.` });
       return {
         chosenActionType: 'update_lead_status',
-        params: { leadId, status: 'qualified' },
+        params: { leadId, stageId: nextStage.id },
         confidence: advanceConfidence,
-        reasoning: `Lead score ${score.score}/100 (${factorSummary}) — strong engagement, ready to qualify.`,
+        reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to move to "${nextStage.name}".`,
         alternatives,
         ownerUserId: lead.ownerEmployeeUserId,
       };
     }
-    alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark qualified directly, but engagement is not yet strong enough.' });
+    alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: `Could move directly to "${nextStage.name}", but the score is not yet strong enough.` });
     return {
       chosenActionType: 'create_task',
       params: { title: `Follow up with ${lead.fullName}`, relatedResource: 'lead', relatedResourceId: lead.id },
       confidence: 100 - advanceConfidence,
-      reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not yet strong enough to qualify automatically.`,
+      reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not confident enough to auto-advance; recommend manual follow-up.`,
       alternatives,
       ownerUserId: lead.ownerEmployeeUserId,
     };

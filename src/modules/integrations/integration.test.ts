@@ -6,6 +6,7 @@ import { AuditLog } from '../../infra/audit-log.js';
 import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
+import { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
 import { FinanceService } from '../finance/finance.service.js';
 import { SalesService } from '../sales/sales.service.js';
@@ -18,6 +19,7 @@ import type {
   AuditLogEntry,
   Campaign,
   Contract,
+  CrmStage,
   Employee,
   IntegrationConnection,
   IntegrationEvent,
@@ -65,10 +67,11 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   const campaigns = new InMemoryRepository<Campaign>();
   const auditLogRepo = new InMemoryRepository<AuditLogEntry>();
 
+  const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
   const tasks = new TaskService(tasksRepo);
   const communication = new CommunicationService(messages);
-  const crm = new CrmService(leads);
-  const marketing = new MarketingService(campaigns, leads);
+  const crm = new CrmService(leads, crmStages);
+  const marketing = new MarketingService(campaigns, leads, crmStages);
   const auditLog = new AuditLog(auditLogRepo);
 
   const opportunities = new InMemoryRepository<Opportunity>();
@@ -93,6 +96,7 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
     tasks,
     communication,
     crm,
+    crmStages,
     marketing,
     finance,
     sales,

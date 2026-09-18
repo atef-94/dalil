@@ -33,13 +33,8 @@ export async function renderAnalytics(container) {
 
     body.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, 'Sales funnel'),
-      el('div', { class: 'stat-grid' }, [
-        statCard(funnel.new, 'New'),
-        statCard(funnel.contacted, 'Contacted'),
-        statCard(funnel.qualified, 'Qualified'),
-        statCard(funnel.opportunity, 'Opportunity'),
-        statCard(funnel.lost, 'Lost'),
-      ]),
+      el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, `${funnel.totalLeads} total leads, across this company's configured CRM pipeline.`),
+      el('div', { class: 'stat-grid' }, funnel.stages.map((s) => statCard(s.count, s.stageName))),
     ]));
 
     body.appendChild(el('div', { class: 'card' }, [
@@ -57,11 +52,9 @@ export async function renderAnalytics(container) {
           'Cost per qualified lead',
         ),
       ]),
-      el('div', { class: 'stat-grid', style: 'margin-top:10px' }, [
-        statCard(`${conversionRates.newToContactedPercent}%`, 'New → Contacted'),
-        statCard(`${conversionRates.contactedToQualifiedPercent}%`, 'Contacted → Qualified'),
-        statCard(`${conversionRates.qualifiedToOpportunityPercent}%`, 'Qualified → Opportunity'),
-      ]),
+      el('div', { class: 'stat-grid', style: 'margin-top:10px' },
+        conversionRates.stageConversion.map((s) => statCard(`${s.conversionPercent}%`, `${s.fromStageName} → ${s.toStageName}`)),
+      ),
       el('h4', { style: 'margin-bottom:6px' }, 'Lost reasons'),
       table(
         [
@@ -125,7 +118,7 @@ export async function renderAnalytics(container) {
       table(
         [
           { label: 'Lead', render: (s) => s.leadId.slice(0, 8) + '…' },
-          { label: 'Score', render: (s) => s.score },
+          { label: 'Score', render: (s) => String(s.score) },
           { label: 'Why', render: (s) => s.factors.map((f) => `${f.label} (+${f.points})`).join(', ') || '—' },
         ],
         scores,

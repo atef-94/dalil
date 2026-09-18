@@ -44,7 +44,7 @@ export async function renderDashboard(container) {
         ]));
       }
       if (recentDecisions.length === 0) {
-        aiPanel.appendChild(el('p', { style: 'color:var(--text-muted);font-size:13px' }, 'No AI agent decisions yet — try "Ask AI" on a lead in Leads, or run one from AI Agents.'));
+        aiPanel.appendChild(el('p', { style: 'color:var(--text-muted);font-size:13px' }, 'No AI agent decisions yet — try "Ask AI" on a lead in the CRM, or run one from AI Agents.'));
       } else {
         for (const d of recentDecisions) {
           aiPanel.appendChild(el('div', { style: 'display:flex;align-items:baseline;gap:8px;padding:6px 0;border-top:1px solid var(--brand-100);font-size:13px' }, [

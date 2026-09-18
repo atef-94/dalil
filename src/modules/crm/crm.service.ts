@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { Lead, LeadStatus } from '../../domain/types.js';
+import type { Lead } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { ValidationError, ConflictError, NotFoundError } from '../../infra/errors.js';
 import type { ListScope } from '../permissions/rbac.evaluator.js';
 import { filterByListScope, type ScopeOwnerKeys } from '../permissions/scope-filter.js';
+import type { CrmStageService } from './crm-stage.service.js';
 
 export interface LeadCustomFields {
   propertyTypeWanted?: string;
@@ -25,6 +26,11 @@ export interface CreateLeadInput extends LeadCustomFields {
   email?: string;
   nationalId?: string;
   sourceId?: string;
+  /** Explicit initial stage — omit to land in the company's default
+   * (Fresh Leads) stage, which is the normal case. */
+  stageId?: string;
+  tags?: string[];
+  priority?: Lead['priority'];
   ownerEmployeeUserId?: string;
   requiredSkill?: string;
   firstContactSlaDueAt?: string;
@@ -66,10 +72,45 @@ function sanitizeCustomFields(input: LeadCustomFields): LeadCustomFields {
   return out;
 }
 
-const ORDER: LeadStatus[] = ['new', 'contacted', 'qualified', 'opportunity'];
+/** Legacy LeadStatus -> default-stage key. Used by the one-time lead
+ * migration below and by AutomationService's `update_lead_status` action
+ * (for any workflow/AiPolicy row created before stages existed that
+ * still sends `params.status` instead of `params.stageId`). */
+export const LEGACY_STATUS_TO_STAGE_KEY: Record<string, string> = {
+  new: 'fresh',
+  contacted: 'contacted',
+  qualified: 'qualified',
+  opportunity: 'won',
+  lost: 'lost',
+};
 
 export class CrmService {
-  constructor(private readonly leads: Repository<Lead>) {}
+  constructor(
+    private readonly leads: Repository<Lead>,
+    private readonly crmStages: CrmStageService,
+  ) {}
+
+  /** One-time, idempotent migration: any lead persisted before the
+   * CrmStage engine existed has a `status` but no `stageId` (the
+   * property is simply absent from its stored JSON, TypeScript's
+   * required-field guarantee only holding for code written after this
+   * change). Called from seed.ts on every boot; leads that already have
+   * a stageId are left untouched, so this is cheap and safe to re-run. */
+  async migrateLegacyStatuses(companyId: string): Promise<number> {
+    const stages = await this.crmStages.listStages(companyId, true);
+    const stageByKey = new Map(stages.map((s) => [s.key, s]));
+    const defaultStage = stages.find((s) => s.isDefault);
+    const legacy = await this.leads.findAll((l) => l.companyId === companyId && !l.stageId);
+    let migrated = 0;
+    for (const lead of legacy) {
+      const key = lead.status ? LEGACY_STATUS_TO_STAGE_KEY[lead.status] : undefined;
+      const stage = (key ? stageByKey.get(key) : undefined) ?? defaultStage;
+      if (!stage) continue; // no default stage configured yet — leave for the next boot's migration pass
+      await this.leads.save({ ...lead, stageId: stage.id });
+      migrated++;
+    }
+    return migrated;
+  }
 
   /** Matches on phone, email, OR national ID — any one shared field is
    * treated as the same real person, since a phone or email can be
@@ -95,6 +136,14 @@ export class CrmService {
       throw new ConflictError('a lead with this phone, email, or national ID already exists');
     }
 
+    let stageId = input.stageId;
+    if (stageId) {
+      const stage = await this.crmStages.getStage(stageId, input.companyId);
+      if (!stage.isActive) throw new ValidationError('cannot create a lead directly in an archived CRM stage');
+    } else {
+      stageId = (await this.crmStages.getDefaultStage(input.companyId)).id;
+    }
+
     const lead: Lead = {
       id: randomUUID(),
       companyId: input.companyId,
@@ -103,7 +152,9 @@ export class CrmService {
       email: input.email?.trim(),
       nationalId,
       sourceId: input.sourceId,
-      status: 'new',
+      stageId,
+      tags: input.tags?.map((t) => t.trim()).filter(Boolean),
+      priority: input.priority,
       ownerEmployeeUserId: input.ownerEmployeeUserId,
       // Captured once and never changed afterward — see
       // resolveCommissionOwner(), which uses this to keep commission
@@ -167,29 +218,30 @@ export class CrmService {
     return filterByListScope(all, scope, resolveKeys);
   }
 
-  async updateStatus(leadId: string, newStatus: LeadStatus, lostReason?: string): Promise<Lead> {
+  /** Moves a Lead to a different CRM stage — always the same one Lead
+   * row, never duplicated. Replaces the old fixed-enum updateStatus(): the
+   * configurable pipeline has real branches (e.g. Fresh -> Contacted ->
+   * Lost) that a forward-only order can't express, so the only preserved
+   * invariant is that moving into an isLost-flagged stage requires a
+   * reason, and once a lead sits in an isLost stage it can only be moved
+   * out again by an explicit call (never silently blocked, unlike the old
+   * hard lock — a rep who mis-marked a lead lost can fix it). */
+  async moveToStage(leadId: string, companyId: string, stageId: string, lostReason?: string): Promise<Lead> {
     const lead = await this.leads.findById(leadId);
-    if (!lead) throw new NotFoundError('lead not found');
+    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
 
-    if (lead.status === 'lost') {
-      throw new ConflictError('cannot change status of a lost lead');
+    const stage = await this.crmStages.getStage(stageId, companyId);
+    if (!stage.isActive) throw new ValidationError('cannot move a lead into an archived CRM stage');
+
+    if (stage.isLost && !lostReason?.trim()) {
+      throw new ValidationError('lostReason is required when moving a lead into a Lost-flagged stage');
     }
 
-    if (newStatus === 'lost') {
-      if (!lostReason?.trim()) {
-        throw new ValidationError('lostReason is required when marking a lead as lost');
-      }
-      const updated: Lead = { ...lead, status: 'lost', lostReason: lostReason.trim() };
-      return this.leads.save(updated);
-    }
-
-    const currentIndex = ORDER.indexOf(lead.status);
-    const nextIndex = ORDER.indexOf(newStatus);
-    if (nextIndex === -1 || nextIndex <= currentIndex) {
-      throw new ValidationError(`cannot transition lead from ${lead.status} to ${newStatus}`);
-    }
-
-    const updated: Lead = { ...lead, status: newStatus };
+    const updated: Lead = {
+      ...lead,
+      stageId: stage.id,
+      lostReason: stage.isLost ? lostReason!.trim() : lead.lostReason,
+    };
     return this.leads.save(updated);
   }
 
@@ -197,5 +249,15 @@ export class CrmService {
     const lead = await this.leads.findById(leadId);
     if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
     return this.leads.save({ ...lead, ownerEmployeeUserId });
+  }
+
+  async updateTagsAndPriority(leadId: string, companyId: string, patch: { tags?: string[]; priority?: Lead['priority'] }): Promise<Lead> {
+    const lead = await this.leads.findById(leadId);
+    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
+    return this.leads.save({
+      ...lead,
+      tags: patch.tags !== undefined ? patch.tags.map((t) => t.trim()).filter(Boolean) : lead.tags,
+      priority: patch.priority !== undefined ? patch.priority : lead.priority,
+    });
   }
 }

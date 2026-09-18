@@ -5,6 +5,7 @@ export const ACTIONS: ActionName[] = ['view', 'create', 'edit', 'delete', 'appro
 export const RESOURCES: ResourceName[] = [
   'employee',
   'lead',
+  'crm_stage',
   'opportunity',
   'unit',
   'payment_plan_template',

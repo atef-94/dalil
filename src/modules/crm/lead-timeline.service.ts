@@ -67,7 +67,9 @@ export class LeadTimelineService {
 
     const messages = await this.messages.findAll((m) => m.companyId === companyId && m.relatedResource === 'lead' && m.relatedResourceId === leadId);
     for (const m of messages) {
-      entries.push({ type: 'message', at: m.createdAt, summary: `Message: "${m.subject}"`, detail: { channel: m.channel, status: m.status } });
+      const bodyPreview = m.body.length > 140 ? `${m.body.slice(0, 140)}…` : m.body;
+      const channelLabel = m.channel && m.channel !== 'internal' ? ` (${m.channel})` : '';
+      entries.push({ type: 'message', at: m.createdAt, summary: `${m.subject}${channelLabel}: ${bodyPreview}`, detail: { channel: m.channel, status: m.status } });
     }
 
     const tasks = await this.tasks.findAll((t) => t.companyId === companyId && t.relatedResource === 'lead' && t.relatedResourceId === leadId);

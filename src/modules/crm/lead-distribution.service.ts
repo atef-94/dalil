@@ -2,6 +2,7 @@ import type { Employee, Lead, LeadDistributionMode, LeadDistributionPool, User }
 import type { Repository } from '../../infra/repository.js';
 import { ValidationError } from '../../infra/errors.js';
 import { CrmService } from './crm.service.js';
+import type { CrmStageService } from './crm-stage.service.js';
 
 export interface ConfigurePoolInput {
   companyId: string;
@@ -42,6 +43,7 @@ export class LeadDistributionService {
     private readonly employees: Repository<Employee>,
     private readonly leads: Repository<Lead>,
     private readonly crm: CrmService,
+    private readonly crmStages: CrmStageService,
   ) {}
 
   async configurePool(input: ConfigurePoolInput): Promise<LeadDistributionPool> {
@@ -135,9 +137,23 @@ export class LeadDistributionService {
    * SLA keeps cycling rather than being processed twice for the same
    * window or getting stuck forever. */
   async sweepSlaBreaches(now: Date = new Date()): Promise<SlaBreach[]> {
-    const dueLeads = await this.leads.findAll(
-      (l) => l.status === 'new' && !!l.firstContactSlaDueAt && Date.parse(l.firstContactSlaDueAt) < now.getTime(),
+    const overdueCandidates = await this.leads.findAll(
+      (l) => !!l.firstContactSlaDueAt && Date.parse(l.firstContactSlaDueAt) < now.getTime(),
     );
+
+    // A lead only breaches SLA while it's still sitting untouched in its
+    // company's default ("Fresh Leads") stage — once moved anywhere else,
+    // first contact has effectively happened. Default-stage id is looked
+    // up once per company, not once per lead.
+    const defaultStageIdByCompany = new Map<string, string | undefined>();
+    const dueLeads: Lead[] = [];
+    for (const lead of overdueCandidates) {
+      if (!defaultStageIdByCompany.has(lead.companyId)) {
+        const defaultStage = await this.crmStages.listStages(lead.companyId, true).then((stages) => stages.find((s) => s.isDefault));
+        defaultStageIdByCompany.set(lead.companyId, defaultStage?.id);
+      }
+      if (lead.stageId === defaultStageIdByCompany.get(lead.companyId)) dueLeads.push(lead);
+    }
 
     const breaches: SlaBreach[] = [];
     for (const lead of dueLeads) {

@@ -3,7 +3,7 @@ import { api } from '../api.js';
 
 const TRIGGER_TYPES = [{ value: 'event', label: 'Event' }, { value: 'scheduled', label: 'Scheduled' }, { value: 'webhook', label: 'Webhook' }];
 const EVENT_TYPES = [
-  'lead.created', 'lead.status_changed', 'opportunity.created', 'contract.signed', 'contract.cancelled',
+  'lead.created', 'lead.status_changed', 'lead.stage_changed', 'opportunity.created', 'contract.signed', 'contract.cancelled',
   'payment.recorded', 'payment.overdue_swept', 'maintenance_ticket.created', 'maintenance_ticket.status_changed',
   'leave_request.created', 'leave_request.decided', 'purchase_order.created', 'purchase_order.status_changed',
   'legal_document.status_changed', 'campaign.status_changed', 'broker_lead.submitted', 'employee.created',
@@ -45,7 +45,8 @@ const ACTION_PARAM_FIELDS = {
   ],
   update_lead_status: [
     { key: 'leadId', label: 'Lead id', placeholder: '{{lead.id}} or a literal id' },
-    { key: 'status', label: 'New status', placeholder: 'new / contacted / qualified / opportunity / lost' },
+    { key: 'stageId', label: 'Target CRM stage id', placeholder: 'see CRM → stage settings for each stage\'s id' },
+    { key: 'lostReason', label: 'Lost reason (required only when moving into a Lost-flagged stage)' },
   ],
   assign_lead_owner: [
     { key: 'leadId', label: 'Lead id' },

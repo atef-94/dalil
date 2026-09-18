@@ -7,7 +7,8 @@ import { renderLogin } from './pages/login.js';
 import { renderDashboard } from './pages/dashboard.js';
 import { renderEmployees } from './pages/employees.js';
 import { renderRoles } from './pages/roles.js';
-import { renderLeads } from './pages/leads.js';
+import { renderCrm } from './pages/crm.js';
+import { mountAiAssistant, clearAiContext } from './pages/ai-panel.js';
 import { renderCustomers } from './pages/customers.js';
 import { renderOpportunities } from './pages/opportunities.js';
 import { renderContracts } from './pages/contracts.js';
@@ -48,7 +49,7 @@ const NAV = [
     { path: '/dashboard', labelKey: 'nav_dashboard', render: renderDashboard, icon: 'dashboard', resource: null },
   ] },
   { section: 'section_sales', items: [
-    { path: '/leads', labelKey: 'nav_leads', render: renderLeads, icon: 'leads', resource: 'lead', action: 'view' },
+    { path: '/crm', labelKey: 'nav_crm', render: renderCrm, icon: 'leads', resource: 'lead', action: 'view' },
     { path: '/customers', labelKey: 'nav_customers', render: renderCustomers, icon: 'customers', resource: 'portal_access', action: 'view' },
     { path: '/opportunities', labelKey: 'nav_opportunities', render: renderOpportunities, icon: 'opportunities', resource: 'opportunity', action: 'view' },
     { path: '/contracts', labelKey: 'nav_contracts', render: renderContracts, icon: 'contracts', resource: 'contract', action: 'view' },
@@ -179,10 +180,15 @@ async function showApp() {
     return;
   }
 
+  // Mounted once, outside the router's content area, so it's visible on
+  // every route — not just the CRM workspace.
+  mountAiAssistant();
+
   flatNav().forEach((item) => registerRoute(item.path, item.render));
 
   async function onRouteChange(path) {
     closeSidebar();
+    if (path !== '/crm') clearAiContext(); // stale lead context shouldn't follow you to another page
     const match = flatNav().find((item) => item.path === path);
     Object.entries(navLinks).forEach(([p, a]) => a.classList.toggle('active', p === path));
     if (!match) {

@@ -8,13 +8,16 @@ async function freshApp() {
 
 test('full chain: Lead -> Opportunity -> Reserve Unit -> Sign Contract generates a payment schedule', async () => {
   const app = await freshApp();
-  const { crm, sales, inventory, paymentPlans } = app.services;
+  const { crm, crmStages, sales, inventory, paymentPlans } = app.services;
   const companyId = app.seedResult!.companyId;
   const agentUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Sales Agent')!.userId;
 
   const lead = await crm.createLead({ companyId, fullName: 'Client A', phone: '0555-0001', ownerEmployeeUserId: agentUserId });
-  await crm.updateStatus(lead.id, 'contacted');
-  await crm.updateStatus(lead.id, 'qualified');
+  const stages = await crmStages.listStages(companyId, true);
+  const contacted = stages.find((s) => s.key === 'contacted')!;
+  const qualified = stages.find((s) => s.key === 'qualified')!;
+  await crm.moveToStage(lead.id, companyId, contacted.id);
+  await crm.moveToStage(lead.id, companyId, qualified.id);
 
   const opportunity = await sales.createOpportunity({ companyId, leadId: lead.id, ownerEmployeeUserId: agentUserId });
   const unit = await inventory.createUnit({ companyId, projectId: 'proj-1', code: 'B-201', unitType: 'apartment', areaSqm: 150, listPrice: 1_500_000 });
