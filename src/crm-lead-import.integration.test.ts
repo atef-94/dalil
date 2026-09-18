@@ -197,6 +197,90 @@ test('a PDF whose layout cannot be reliably read as a table is rejected with a c
   });
 });
 
+test('a Sales Agent (create:lead at own scope) can use Lead Import exactly like the manual Add Lead button', async () => {
+  await withServer(async (base, app) => {
+    const agentUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Sales Agent')!.userId;
+    const headers = { 'x-demo-user': agentUserId };
+    const csv = Buffer.from('Full Name,Mobile\nAgent Imported Lead,0501231234\n');
+    const upload = await uploadFile(base, '/api/crm/leads/import/upload', 'leads.csv', 'text/csv', csv, headers);
+    assert.equal(upload.status, 200);
+    const uploadBody = upload.body as { sessionId: string; suggestedMapping: Record<string, string | null> };
+    await callJson(base, 'POST', `/api/crm/leads/import/${uploadBody.sessionId}/preview`, { mapping: uploadBody.suggestedMapping }, headers);
+    const confirm = await callJson(base, 'POST', `/api/crm/leads/import/${uploadBody.sessionId}/confirm`, {}, headers);
+    assert.equal(confirm.status, 200);
+    assert.equal((confirm.body as { succeeded: number }).succeeded, 1);
+  });
+});
+
+test('a role without create:lead (Finance) is blocked from Lead Import, same as the manual route', async () => {
+  await withServer(async (base, app) => {
+    const financeUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Finance')!.userId;
+    const headers = { 'x-demo-user': financeUserId };
+    const csv = Buffer.from('Full Name,Mobile\nBlocked Lead,0501112223\n');
+    const upload = await uploadFile(base, '/api/crm/leads/import/upload', 'leads.csv', 'text/csv', csv, headers);
+    assert.equal(upload.status, 403);
+  });
+});
+
+test('Automation Engine audit: a lead created via the import pipeline fires a real lead.created event that triggers a real workflow (no second engine, no fake event)', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'x-demo-user': ceoUserId };
+    const companyId = app.seedResult!.companyId;
+
+    await app.services.automation.createWorkflow({
+      companyId,
+      name: 'Follow-up on lead import',
+      createdByUserId: ceoUserId,
+      trigger: { type: 'event', eventType: 'lead.created' },
+      steps: [{ name: 'Create follow-up task', action: { type: 'create_task', params: { title: 'Follow up with imported lead' } } }],
+    });
+
+    const csv = Buffer.from('Full Name,Mobile\nAutomation Audit Lead,0501119999\n');
+    const upload = await uploadFile(base, '/api/crm/leads/import/upload', 'leads.csv', 'text/csv', csv, headers);
+    const uploadBody = upload.body as { sessionId: string; suggestedMapping: Record<string, string | null> };
+    await callJson(base, 'POST', `/api/crm/leads/import/${uploadBody.sessionId}/preview`, { mapping: uploadBody.suggestedMapping }, headers);
+    const confirm = await callJson(base, 'POST', `/api/crm/leads/import/${uploadBody.sessionId}/confirm`, {}, headers);
+    assert.equal((confirm.body as { succeeded: number }).succeeded, 1);
+
+    const runs = await app.repos.workflowRuns.findAll((r) => r.companyId === companyId);
+    const completedRun = runs.find((r) => r.status === 'completed');
+    assert.ok(completedRun, 'expected a completed workflow run triggered by the imported lead.created event');
+
+    const tasks = await app.repos.tasks.findAll((t) => t.companyId === companyId && t.title === 'Follow up with imported lead');
+    assert.equal(tasks.length, 1);
+  });
+});
+
+test('AI audit: the existing AI Execution Layer works against a lead created via the import pipeline, through the same endpoint the AI Assistant panel uses', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'x-demo-user': ceoUserId };
+    const companyId = app.seedResult!.companyId;
+
+    const csv = Buffer.from('Full Name,Mobile\nAI Audit Lead,0501118888\n');
+    const upload = await uploadFile(base, '/api/crm/leads/import/upload', 'leads.csv', 'text/csv', csv, headers);
+    const uploadBody = upload.body as { sessionId: string; suggestedMapping: Record<string, string | null> };
+    await callJson(base, 'POST', `/api/crm/leads/import/${uploadBody.sessionId}/preview`, { mapping: uploadBody.suggestedMapping }, headers);
+    const confirm = await callJson(base, 'POST', `/api/crm/leads/import/${uploadBody.sessionId}/confirm`, {}, headers);
+    const leadId = (confirm.body as { results: { leadId?: string }[] }).results.find((r) => r.leadId)!.leadId!;
+
+    // Same endpoint public/js/pages/ai-panel.js calls for "Ask AI" on a lead
+    // — no separate AI code path exists for imported leads.
+    const suggestion = await callJson(base, 'POST', `/api/crm/leads/${leadId}/suggest-next-action`, {}, headers);
+    assert.equal(suggestion.status, 201);
+    const request = suggestion.body as { subjectType: string; subjectId: string; companyId: string };
+    assert.equal(request.subjectId, leadId);
+    assert.equal(request.companyId, companyId);
+
+    // The same imported lead is also a valid subject for the general Sales
+    // agent's decide() pipeline (RBAC/policy/approval/audit all real, not
+    // re-implemented for imports).
+    const decision = await callJson(base, 'POST', '/api/ai/agents/sales/decide', { subjectId: leadId }, headers);
+    assert.equal(decision.status, 201);
+  });
+});
+
 test('Lead Import upload requires authentication', async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/api/crm/leads/import/upload`, { method: 'POST', body: new FormData() });

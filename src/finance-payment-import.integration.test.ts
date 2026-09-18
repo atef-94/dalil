@@ -166,6 +166,63 @@ test('full Payment Import HTTP flow: real .xlsx upload resolved by Project+Unit 
   });
 });
 
+test('the Finance role (edit:payment_schedule) can use Payment Import exactly like the manual Record Payment button', async () => {
+  await withServer(async (base, app) => {
+    const financeUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Finance')!.userId;
+    const headers = { 'x-demo-user': financeUserId };
+    const { lead, schedule } = await buildContractFixture(app);
+    const csv = Buffer.from(`Mobile,Installment Number,Amount Paid,Payment Method\n${lead.phone},${schedule[0]!.sequence},${schedule[0]!.amount},Cash\n`);
+    const upload = await uploadFile(base, '/api/finance/payments/import/upload', 'payments.csv', 'text/csv', csv, headers);
+    assert.equal(upload.status, 200);
+    const uploadBody = upload.body as { sessionId: string; suggestedMapping: Record<string, string | null> };
+    await callJson(base, 'POST', `/api/finance/payments/import/${uploadBody.sessionId}/preview`, { mapping: uploadBody.suggestedMapping }, headers);
+    const confirm = await callJson(base, 'POST', `/api/finance/payments/import/${uploadBody.sessionId}/confirm`, {}, headers);
+    assert.equal(confirm.status, 200);
+    assert.equal((confirm.body as { succeeded: number }).succeeded, 1);
+  });
+});
+
+test('a role without edit:payment_schedule (Sales Agent) is blocked from Payment Import, same as the manual route', async () => {
+  await withServer(async (base, app) => {
+    const agentUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Sales Agent')!.userId;
+    const headers = { 'x-demo-user': agentUserId };
+    const csv = Buffer.from('Mobile,Installment Number,Amount Paid,Payment Method\n0500000000,0,100,Cash\n');
+    const upload = await uploadFile(base, '/api/finance/payments/import/upload', 'payments.csv', 'text/csv', csv, headers);
+    assert.equal(upload.status, 403);
+  });
+});
+
+test('Automation Engine audit: a payment recorded via the import pipeline fires a real payment.recorded event that triggers a real workflow', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'x-demo-user': ceoUserId };
+    const companyId = app.seedResult!.companyId;
+    const { lead, schedule } = await buildContractFixture(app);
+
+    await app.services.automation.createWorkflow({
+      companyId,
+      name: 'Notify finance on import',
+      createdByUserId: ceoUserId,
+      trigger: { type: 'event', eventType: 'payment.recorded' },
+      steps: [{ name: 'Create follow-up task', action: { type: 'create_task', params: { title: 'Send receipt for imported payment' } } }],
+    });
+
+    const csv = Buffer.from(`Mobile,Installment Number,Amount Paid,Payment Method\n${lead.phone},${schedule[0]!.sequence},${schedule[0]!.amount},Cash\n`);
+    const upload = await uploadFile(base, '/api/finance/payments/import/upload', 'payments.csv', 'text/csv', csv, headers);
+    const uploadBody = upload.body as { sessionId: string; suggestedMapping: Record<string, string | null> };
+    await callJson(base, 'POST', `/api/finance/payments/import/${uploadBody.sessionId}/preview`, { mapping: uploadBody.suggestedMapping }, headers);
+    const confirm = await callJson(base, 'POST', `/api/finance/payments/import/${uploadBody.sessionId}/confirm`, {}, headers);
+    assert.equal((confirm.body as { succeeded: number }).succeeded, 1);
+
+    const runs = await app.repos.workflowRuns.findAll((r) => r.companyId === companyId);
+    const completedRun = runs.find((r) => r.status === 'completed');
+    assert.ok(completedRun, 'expected a completed workflow run triggered by the imported payment.recorded event');
+
+    const tasks = await app.repos.tasks.findAll((t) => t.companyId === companyId && t.title === 'Send receipt for imported payment');
+    assert.equal(tasks.length, 1);
+  });
+});
+
 test('Payment Import upload requires authentication', async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/api/finance/payments/import/upload`, { method: 'POST', body: new FormData() });
