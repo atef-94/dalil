@@ -185,7 +185,7 @@ async function seedUserWithGrants(
   h: ReturnType<typeof freshHarness>,
   companyId: string,
   userId: string,
-  grantList: { action: ActionName; resource: ResourceName }[],
+  grantList: { action: ActionName; resource: ResourceName; scope?: 'own' | 'department' | 'company' }[],
 ): Promise<void> {
   await h.users.save({
     id: userId,
@@ -201,7 +201,7 @@ async function seedUserWithGrants(
   await h.roles.save(role);
   await h.userRoles.save({ id: randomUUID(), userId, roleId: role.id });
   for (const g of grantList) {
-    await h.grants.save({ id: randomUUID(), roleId: role.id, action: g.action, resource: g.resource, scope: 'company', sensitivity: 'standard' });
+    await h.grants.save({ id: randomUUID(), roleId: role.id, action: g.action, resource: g.resource, scope: g.scope ?? 'company', sensitivity: 'standard' });
   }
 }
 
@@ -330,6 +330,78 @@ test('approving an AI action from a different company is rejected (cross-tenant)
     params: { title: 'x' },
   });
   await assert.rejects(() => h.ai.approveAction(request.approvalRequestId!, 'c2', 'approver-2'));
+});
+
+// ---- Regression: 'own'-scoped RBAC grants must actually work for AI actions ----
+// requestAction() must forward the real resource owner to
+// AutomationService.canPerformAction() — without it, an 'own'-scoped grant
+// (the realistic grant for an individual contributor, e.g. a Sales Agent
+// acting on their own lead) could never match, so the AI pipeline would
+// silently deny_permission for exactly the users it's meant to serve.
+
+test('an own-scoped grant permits an AI action when the real resource owner is supplied', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'create', resource: 'task', scope: 'own' }]);
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'agent-1',
+    actionType: 'create_task',
+    params: { title: 'Follow up' },
+    ownerUserId: 'agent-1',
+  });
+  assert.equal(request.status, 'pending_approval');
+});
+
+test('an own-scoped grant is not enough when no owner is supplied (sanity check for the bug this guards)', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'create', resource: 'task', scope: 'own' }]);
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'agent-1',
+    actionType: 'create_task',
+    params: { title: 'Follow up' },
+    // ownerUserId intentionally omitted
+  });
+  assert.equal(request.status, 'denied_permission');
+});
+
+test('an own-scoped grant does not permit acting on someone else\'s resource', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'create', resource: 'task', scope: 'own' }]);
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'agent-1',
+    actionType: 'create_task',
+    params: { title: 'Follow up' },
+    ownerUserId: 'someone-else',
+  });
+  assert.equal(request.status, 'denied_permission');
+});
+
+test('decide() threads the lead\'s real owner through so an own-scoped Sales Agent grant actually works end-to-end', async () => {
+  const h = freshHarness();
+  // Only an 'own'-scoped grant — the realistic real-world Sales Agent
+  // grant (see infra/seed.ts), not the broader 'company' scope every
+  // other test in this file uses.
+  await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'edit', resource: 'lead', scope: 'own' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Own-Scoped Client', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'agent-1' });
+
+  const decision = await h.ai.decide('sales', 'c1', lead.id, 'agent-1');
+
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'update_lead_status');
+  assert.equal(decision.resultActionStatus, 'pending_approval');
+});
+
+test('decide() does not let an own-scoped grant reach across to a lead owned by someone else', async () => {
+  const h = freshHarness();
+  await seedUserWithGrants(h, 'c1', 'agent-1', [{ action: 'edit', resource: 'lead', scope: 'own' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Other Owner Client', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'someone-else' });
+
+  const decision = await h.ai.decide('sales', 'c1', lead.id, 'agent-1');
+
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.resultActionStatus, 'denied_permission');
 });
 
 test('getActionRequest rejects a request belonging to a different company (cross-tenant)', async () => {

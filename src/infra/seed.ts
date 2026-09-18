@@ -238,6 +238,11 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesManagerRole.id, 'approve', 'approval', 'company');
   // Sales/portfolio forecasting and scenario simulation.
   await addGrant(salesManagerRole.id, 'view', 'forecast', 'company');
+  // The Leads page's "Ask AI" button (and the AI page itself) call
+  // create:ai_action/view:ai_action — without these, that button is shown
+  // to every sales manager but always 403s.
+  await addGrant(salesManagerRole.id, 'view', 'ai_action', 'department');
+  await addGrant(salesManagerRole.id, 'create', 'ai_action', 'department');
 
   // Sales Agent: own-scoped CRM/Sales, company-wide unit visibility (units
   // are not individually owned), can create/edit their own unit holds.
@@ -256,6 +261,10 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   // only lets them raise the request, not apply it unilaterally).
   await addGrant(salesAgentRole.id, 'edit', 'contract', 'own');
   await addGrant(salesAgentRole.id, 'view', 'sales_commission', 'own');
+  // Same "Ask AI" button fix as the sales manager above — an agent is the
+  // one actually clicking it on their own leads day to day.
+  await addGrant(salesAgentRole.id, 'view', 'ai_action', 'own');
+  await addGrant(salesAgentRole.id, 'create', 'ai_action', 'own');
 
   // Finance: company-wide financial visibility and payment recording.
   await addGrant(financeRole.id, 'view', 'payment_schedule', 'company');

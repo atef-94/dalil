@@ -65,6 +65,13 @@ interface AgentDecisionResult {
   confidence: number;
   reasoning: string;
   alternatives: AgentAlternative[];
+  /** The real owner of the subject this action is about (e.g. a lead's
+   * ownerEmployeeUserId), when the subject has one. Threaded through to
+   * requestAction()/canPerformAction() so an 'own'-scoped RBAC grant (the
+   * realistic case for an individual contributor acting on their own
+   * lead/ticket/etc.) can actually match — without it, only company- or
+   * department-wide grants could ever pass the permission check. */
+  ownerUserId?: string;
 }
 
 export interface AgentDefinition {
@@ -95,6 +102,11 @@ export interface RequestAiActionInput {
   actionType: AutomationActionType;
   params: Record<string, unknown>;
   reasoning?: string;
+  /** The real owner of the resource this action targets, when it has one
+   * (e.g. a lead's ownerEmployeeUserId). Passed through to
+   * AutomationService.canPerformAction() so 'own'-scoped RBAC grants can
+   * match; omitted when the subject has no natural single owner. */
+  ownerUserId?: string;
 }
 
 const APPROVAL_STEP_ID = 'ai-action';
@@ -196,7 +208,7 @@ export class AiAgentService {
   async requestAction(input: RequestAiActionInput): Promise<AiActionRequest> {
     if (!input.actionType) throw new ValidationError('actionType is required');
 
-    const permitted = await this.automation.canPerformAction(input.requestedByUserId, input.actionType, input.companyId);
+    const permitted = await this.automation.canPerformAction(input.requestedByUserId, input.actionType, input.companyId, input.ownerUserId);
     if (!permitted) {
       return this.persist(input, 'denied_permission');
     }
@@ -368,6 +380,7 @@ export class AiAgentService {
       actionType: result.chosenActionType,
       params: result.params ?? {},
       reasoning: result.reasoning,
+      ownerUserId: result.ownerUserId,
     });
     const decision = await this.persistDecision(agent, companyId, subjectId, requestedByUserId, 'proceeded', result, request.id, request.status);
     return decision;
@@ -517,6 +530,7 @@ export class AiAgentService {
             confidence: advanceConfidence,
             reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to reach out directly via ${channel}.`,
             alternatives,
+            ownerUserId: lead.ownerEmployeeUserId,
           };
         }
         alternatives.push({ actionType: 'create_task', confidence: 100 - advanceConfidence, reasoning: 'Fallback: a manual follow-up task instead of advancing automatically.' });
@@ -526,6 +540,7 @@ export class AiAgentService {
           confidence: advanceConfidence,
           reasoning: `Lead score ${score.score}/100 (${factorSummary}) — confident enough to mark contacted.`,
           alternatives,
+          ownerUserId: lead.ownerEmployeeUserId,
         };
       }
       alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark contacted directly, but the score is not yet strong enough.' });
@@ -535,6 +550,7 @@ export class AiAgentService {
         confidence: 100 - advanceConfidence,
         reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not confident enough to auto-advance; recommend manual follow-up.`,
         alternatives,
+        ownerUserId: lead.ownerEmployeeUserId,
       };
     }
 
@@ -549,6 +565,7 @@ export class AiAgentService {
         confidence: 15,
         reasoning: 'Lead is qualified — recommend a human review for opportunity conversion; no reliable automatic signal for this transition.',
         alternatives: [],
+        ownerUserId: lead.ownerEmployeeUserId,
       };
     }
 
@@ -562,6 +579,7 @@ export class AiAgentService {
         confidence: advanceConfidence,
         reasoning: `Lead score ${score.score}/100 (${factorSummary}) — strong engagement, ready to qualify.`,
         alternatives,
+        ownerUserId: lead.ownerEmployeeUserId,
       };
     }
     alternatives.push({ actionType: 'update_lead_status', confidence: advanceConfidence, reasoning: 'Could mark qualified directly, but engagement is not yet strong enough.' });
@@ -571,6 +589,7 @@ export class AiAgentService {
       confidence: 100 - advanceConfidence,
       reasoning: `Lead score ${score.score}/100 (${factorSummary}) — not yet strong enough to qualify automatically.`,
       alternatives,
+      ownerUserId: lead.ownerEmployeeUserId,
     };
   }
 

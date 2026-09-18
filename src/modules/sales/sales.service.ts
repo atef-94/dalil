@@ -145,6 +145,7 @@ export class SalesService {
         signedAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         totalPrice: input.totalPrice,
+        discountPercent: input.discountPercent,
       };
       await this.contracts.save(contract);
 
@@ -222,7 +223,7 @@ export class SalesService {
 
     await this.paymentPlans.rescaleUnpaidLines(input.contractId, input.companyId, newRemainingBalance);
 
-    const updated: Contract = { ...contract, totalPrice: input.newTotalPrice };
+    const updated: Contract = { ...contract, totalPrice: input.newTotalPrice, discountPercent: input.discountPercent };
     await this.contracts.save(updated);
     return updated;
   }

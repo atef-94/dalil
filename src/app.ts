@@ -55,6 +55,7 @@ import type {
   WorkflowRun,
   WorkflowStepRun,
 } from './domain/types.js';
+import { netContractValue } from './domain/money.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { InMemoryRepository, type Repository } from './infra/repository.js';
 import { SqliteRepository } from './infra/sqlite-repository.js';
@@ -504,8 +505,12 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // never undo or block a signed contract.
   const recordSalesCommissionsAndEmit = async (companyId: string, contract: Contract, actorUserId: string): Promise<void> => {
     if (contract.totalPrice === undefined) return;
+    // Commission is earned on what the company actually stands to collect,
+    // not the pre-discount list price — a discounted deal is a smaller
+    // deal. Without this, an agent would earn the same commission on a
+    // heavily discounted contract as on a full-price one.
     try {
-      const recorded = await salesCommissions.recordCommissionsForContract(companyId, contract.id, contract.creditedEmployeeUserId, contract.totalPrice);
+      const recorded = await salesCommissions.recordCommissionsForContract(companyId, contract.id, contract.creditedEmployeeUserId, netContractValue(contract.totalPrice, contract.discountPercent));
       for (const commission of recorded) {
         await emitEvent({
           companyId,
@@ -590,16 +595,46 @@ export async function buildApplication(options: AppOptions): Promise<Application
   };
 
   // ---- Auth ----
+  // Fixed real security gap found during audit: this route previously had
+  // no auth check at all — anyone, unauthenticated, could create a login
+  // account inside ANY company by companyId (including the well-known
+  // "company-demo"), for any userType. The resulting account held zero
+  // RBAC grants so couldn't read/write real data, but it still broke
+  // tenant isolation (an outsider could inject an account into a company
+  // they don't belong to) and let requests authenticate as a "real" user
+  // of that tenant. Now: requires an authenticated staff member with
+  // create:employee (the same permission that already gates provisioning
+  // an org-chart Employee), always registers into the ACTOR's own
+  // company (the companyId in the body is ignored, never trusted), and —
+  // filling a real completeness gap — is now the only way to actually
+  // provision a broker_user login for an approved BrokerCompany, since no
+  // route did that at all before (the broker-lead-submission flow was
+  // otherwise unreachable in practice).
   httpServer.post('/api/auth/register', async (ctx) => {
-    const body = parseJsonBody<{ companyId: string; email: string; password: string; userType: string; locale: 'en' | 'ar' }>(ctx.body);
-    if (!body.companyId?.trim()) throw new ValidationError('companyId is required');
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'employee'))) {
+      throw new ForbiddenError('missing create:employee permission');
+    }
+    const body = parseJsonBody<{ email: string; password: string; userType: string; locale?: 'en' | 'ar'; employeeId?: string; brokerCompanyId?: string; customerId?: string }>(ctx.body);
+    const userType = body.userType as User['userType'];
+    if (userType === 'broker_user') {
+      if (!body.brokerCompanyId) throw new ValidationError('brokerCompanyId is required for a broker_user account');
+      const brokerCompanies = await brokers.listBrokerCompanies(actor.companyId);
+      const brokerCompany = brokerCompanies.find((bc) => bc.id === body.brokerCompanyId);
+      if (!brokerCompany) throw new NotFoundError('broker company not found');
+      if (brokerCompany.status !== 'approved') throw new ForbiddenError('broker company must be approved before it can have login accounts');
+    }
     const user = await auth.register({
-      companyId: body.companyId,
+      companyId: actor.companyId,
       email: body.email,
       password: body.password,
-      userType: body.userType as User['userType'],
+      userType,
       locale: body.locale ?? 'en',
+      employeeId: body.employeeId,
+      brokerCompanyId: userType === 'broker_user' ? body.brokerCompanyId : undefined,
+      customerId: body.customerId,
     });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'employee', resourceId: user.id, metadata: { userType, accountCreation: true } });
     return { status: 201, body: { id: user.id, email: user.email, userType: user.userType } };
   });
 
@@ -1752,6 +1787,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ name: string }>(ctx.body);
     const brokerCompany = await brokers.registerBrokerCompany({ companyId: actor.companyId, name: body.name });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'broker_company', resourceId: brokerCompany.id });
     return { status: 201, body: brokerCompany };
   });
 
@@ -1793,6 +1829,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:broker_company permission');
     }
     const brokerCompany = await brokers.approveBrokerCompany(ctx.params.brokerCompanyId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'broker_company', resourceId: brokerCompany.id });
     return { status: 200, body: brokerCompany };
   });
 
@@ -1802,6 +1839,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:broker_company permission');
     }
     const brokerCompany = await brokers.suspendBrokerCompany(ctx.params.brokerCompanyId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'broker_company', resourceId: brokerCompany.id, metadata: { suspended: true } });
     return { status: 200, body: brokerCompany };
   });
 
@@ -1894,6 +1932,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ contractId: string; contractAmount: number }>(ctx.body);
     const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId, body.contractAmount);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'broker_company', resourceId: commission.id, metadata: { brokerCommission: true, brokerCompanyId: ctx.params.brokerCompanyId, contractId: body.contractId, amount: commission.amount } });
     return { status: 201, body: commission };
   });
 
@@ -1903,6 +1942,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:broker_company permission');
     }
     const commission = await brokers.approveCommission(ctx.params.commissionId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'broker_company', resourceId: commission.id, metadata: { brokerCommission: true, amount: commission.amount } });
     return { status: 200, body: commission };
   });
 

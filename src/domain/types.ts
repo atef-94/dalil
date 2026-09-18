@@ -358,13 +358,18 @@ export interface Contract {
   status: ContractStatus;
   signedAt?: string;
   createdAt: string;
-  /** The negotiated contract value, set once at signing (SalesService.signContract
-   * already receives this as input — this just persists it instead of
-   * discarding it). Optional only so pre-existing test fixtures built before
-   * this field existed keep type-checking; every contract signed through the
-   * real flow always has one. Used by the Sales Commission Engine and by
-   * Forecasting/Scenario Simulation. */
+  /** The negotiated contract value BEFORE discount, set once at signing
+   * (SalesService.signContract already receives this as input — this just
+   * persists it instead of discarding it). Optional only so pre-existing
+   * test fixtures built before this field existed keep type-checking;
+   * every contract signed through the real flow always has one. */
   totalPrice?: number;
+  /** Discount applied at signing (or the most recent amendment), 0-100.
+   * Needed alongside totalPrice to recover the actual net/collectible
+   * contract value (totalPrice * (1 - discountPercent/100)) — the figure
+   * the Sales Commission Engine and Forecasting must use, not the raw
+   * pre-discount totalPrice, since a discount reduces real deal value. */
+  discountPercent?: number;
 }
 
 // ---- Finance ----

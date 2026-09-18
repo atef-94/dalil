@@ -1,6 +1,7 @@
 import type { Contract, Payment, PaymentScheduleLine, Unit } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { ValidationError } from '../../infra/errors.js';
+import { netContractValue } from '../../domain/money.js';
 
 export interface MonthlyHistoryEntry {
   month: string; // 'YYYY-MM'
@@ -102,7 +103,10 @@ export class ForecastingService {
       return {
         month,
         bookingsCount: bookedContracts.length,
-        bookingsValue: round2(bookedContracts.reduce((sum, c) => sum + (c.totalPrice ?? 0), 0)),
+        // Net of discount — the real collectible deal value, matching what
+        // the payment schedule actually sums to, not the pre-discount
+        // list price.
+        bookingsValue: round2(bookedContracts.reduce((sum, c) => sum + netContractValue(c.totalPrice ?? 0, c.discountPercent), 0)),
         scheduledCollections: round2(scheduled),
         actualCollections: round2(actual),
       };
