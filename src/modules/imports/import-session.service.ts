@@ -112,6 +112,15 @@ export class ImportSessionService {
     return this.sessions.save(updated);
   }
 
+  /** Import History: every session this company has ever created, newest
+   * first, optionally filtered to one target type (lead/inventory_unit/
+   * payment) — the frontend renders this so an admin can see exactly what
+   * was imported, by whom, and its final outcome status. */
+  async listForCompany(companyId: string, targetType?: ImportSession['targetType']): Promise<ImportSession[]> {
+    const sessions = await this.sessions.findAll((s) => s.companyId === companyId && (!targetType || s.targetType === targetType));
+    return sessions.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  }
+
   /**
    * Re-keys every raw row from detected-file-column-names to
    * target-field-keys using the confirmed mapping (falling back to the

@@ -132,6 +132,46 @@ test('markContracted transitions a unit to contracted', async () => {
   assert.equal(refreshed!.status, 'contracted');
 });
 
+test('updateUnitDetails updates type/area/price on an available unit', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const updated = await svc.updateUnitDetails(unit.id, 'c1', { unitType: 'villa', areaSqm: 150, listPrice: 2000 });
+  assert.equal(updated.unitType, 'villa');
+  assert.equal(updated.areaSqm, 150);
+  assert.equal(updated.listPrice, 2000);
+  assert.equal(updated.status, 'available');
+});
+
+test('updateUnitDetails refuses to touch a reserved unit', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c1', { listPrice: 2000 }), /reserved/);
+  const stillOriginal = await svc.getUnit(unit.id);
+  assert.equal(stillOriginal!.listPrice, 1000);
+});
+
+test('updateUnitDetails refuses to touch a contracted (sold) unit', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  await svc.markContracted(unit.id);
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c1', { listPrice: 2000 }), /contracted/);
+});
+
+test('updateUnitDetails rejects a unit belonging to a different company (cross-tenant IDOR)', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c2', { listPrice: 2000 }));
+});
+
+test('updateUnitDetails rejects a non-positive areaSqm or listPrice', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c1', { areaSqm: -5 }));
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c1', { listPrice: 0 }));
+});
+
 test('markReservationConverted flips the reservation status', async () => {
   const svc = freshService();
   const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });

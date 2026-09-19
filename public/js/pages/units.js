@@ -1,11 +1,25 @@
 import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, loadingState, searchInput } from '../ui.js';
 import { api } from '../api.js';
+import { can } from '../state.js';
+import { openImportWizard } from '../import-wizard.js';
 
 export async function renderUnits(container) {
   clear(container);
   let offset = 0;
   let q = '';
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Inventory')));
+  const headerActions = el('div');
+  container.appendChild(el('div', { class: 'page-header' }, [el('h1', {}, 'Inventory'), headerActions]));
+  if (can('unit', 'create')) {
+    const importBtn = el('button', {}, 'Import Units');
+    importBtn.addEventListener('click', () => {
+      openImportWizard({
+        title: 'Import Units',
+        uploadPath: '/api/inventory/units/import/upload',
+        onImported: () => { load(); loadImportHistory(); },
+      });
+    });
+    headerActions.appendChild(importBtn);
+  }
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
@@ -115,6 +129,36 @@ export async function renderUnits(container) {
   const listSlot = el('div');
   container.appendChild(listSlot);
 
+  const importHistorySlot = el('div');
+  if (can('unit', 'view')) {
+    container.appendChild(el('div', { class: 'card' }, [
+      el('h3', { style: 'margin-top:0' }, 'Import History'),
+      el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, 'Every Inventory Import run for this company, newest first.'),
+      importHistorySlot,
+    ]));
+  }
+
+  async function loadImportHistory() {
+    if (!can('unit', 'view')) return;
+    clear(importHistorySlot);
+    try {
+      const sessions = await api.get('/api/imports/history', { targetType: 'inventory_unit' });
+      importHistorySlot.appendChild(table(
+        [
+          { label: 'File', key: 'fileName' },
+          { label: 'Type', render: (s) => s.fileType.toUpperCase() },
+          { label: 'Rows', render: (s) => String(s.rawRows.length) },
+          { label: 'Status', render: (s) => statusBadge(s.status) },
+          { label: 'Uploaded', render: (s) => new Date(s.createdAt).toLocaleString() },
+        ],
+        sessions,
+        { empty: 'No imports yet.' },
+      ));
+    } catch (err) {
+      importHistorySlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   async function hold(unit, btn) {
     try {
       await api.post(`/api/inventory/units/${unit.id}/hold`, {});
@@ -160,4 +204,5 @@ export async function renderUnits(container) {
   }
 
   await load();
+  await loadImportHistory();
 }

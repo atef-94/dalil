@@ -168,7 +168,7 @@ export function openImportWizard({ title, uploadPath, onImported }) {
         [
           { label: 'Row', render: (r) => String(r.row) },
           { label: 'Status', render: (r) => statusBadge(r.status) },
-          { label: 'Detail', render: (r) => r.reason || r.leadId || r.paymentId || '—' },
+          { label: 'Detail', render: (r) => r.reason || r.leadId || r.paymentId || r.unitId || '—' },
         ],
         result.results || [],
         { empty: 'Nothing to show.' },

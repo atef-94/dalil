@@ -109,6 +109,7 @@ import { ScenarioSimulationService } from './modules/forecasting/scenario-simula
 import { ImportSessionService } from './modules/imports/import-session.service.js';
 import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
 import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
+import { InventoryImportService, INVENTORY_IMPORT_FIELDS } from './modules/inventory/inventory-import.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
 import type { MultipartBody } from './infra/multipart.js';
 
@@ -162,6 +163,7 @@ export interface Application {
     importSessions: ImportSessionService;
     leadImport: LeadImportService;
     paymentImport: PaymentImportService;
+    inventoryImport: InventoryImportService;
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
@@ -336,6 +338,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
   const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
+  const inventoryImport = new InventoryImportService(inventory);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
@@ -1152,6 +1155,103 @@ export async function buildApplication(options: AppOptions): Promise<Application
       },
     );
     return { status: 200, body: result };
+  });
+
+  // ---- Inventory Import pipeline (staged: upload -> preview -> confirm) ----
+  // The richer alternative to the bulk-CSV route above, for real
+  // Excel/PDF exports with unpredictable headers. Every row still only
+  // ever writes through inventory.createUnit()/updateUnitDetails() — a
+  // sold/reserved/contracted unit is always shown as a protected conflict,
+  // never silently changed.
+
+  httpServer.post(
+    '/api/inventory/units/import/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+        throw new ForbiddenError('missing create:unit permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+
+      const session = await importSessions.createSession({
+        companyId: actor.companyId,
+        createdByUserId: actor.userId,
+        targetType: 'inventory_unit',
+        fileName: file.filename,
+        fileBuffer: file.data,
+        contentType: file.contentType,
+        fields: INVENTORY_IMPORT_FIELDS,
+      });
+      return {
+        status: 200,
+        body: {
+          sessionId: session.id,
+          fileName: session.fileName,
+          fileType: session.fileType,
+          detectedColumns: session.detectedColumns,
+          suggestedMapping: session.suggestedMapping,
+          sampleRows: session.rawRows.slice(0, 5),
+          totalRows: session.rawRows.length,
+          fields: INVENTORY_IMPORT_FIELDS,
+        },
+      };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.post('/api/inventory/units/import/:sessionId/preview', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ mapping: Record<string, string | null> }>(ctx.body);
+    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping);
+    const mappedRows = importSessions.mapRows(session);
+    const preview = await inventoryImport.buildPreview(actor.companyId, mappedRows);
+    return { status: 200, body: preview };
+  });
+
+  httpServer.post('/api/inventory/units/import/:sessionId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const session = await importSessions.getSession(ctx.params.sessionId!, actor.companyId);
+    if (!session.confirmedMapping) {
+      throw new ValidationError('this import session has not been mapped yet — call the preview step first');
+    }
+    const mappedRows = importSessions.mapRows(session);
+    const result = await inventoryImport.importRows(actor.companyId, mappedRows, async (unit, action) => {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: action === 'create' ? 'create' : 'edit',
+        resource: 'unit',
+        resourceId: unit.id,
+        metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+      });
+    });
+    await importSessions.markConfirmed(session.id, actor.companyId);
+    return { status: 200, body: result };
+  });
+
+  // Import History — lists past import sessions for this company across all
+  // targets (lead/inventory_unit/payment), newest first. Gated on view:unit
+  // since inventory is the primary consumer today; a company with no
+  // create:unit access sees an empty toolbar entry point instead (see
+  // frontend), never a 403 surprise on an otherwise-visible page.
+  httpServer.get('/api/imports/history', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'unit'))) {
+      throw new ForbiddenError('missing view:unit permission');
+    }
+    const targetTypeParam = ctx.query.get('targetType');
+    const validTargetTypes = ['lead', 'inventory_unit', 'payment'] as const;
+    const targetType = validTargetTypes.find((t) => t === targetTypeParam);
+    const sessions = await importSessions.listForCompany(actor.companyId, targetType);
+    return { status: 200, body: sessions };
   });
 
   httpServer.get('/api/inventory/units', async (ctx) => {
@@ -3491,7 +3591,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
-      importSessions, leadImport, paymentImport,
+      importSessions, leadImport, paymentImport, inventoryImport,
     },
     seedResult,
   };
