@@ -19,7 +19,7 @@ export async function renderDashboard(container) {
 
   grid.append(
     statCard({ label: 'Leads', value: leads, iconName: 'leads' }),
-    statCard({ label: 'Opportunities', value: opportunities, iconName: 'opportunities' }),
+    statCard({ label: 'Offers', value: opportunities, iconName: 'opportunities' }),
     statCard({ label: 'Units', value: units, iconName: 'units' }),
     statCard({ label: 'Employees', value: employees, iconName: 'employees' }),
   );

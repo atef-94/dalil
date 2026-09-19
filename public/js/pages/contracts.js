@@ -151,7 +151,7 @@ export async function renderContracts(container) {
           } },
         ],
         contractsPage.items,
-        { empty: 'No contracts yet — sign one from an Opportunity once a unit is reserved.', emptyIcon: 'contracts' },
+        { empty: 'No contracts yet — sign one from an Offer once a unit is reserved.', emptyIcon: 'contracts' },
       ));
       listSlot.appendChild(paginationControls(contractsPage, (next) => { offset = next; load(); }));
     } catch (err) {

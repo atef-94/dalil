@@ -79,7 +79,7 @@ export class LeadTimelineService {
 
     const opportunities = await this.opportunities.findAll((o) => o.companyId === companyId && o.leadId === leadId);
     for (const o of opportunities) {
-      entries.push({ type: 'opportunity_created', at: o.createdAt, summary: 'Opportunity created', detail: { opportunityId: o.id, stage: o.stage } });
+      entries.push({ type: 'opportunity_created', at: o.createdAt, summary: 'Offer created', detail: { opportunityId: o.id, stage: o.stage } });
     }
 
     // Contract.clientId holds the originating lead's id (see

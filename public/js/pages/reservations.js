@@ -53,7 +53,7 @@ export async function renderReservations(container) {
           } },
         ],
         reservationsPage.items,
-        { empty: 'No reservations yet — reserve a unit from an Opportunity or from Inventory.', emptyIcon: 'reservations' },
+        { empty: 'No reservations yet — reserve a unit from an Offer or from Inventory.', emptyIcon: 'reservations' },
       ));
       listSlot.appendChild(paginationControls(reservationsPage, (next) => { offset = next; load(); }));
     } catch (err) {

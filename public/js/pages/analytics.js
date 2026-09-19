@@ -69,7 +69,7 @@ export async function renderAnalytics(container) {
     body.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, 'Pipeline'),
       el('div', { class: 'stat-grid' }, [
-        statCard(pipeline.openOpportunities, 'Open opportunities'),
+        statCard(pipeline.openOpportunities, 'Open offers'),
         statCard(pipeline.reservedOpportunities, 'Reserved'),
         statCard(pipeline.wonOpportunities, 'Won'),
         statCard(pipeline.signedContracts, 'Signed contracts'),

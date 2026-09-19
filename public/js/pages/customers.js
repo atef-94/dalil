@@ -11,19 +11,19 @@ async function openCustomer360(customer) {
     clear(body);
 
     body.appendChild(el('div', { class: 'stat-grid' }, [
-      el('div', { class: 'stat-card' }, [el('div', {}, 'Opportunities'), el('h3', {}, String(profile.opportunities.length))]),
+      el('div', { class: 'stat-card' }, [el('div', {}, 'Offers'), el('h3', {}, String(profile.opportunities.length))]),
       el('div', { class: 'stat-card' }, [el('div', {}, 'Contracts'), el('h3', {}, String(profile.contracts.length))]),
       el('div', { class: 'stat-card' }, [el('div', {}, 'Open tasks'), el('h3', {}, String(profile.tasks.filter((t) => t.status === 'open').length))]),
     ]));
 
-    body.appendChild(el('h3', {}, 'Opportunities'));
+    body.appendChild(el('h3', {}, 'Offers'));
     body.appendChild(table(
       [
         { label: 'Stage', render: (o) => statusBadge(o.stage) },
         { label: 'Created', render: (o) => new Date(o.createdAt).toLocaleDateString() },
       ],
       profile.opportunities,
-      { empty: 'No opportunities yet.' },
+      { empty: 'No offers yet.' },
     ));
 
     body.appendChild(el('h3', {}, 'Contracts & payment schedules'));

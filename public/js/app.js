@@ -1,7 +1,7 @@
 import { el, clear, icon, errorBanner, emptyState, deniedState } from './ui.js';
 import { isAuthenticated, clearToken } from './api.js';
 import { loadSession, session, getLocale, setLocale, can } from './state.js';
-import { registerRoute, startRouter } from './router.js';
+import { registerRoute, startRouter, navigate } from './router.js';
 import { t } from './i18n.js';
 import { renderLogin } from './pages/login.js';
 import { renderDashboard } from './pages/dashboard.js';
@@ -52,7 +52,7 @@ const NAV = [
   { section: 'section_sales', items: [
     { path: '/crm', labelKey: 'nav_crm', render: renderCrm, icon: 'leads', resource: 'lead', action: 'view' },
     { path: '/customers', labelKey: 'nav_customers', render: renderCustomers, icon: 'customers', resource: 'portal_access', action: 'view' },
-    { path: '/opportunities', labelKey: 'nav_opportunities', render: renderOpportunities, icon: 'opportunities', resource: 'opportunity', action: 'view' },
+    { path: '/offers', labelKey: 'nav_offers', render: renderOpportunities, icon: 'opportunities', resource: 'opportunity', action: 'view' },
     { path: '/contracts', labelKey: 'nav_contracts', render: renderContracts, icon: 'contracts', resource: 'contract', action: 'view' },
     { path: '/reservations', labelKey: 'nav_reservations', render: renderReservations, icon: 'reservations', resource: 'unit', action: 'view' },
     { path: '/units', labelKey: 'nav_units', render: renderUnits, icon: 'units', resource: 'unit', action: 'view' },
@@ -188,7 +188,17 @@ async function showApp() {
 
   flatNav().forEach((item) => registerRoute(item.path, item.render));
 
+  // "Opportunities" was renamed to "Offers" (the module itself — RBAC
+  // resource, API routes, and data model — is unchanged; only the
+  // user-facing name moved). This keeps any old #/opportunities link or
+  // bookmark working instead of 404ing.
+  const LEGACY_PATH_REDIRECTS = { '/opportunities': '/offers' };
+
   async function onRouteChange(path) {
+    if (LEGACY_PATH_REDIRECTS[path]) {
+      navigate(LEGACY_PATH_REDIRECTS[path]);
+      return;
+    }
     closeSidebar();
     if (path !== '/crm') clearAiContext(); // stale lead context shouldn't follow you to another page
     const match = flatNav().find((item) => item.path === path);
