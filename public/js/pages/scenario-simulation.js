@@ -1,11 +1,14 @@
 import { el, clear, table, toast, errorBanner, loadingState, selectInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderScenarioSimulation(container) {
   clear(container);
+  const locale = getLocale();
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Scenario Simulation'),
+      el('h1', {}, t(locale, 'page_title_scenario_simulation')),
       el('p', { class: 'page-subtitle' }, 'A "what if" calculator — never saves anything. Reuses the exact same payment-plan engine that generates a real signed contract\'s schedule.'),
     ]),
   ]));

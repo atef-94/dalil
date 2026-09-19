@@ -1,4 +1,6 @@
 import { el, clear, table, toast, errorBanner, selectInput, confirmModal, loadingState } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export', 'assign', 'transfer', 'unmask'];
@@ -12,7 +14,8 @@ const resourceLabel = (r) => RESOURCE_LABELS[r] || r;
 
 export async function renderRoles(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Roles & Permissions')));
+  const locale = getLocale();
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_roles'))));
 
   const errorSlot = el('div');
   container.appendChild(errorSlot);

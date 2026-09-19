@@ -1,10 +1,12 @@
 import { el, clear, errorBanner, loadingState } from '../ui.js';
+import { t } from '../i18n.js';
 import { api } from '../api.js';
-import { session } from '../state.js';
+import { session, getLocale } from '../state.js';
 
 export async function renderSettings(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Settings')));
+  const locale = getLocale();
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_settings'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

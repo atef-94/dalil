@@ -1,14 +1,17 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 const PAGE_SIZE = 20;
 
 export async function renderWorkflowHistory(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Workflow Execution History'),
+      el('h1', {}, t(locale, 'page_title_workflow_history')),
       el('p', { class: 'page-subtitle' }, 'Every run across every workflow, most recent first. Open a workflow\'s own page in Automation for its builder.'),
     ]),
   ]));

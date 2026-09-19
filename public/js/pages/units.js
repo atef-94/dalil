@@ -1,14 +1,16 @@
 import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, loadingState, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
 import { api } from '../api.js';
-import { can } from '../state.js';
+import { can, getLocale } from '../state.js';
 import { openImportWizard } from '../import-wizard.js';
 
 export async function renderUnits(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   let q = '';
   const headerActions = el('div');
-  container.appendChild(el('div', { class: 'page-header' }, [el('h1', {}, 'Inventory'), headerActions]));
+  container.appendChild(el('div', { class: 'page-header' }, [el('h1', {}, t(locale, 'page_title_units')), headerActions]));
   if (can('unit', 'create')) {
     const importBtn = el('button', {}, 'Import Units');
     importBtn.addEventListener('click', () => {

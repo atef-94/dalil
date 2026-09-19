@@ -1,12 +1,12 @@
 import { el, clear, errorBanner } from '../ui.js';
 import { api, setToken, saveCompanyId, getSavedCompanyId } from '../api.js';
 import { t } from '../i18n.js';
-import { getLocale } from '../state.js';
+import { getLocale, setLocale } from '../state.js';
 
-export function renderLogin(container, { onSuccess }) {
+export function renderLogin(container, { onSuccess }, initialMode = 'login') {
   clear(container);
-  const locale = getLocale();
-  let mode = 'login';
+  let locale = getLocale();
+  let mode = initialMode;
 
   const errorSlot = el('div');
 
@@ -16,27 +16,34 @@ export function renderLogin(container, { onSuccess }) {
   const companyName = el('input', { type: 'text', placeholder: 'Acme Real Estate' });
   const fullName = el('input', { type: 'text', placeholder: 'Your full name' });
 
+  const companyIdLabel = el('label', {}, t(locale, 'field_company_id'));
+  const emailLabel1 = el('label', {}, t(locale, 'field_email'));
+  const passwordLabel1 = el('label', {}, t(locale, 'field_password'));
   const loginFields = el('div', {}, [
-    el('label', {}, 'Company ID'),
+    companyIdLabel,
     companyId,
-    el('label', {}, 'Email'),
+    emailLabel1,
     email,
-    el('label', {}, 'Password'),
+    passwordLabel1,
     password,
   ]);
 
   const signupEmail = el('input', { type: 'email', placeholder: 'you@company.com' });
   const signupPassword = el('input', { type: 'password', placeholder: 'At least 8 characters' });
+  const orgNameLabel = el('label', {}, t(locale, 'field_org_name'));
+  const fullNameLabel = el('label', {}, t(locale, 'field_full_name'));
+  const emailLabel2 = el('label', {}, t(locale, 'field_email'));
+  const passwordLabel2 = el('label', {}, t(locale, 'field_password'));
   const signupFields = el('div', {}, [
-    el('label', {}, 'Organization name'), companyName,
-    el('label', {}, 'Your full name'), fullName,
-    el('label', {}, 'Email'), signupEmail,
-    el('label', {}, 'Password'), signupPassword,
+    orgNameLabel, companyName,
+    fullNameLabel, fullName,
+    emailLabel2, signupEmail,
+    passwordLabel2, signupPassword,
   ]);
 
-  const submitBtn = el('button', { id: 'auth-submit', class: 'primary', style: 'width:100%;margin-top:16px' }, t(locale, 'submit_login'));
+  const submitBtn = el('button', { id: 'auth-submit', class: 'primary', style: 'width:100%;margin-top:16px' }, t(locale, mode === 'login' ? 'submit_login' : 'submit_signup'));
 
-  const body = el('div', {}, [loginFields]);
+  const body = el('div', {}, [mode === 'login' ? loginFields : signupFields]);
 
   async function submit() {
     clear(errorSlot);
@@ -63,7 +70,7 @@ export function renderLogin(container, { onSuccess }) {
       }
       onSuccess();
     } catch (err) {
-      errorSlot.appendChild(errorBanner(err.message || 'Something went wrong.'));
+      errorSlot.appendChild(errorBanner(err.message || t(locale, 'generic_error')));
     } finally {
       submitBtn.disabled = false;
     }
@@ -76,10 +83,10 @@ export function renderLogin(container, { onSuccess }) {
     });
   });
 
-  const tabLogin = el('button', { id: 'auth-tab-login', class: 'active' }, t(locale, 'tab_login'));
-  const tabSignup = el('button', { id: 'auth-tab-signup' }, t(locale, 'tab_signup'));
-  const title = el('h1', {}, t(locale, 'login_title'));
-  const subtitle = el('p', { class: 'subtitle' }, t(locale, 'login_subtitle'));
+  const tabLogin = el('button', { id: 'auth-tab-login', class: mode === 'login' ? 'active' : '' }, t(locale, 'tab_login'));
+  const tabSignup = el('button', { id: 'auth-tab-signup', class: mode === 'signup' ? 'active' : '' }, t(locale, 'tab_signup'));
+  const title = el('h1', {}, t(locale, mode === 'login' ? 'login_title' : 'signup_title'));
+  const subtitle = el('p', { class: 'subtitle' }, t(locale, mode === 'login' ? 'login_subtitle' : 'signup_subtitle'));
 
   function setMode(next) {
     mode = next;
@@ -103,7 +110,20 @@ export function renderLogin(container, { onSuccess }) {
   tabLogin.addEventListener('click', () => setMode('login'));
   tabSignup.addEventListener('click', () => setMode('signup'));
 
+  // The main app-shell locale toggle only exists once signed in — this lets
+  // a user pick Arabic/English before they even have an account or session.
+  const localeToggle = el('select', { id: 'locale-toggle-auth', style: 'width:auto;margin-bottom:14px' }, [
+    el('option', { value: 'en' }, 'English'),
+    el('option', { value: 'ar' }, 'العربية'),
+  ]);
+  localeToggle.value = locale;
+  localeToggle.addEventListener('change', () => {
+    setLocale(localeToggle.value);
+    renderLogin(container, { onSuccess }, mode);
+  });
+
   const card = el('div', { class: 'auth-card' }, [
+    localeToggle,
     title,
     subtitle,
     el('div', { class: 'auth-tabs' }, [tabLogin, tabSignup]),
@@ -112,4 +132,6 @@ export function renderLogin(container, { onSuccess }) {
     submitBtn,
   ]);
   container.appendChild(el('div', { class: 'auth-page' }, card));
+  document.documentElement.lang = locale;
+  document.documentElement.dir = locale === 'ar' ? 'rtl' : 'ltr';
 }

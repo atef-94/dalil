@@ -1,6 +1,7 @@
 import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState } from '../ui.js';
 import { api } from '../api.js';
-import { can } from '../state.js';
+import { can, getLocale } from '../state.js';
+import { t } from '../i18n.js';
 import { setAiContext, clearAiContext } from './ai-panel.js';
 import { openImportWizard } from '../import-wizard.js';
 import { renderCustomers } from './customers.js';
@@ -24,15 +25,17 @@ import { renderCommunication } from './communication.js';
  * breakdown — building distinct tabs for those would just duplicate what's
  * already here under another name.
  */
-const REUSED_MODULE_TABS = [
-  { key: 'module:customers', label: 'Customers', resource: 'portal_access', render: renderCustomers },
-  { key: 'module:offers', label: 'Offers', resource: 'opportunity', render: renderOpportunities },
-  { key: 'module:payment-plans', label: 'Payment Plans', resource: 'payment_plan_template', render: renderTemplates },
-  { key: 'module:quotations', label: 'Quotations', resource: 'quotation', render: renderQuotations },
-  { key: 'module:reservations', label: 'Reservations', resource: 'unit', render: renderReservations },
-  { key: 'module:contracts', label: 'Contracts', resource: 'contract', render: renderContracts },
-  { key: 'module:communications', label: 'Communications', resource: 'message', render: renderCommunication },
-];
+function reusedModuleTabs(locale) {
+  return [
+    { key: 'module:customers', label: t(locale, 'nav_customers'), resource: 'portal_access', render: renderCustomers },
+    { key: 'module:offers', label: t(locale, 'nav_offers'), resource: 'opportunity', render: renderOpportunities },
+    { key: 'module:payment-plans', label: t(locale, 'nav_templates'), resource: 'payment_plan_template', render: renderTemplates },
+    { key: 'module:quotations', label: t(locale, 'nav_quotations'), resource: 'quotation', render: renderQuotations },
+    { key: 'module:reservations', label: t(locale, 'nav_reservations'), resource: 'unit', render: renderReservations },
+    { key: 'module:contracts', label: t(locale, 'nav_contracts'), resource: 'contract', render: renderContracts },
+    { key: 'module:communications', label: t(locale, 'nav_communication'), resource: 'message', render: renderCommunication },
+  ];
+}
 
 const TIMELINE_ICONS = {
   lead_created: '✦', status_changed: '↳', owner_changed: '⇄', message: '✉',
@@ -49,6 +52,7 @@ const PRIORITY_OPTIONS = [
 
 export async function renderCrm(container) {
   clear(container);
+  const locale = getLocale();
 
   let stages = [];        // active stages, ordered
   let activeTab = 'dashboard';
@@ -57,8 +61,8 @@ export async function renderCrm(container) {
 
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'CRM'),
-      el('p', { class: 'page-subtitle' }, 'One Lead record moves through these stages — it is never duplicated. Stages are fully configurable from "+ Add CRM Section" below.'),
+      el('h1', {}, t(locale, 'crm_title')),
+      el('p', { class: 'page-subtitle' }, t(locale, 'crm_subtitle')),
     ]),
   ]));
   const errorSlot = el('div');
@@ -85,14 +89,14 @@ export async function renderCrm(container) {
   function renderToolbar() {
     clear(toolbarSlot);
     if (can('lead', 'create')) {
-      const addLeadBtn = el('button', { class: 'primary' }, '+ Add New Lead');
+      const addLeadBtn = el('button', { class: 'primary' }, t(locale, 'crm_add_lead'));
       addLeadBtn.addEventListener('click', openAddLeadModal);
       toolbarSlot.appendChild(addLeadBtn);
 
-      const importBtn = el('button', {}, 'Import Leads');
+      const importBtn = el('button', {}, t(locale, 'crm_import_leads'));
       importBtn.addEventListener('click', () => {
         openImportWizard({
-          title: 'Import Leads',
+          title: t(locale, 'crm_import_leads'),
           uploadPath: '/api/crm/leads/import/upload',
           onImported: () => { renderBody(); },
         });
@@ -100,7 +104,7 @@ export async function renderCrm(container) {
       toolbarSlot.appendChild(importBtn);
     }
     if (can('crm_stage', 'create')) {
-      const addStageBtn = el('button', {}, '+ Add CRM Section');
+      const addStageBtn = el('button', {}, t(locale, 'crm_add_stage'));
       addStageBtn.addEventListener('click', openAddStageModal);
       toolbarSlot.appendChild(addStageBtn);
     }
@@ -111,16 +115,16 @@ export async function renderCrm(container) {
   // everything else in moduleTabs reuses a page that already existed as
   // its own top-level route.
   const moduleTabs = [
-    ...REUSED_MODULE_TABS,
-    { key: 'module:followups', label: 'Follow-ups', resource: 'lead', render: renderFollowUps },
-    { key: 'module:tasks', label: 'Tasks', resource: 'task', render: renderTasksTab },
+    ...reusedModuleTabs(locale),
+    { key: 'module:followups', label: t(locale, 'nav_followups'), resource: 'lead', render: renderFollowUps },
+    { key: 'module:tasks', label: t(locale, 'nav_tasks'), resource: 'task', render: renderTasksTab },
   ].filter((m) => can(m.resource, 'view'));
 
   function renderTabsBar() {
     clear(tabsSlot);
     const items = [
-      { key: 'dashboard', label: 'CRM Dashboard' },
-      ...stages.map((s) => ({ key: s.id, label: s.isDefault ? `${s.name} (Fresh)` : s.name })),
+      { key: 'dashboard', label: t(locale, 'crm_tab_dashboard') },
+      ...stages.map((s) => ({ key: s.id, label: s.isDefault ? `${s.name} (${t(locale, 'crm_fresh_suffix')})` : s.name })),
       ...moduleTabs.map((m) => ({ key: m.key, label: m.label })),
     ];
     tabsSlot.appendChild(tabs(items, activeTab, (key) => {
@@ -181,25 +185,25 @@ export async function renderCrm(container) {
 
     clear(bodySlot);
     bodySlot.appendChild(el('div', { class: 'card' }, [
-      el('h3', { style: 'margin-top:0' }, 'Pipeline — real-time'),
+      el('h3', { style: 'margin-top:0' }, t(locale, 'crm_pipeline_realtime')),
       el('div', { class: 'stat-grid' }, funnel.stages.map((s) => statCard({ label: s.stageName, value: s.count }))),
     ]));
     bodySlot.appendChild(el('div', { class: 'card' }, [
-      el('h3', { style: 'margin-top:0' }, 'Today & follow-ups'),
+      el('h3', { style: 'margin-top:0' }, t(locale, 'crm_today_followups')),
       el('div', { class: 'stat-grid' }, [
-        statCard({ label: 'New today', value: newToday }),
-        statCard({ label: 'Follow-ups due today', value: followUpsToday }),
-        statCard({ label: 'Follow-ups overdue', value: followUpsOverdue }),
-        statCard({ label: 'Total leads', value: funnel.totalLeads }),
+        statCard({ label: t(locale, 'crm_new_today'), value: newToday }),
+        statCard({ label: t(locale, 'crm_followups_due_today'), value: followUpsToday }),
+        statCard({ label: t(locale, 'crm_followups_overdue'), value: followUpsOverdue }),
+        statCard({ label: t(locale, 'crm_total_leads'), value: funnel.totalLeads }),
       ]),
     ]));
     bodySlot.appendChild(el('div', { class: 'card' }, [
-      el('h3', { style: 'margin-top:0' }, 'Conversion'),
+      el('h3', { style: 'margin-top:0' }, t(locale, 'crm_conversion')),
       el('div', { class: 'stat-grid' }, [
-        statCard({ label: 'Overall win rate', value: `${conversion.overallWinRatePercent}%` }),
-        statCard({ label: 'Lost rate', value: `${conversion.lostRatePercent}%` }),
-        statCard({ label: 'Avg. speed to first contact', value: speed.averageHours !== null ? `${speed.averageHours}h` : '—' }),
-        statCard({ label: 'Cost per qualified lead', value: costPerLead.costPerQualifiedLead !== null ? Number(costPerLead.costPerQualifiedLead).toLocaleString() : '—' }),
+        statCard({ label: t(locale, 'crm_overall_win_rate'), value: `${conversion.overallWinRatePercent}%` }),
+        statCard({ label: t(locale, 'crm_lost_rate'), value: `${conversion.lostRatePercent}%` }),
+        statCard({ label: t(locale, 'crm_avg_speed'), value: speed.averageHours !== null ? `${speed.averageHours}h` : '—' }),
+        statCard({ label: t(locale, 'crm_cost_per_qualified_lead'), value: costPerLead.costPerQualifiedLead !== null ? Number(costPerLead.costPerQualifiedLead).toLocaleString() : '—' }),
       ]),
       conversion.stageConversion.length > 0 ? el('div', { class: 'stat-grid', style: 'margin-top:10px' },
         conversion.stageConversion.map((s) => statCard({ label: `${s.fromStageName} → ${s.toStageName}`, value: `${s.conversionPercent}%` })),
@@ -211,7 +215,7 @@ export async function renderCrm(container) {
 
   async function renderStageList(stageId) {
     const stage = stages.find((s) => s.id === stageId);
-    const search = searchInput('Search by name, phone, or email…', (value) => { q = value; offset = 0; loadList(); });
+    const search = searchInput(t(locale, 'crm_search_leads_placeholder'), (value) => { q = value; offset = 0; loadList(); });
     const listSlot = el('div');
     clear(bodySlot);
     bodySlot.appendChild(el('div', { class: 'form-row', style: 'max-width:320px;margin-bottom:10px' }, [search]));
@@ -226,14 +230,14 @@ export async function renderCrm(container) {
         listSlot.append(
           table(
             [
-              { label: 'Name', key: 'fullName' },
-              { label: 'Phone', key: 'phone' },
-              { label: 'Priority', render: (l) => (l.priority ? badge(l.priority, l.priority === 'urgent' || l.priority === 'high' ? 'red' : '') : '—') },
-              { label: 'Owner', render: (l) => (l.ownerEmployeeUserId ? l.ownerEmployeeUserId.slice(0, 8) + '…' : '—') },
+              { label: t(locale, 'crm_col_name'), key: 'fullName' },
+              { label: t(locale, 'crm_col_phone'), key: 'phone' },
+              { label: t(locale, 'crm_col_priority'), render: (l) => (l.priority ? badge(l.priority, l.priority === 'urgent' || l.priority === 'high' ? 'red' : '') : '—') },
+              { label: t(locale, 'crm_col_owner'), render: (l) => (l.ownerEmployeeUserId ? l.ownerEmployeeUserId.slice(0, 8) + '…' : '—') },
               { label: '', render: (l) => rowActions(l, loadList) },
             ],
             page.items,
-            { empty: stage?.isDefault ? 'No fresh leads yet — add one above.' : `No leads in "${stage?.name}" yet.` },
+            { empty: stage?.isDefault ? t(locale, 'crm_no_fresh_leads') : `${t(locale, 'crm_no_leads_in_stage')} "${stage?.name}"` },
           ),
           paginationControls(page, (next) => { offset = next; loadList(); }),
         );
@@ -249,15 +253,15 @@ export async function renderCrm(container) {
   function rowActions(lead, reload) {
     const actions = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' });
 
-    const detailBtn = el('button', {}, 'Open');
+    const detailBtn = el('button', {}, t(locale, 'crm_action_open'));
     detailBtn.addEventListener('click', () => openLeadDetail(lead, reload));
     actions.appendChild(detailBtn);
 
-    const moveBtn = el('button', {}, 'Move stage');
+    const moveBtn = el('button', {}, t(locale, 'crm_action_move_stage'));
     moveBtn.addEventListener('click', () => openMoveStageModal(lead, reload));
     actions.appendChild(moveBtn);
 
-    const aiBtn = el('button', {}, 'Ask AI');
+    const aiBtn = el('button', {}, t(locale, 'crm_action_ask_ai'));
     aiBtn.addEventListener('click', () => askAi(lead, reload));
     actions.appendChild(aiBtn);
 

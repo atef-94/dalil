@@ -1,10 +1,13 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderIntegrations(container) {
   clear(container);
+  const locale = getLocale();
   let eventsOffset = 0;
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Integrations')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_integrations'))));
   container.appendChild(el('p', { class: 'muted' },
     'Connect external providers with securely encrypted credentials. Every send is rate-limited, retried on failure, and logged below — nothing is silent.'));
   const errorSlot = el('div');

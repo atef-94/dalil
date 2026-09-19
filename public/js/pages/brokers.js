@@ -1,12 +1,15 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal, selectInput, paginationControls, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderBrokers(container) {
   clear(container);
+  const locale = getLocale();
   let leadsOffset = 0;
   let leadsQuery = '';
   let commissionsOffset = 0;
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Brokers')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_brokers'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

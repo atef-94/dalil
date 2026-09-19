@@ -1,4 +1,6 @@
 import { el, clear, table, errorBanner, loadingState } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 function statCard(value, label) {
@@ -7,7 +9,8 @@ function statCard(value, label) {
 
 export async function renderAnalytics(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Analytics')));
+  const locale = getLocale();
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_analytics'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

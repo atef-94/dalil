@@ -1,4 +1,6 @@
 import { el, clear, table, toast, errorBanner, statusBadge, selectInput, formModal, loadingState, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 // Tracks reservationId + unit price per opportunity for this browser session,
@@ -9,8 +11,9 @@ const sessionReservations = new Map();
 
 export async function renderOpportunities(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Offers')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_offers'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

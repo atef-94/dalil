@@ -1,4 +1,6 @@
 import { el, clear, table, toast, errorBanner, loadingState, badge, tabs, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 // Workflow-step approvals and AI-action approvals are both ApprovalRequest
@@ -11,9 +13,10 @@ const AI_STEP_ID = 'ai-action';
 
 export async function renderApprovals(container) {
   clear(container);
+  const locale = getLocale();
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Approvals'),
+      el('h1', {}, t(locale, 'page_title_approvals')),
       el('p', { class: 'page-subtitle' }, 'Every workflow step, AI action, and gated business action currently waiting on a human decision, in one inbox.'),
     ]),
   ]));

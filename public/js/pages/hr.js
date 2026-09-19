@@ -1,10 +1,13 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderHr(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'HR — Leave Requests')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_hr'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

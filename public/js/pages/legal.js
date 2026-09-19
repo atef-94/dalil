@@ -1,11 +1,14 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderLegal(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   let q = '';
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Legal — Contract Documents')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_legal'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

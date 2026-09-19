@@ -1,12 +1,15 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls, confirmModal, formModal } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderSalesCommissions(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Sales Commissions'),
+      el('h1', {}, t(locale, 'page_title_sales_commissions')),
       el('p', { class: 'page-subtitle' }, 'Base and manager-override commission lines, recorded automatically when a contract is signed.'),
     ]),
   ]));

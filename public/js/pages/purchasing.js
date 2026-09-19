@@ -1,12 +1,15 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderPurchasing(container) {
   clear(container);
+  const locale = getLocale();
   let vendorsOffset = 0;
   let vendorsQuery = '';
   let ordersOffset = 0;
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Purchasing')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_purchasing'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

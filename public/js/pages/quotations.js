@@ -1,6 +1,7 @@
 import { el, clear, table, toast, errorBanner, statusBadge, selectInput, loadingState, formModal } from '../ui.js';
+import { t } from '../i18n.js';
 import { api } from '../api.js';
-import { can } from '../state.js';
+import { can, getLocale } from '../state.js';
 
 /**
  * The live preview and the "Generate" persist call both go through
@@ -12,7 +13,8 @@ import { can } from '../state.js';
  */
 export async function renderQuotations(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Quotations')));
+  const locale = getLocale();
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_quotations'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

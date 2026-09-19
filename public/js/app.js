@@ -212,7 +212,7 @@ async function showApp() {
     Object.entries(navLinks).forEach(([p, a]) => a.classList.toggle('active', p === path));
     if (!match) {
       clear(content);
-      content.appendChild(emptyState({ icon: 'search', title: 'Page not found' }));
+      content.appendChild(emptyState({ icon: 'search', title: t(locale, 'common_page_not_found') }));
       return;
     }
     topbarTitle.textContent = t(locale, match.labelKey);

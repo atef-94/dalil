@@ -1,12 +1,15 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal, formModal, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderContracts(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Contracts'),
+      el('h1', {}, t(locale, 'page_title_contracts')),
       el('p', { class: 'page-subtitle' }, 'Every signed, draft, or cancelled contract across Sales — cancel a signed contract or open its payment schedule.'),
     ]),
   ]));

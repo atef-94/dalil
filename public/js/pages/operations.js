@@ -1,13 +1,16 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, formModal, paginationControls, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 const NEXT_STATUS = { open: 'in_progress', in_progress: 'resolved', resolved: 'closed' };
 
 export async function renderOperations(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   let q = '';
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Operations — Maintenance')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_operations'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

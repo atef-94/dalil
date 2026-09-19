@@ -1,4 +1,6 @@
 import { el, clear, table, errorBanner, loadingState, badge, statusBadge, paginationControls, searchInput, contentModal } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 async function openCustomer360(customer) {
@@ -91,11 +93,12 @@ async function openCustomer360(customer) {
 
 export async function renderCustomers(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   let q = '';
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Customers'),
+      el('h1', {}, t(locale, 'page_title_customers')),
       el('p', { class: 'page-subtitle' }, 'Every lead that has been granted Customer Portal access. Grant access from a lead\'s detail on the Leads page.'),
     ]),
   ]));

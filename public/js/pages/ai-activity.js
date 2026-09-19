@@ -1,13 +1,16 @@
 import { el, clear, table, errorBanner, statusBadge, loadingState, statCard, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderAiActivity(container) {
   clear(container);
+  const locale = getLocale();
   let decisionsOffset = 0;
   let requestsOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'AI Activity'),
+      el('h1', {}, t(locale, 'page_title_ai_activity')),
       el('p', { class: 'page-subtitle' }, ['Every decision an agent has made and every action it requested, with full reasoning — the explainable trail behind each one. Act on anything pending in ', el('a', { href: '#/approvals' }, 'Approvals'), '.']),
     ]),
   ]));

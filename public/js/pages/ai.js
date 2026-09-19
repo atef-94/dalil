@@ -1,4 +1,6 @@
 import { el, clear, toast, errorBanner, selectInput, icon } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 // require_approval and ai_decide are workflow-only meta-actions (the
@@ -14,9 +16,10 @@ const AUTONOMY_LEVELS = [
 
 export async function renderAi(container) {
   clear(container);
+  const locale = getLocale();
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'AI Agents'),
+      el('h1', {}, t(locale, 'page_title_ai')),
       el('p', { class: 'page-subtitle' }, 'Every action here — whether suggested, auto-executed, or paused for approval — passes through the same permission, policy, approval, and audit systems as the Automation Engine. AI never bypasses them.'),
     ]),
   ]));

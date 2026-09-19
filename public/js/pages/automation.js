@@ -1,4 +1,6 @@
 import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 const TRIGGER_TYPES = [{ value: 'event', label: 'Event' }, { value: 'scheduled', label: 'Scheduled' }, { value: 'webhook', label: 'Webhook' }];
@@ -179,10 +181,11 @@ function stepEditor(step = {}) {
 
 export async function renderAutomation(container) {
   clear(container);
+  const locale = getLocale();
   let workflowsOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Automation Engine'),
+      el('h1', {}, t(locale, 'page_title_automation')),
       el('p', { class: 'page-subtitle' }, ['Pending approvals moved to ', el('a', { href: '#/approvals' }, 'Approvals'), '; run history across every workflow lives on ', el('a', { href: '#/workflow-history' }, 'Workflow History'), '.']),
     ]),
   ]));

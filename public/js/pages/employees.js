@@ -1,14 +1,17 @@
 import { el, clear, table, toast, errorBanner, paginationControls, loadingState, confirmModal, formModal, selectInput, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderEmployees(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
   let q = '';
   const errorSlot = el('div');
   const listSlot = el('div');
 
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Employees')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_employees'))));
   container.appendChild(errorSlot);
 
   let branches = [];

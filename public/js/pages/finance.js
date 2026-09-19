@@ -1,13 +1,15 @@
 import { el, clear, table, toast, errorBanner, statusBadge, selectInput, confirmModal } from '../ui.js';
+import { t } from '../i18n.js';
 import { api } from '../api.js';
-import { can } from '../state.js';
+import { can, getLocale } from '../state.js';
 import { openImportWizard } from '../import-wizard.js';
 
 export async function renderFinance(container) {
   clear(container);
+  const locale = getLocale();
   const headerActions = el('div');
   container.appendChild(el('div', { class: 'page-header' }, [
-    el('h1', {}, 'Finance & Collections'),
+    el('h1', {}, t(locale, 'page_title_finance')),
     headerActions,
   ]));
   if (can('payment_schedule', 'edit')) {

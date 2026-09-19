@@ -1,11 +1,14 @@
 import { el, clear, table, toast, errorBanner, loadingState, selectInput, badge } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderBranches(container) {
   clear(container);
+  const locale = getLocale();
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Branches & Departments'),
+      el('h1', {}, t(locale, 'page_title_branches')),
       el('p', { class: 'page-subtitle' }, 'The org structure Employees, Roles, and department-scoped permissions are built on.'),
     ]),
   ]));

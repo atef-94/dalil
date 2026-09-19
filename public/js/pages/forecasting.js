@@ -1,11 +1,14 @@
 import { el, clear, table, toast, errorBanner, loadingState, selectInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderForecasting(container) {
   clear(container);
+  const locale = getLocale();
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Forecasting'),
+      el('h1', {}, t(locale, 'page_title_forecasting')),
       el('p', { class: 'page-subtitle' }, 'Deterministic projections built from real historical bookings/collections and the existing payment-plan engine — no external ML, no randomness.'),
     ]),
   ]));

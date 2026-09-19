@@ -81,6 +81,15 @@ h2 { font-size: 18px; }
 h3 { font-size: 15px; }
 p { margin: 0 0 8px; }
 
+/* Arabic script renders better with a touch more line-height and no
+   Latin-tuned negative letter-spacing (which visually cramps ligatures);
+   these fonts are chosen for solid Arabic glyph coverage across platforms. */
+[dir="rtl"] body {
+  font-family: "Segoe UI", Tahoma, "Geeza Pro", "Noto Sans Arabic", var(--font-sans);
+}
+[dir="rtl"] h1, [dir="rtl"] h2, [dir="rtl"] h3, [dir="rtl"] h4 { letter-spacing: normal; }
+[dir="rtl"] body { line-height: 1.6; }
+
 a { color: var(--brand-600); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
@@ -412,7 +421,7 @@ tbody tr.clickable { cursor: pointer; }
 .modal-close {
   position: absolute;
   top: 14px;
-  right: 16px;
+  inset-inline-end: 16px;
   background: none;
   border: none;
   font-size: 22px;

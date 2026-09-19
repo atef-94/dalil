@@ -1,3 +1,8 @@
+import { t } from './i18n.js';
+import { getLocale } from './state.js';
+
+const tt = (key) => t(getLocale(), key);
+
 export function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {
@@ -107,7 +112,7 @@ export function loadingState() {
 /** Richer empty state: an icon, a short title, an optional hint, and an
  * optional primary action button — replaces bare "No records yet" text. */
 export function emptyState({ icon: iconName = 'inbox', title, hint, actionLabel, onAction } = {}) {
-  const children = [icon(iconName, 'lg'), el('div', { class: 'empty-title' }, title || 'Nothing here yet')];
+  const children = [icon(iconName, 'lg'), el('div', { class: 'empty-title' }, title || tt('common_nothing_here'))];
   if (hint) children.push(el('div', { class: 'empty-hint' }, hint));
   if (actionLabel && onAction) {
     const btn = el('button', { class: 'primary' }, actionLabel);
@@ -118,10 +123,10 @@ export function emptyState({ icon: iconName = 'inbox', title, hint, actionLabel,
 }
 
 /** Shown in place of a page/section a user's RBAC grants don't allow. */
-export function deniedState(message = "You don't have permission to view this.") {
+export function deniedState(message = tt('common_no_permission')) {
   return el('div', { class: 'denied-state' }, [
     icon('lock', 'lg'),
-    el('div', { class: 'denied-title' }, 'Access restricted'),
+    el('div', { class: 'denied-title' }, tt('common_access_restricted')),
     el('div', {}, message),
   ]);
 }
@@ -181,7 +186,7 @@ export function statusBadge(status) {
   return badge(status, STATUS_COLORS[status] || '');
 }
 
-export function table(columns, rows, { empty = 'No records yet.', emptyIcon = 'inbox' } = {}) {
+export function table(columns, rows, { empty = tt('common_no_records'), emptyIcon = 'inbox' } = {}) {
   if (!rows || rows.length === 0) {
     return emptyState({ icon: emptyIcon, title: empty });
   }
@@ -223,9 +228,9 @@ export function paginationControls(page, onChange) {
   const hasPrev = page.offset > 0;
   const hasNext = page.offset + page.limit < page.total;
   return el('div', { class: 'pagination' }, [
-    el('span', {}, `${page.total === 0 ? 0 : page.offset + 1}–${Math.min(page.offset + page.limit, page.total)} of ${page.total}`),
-    el('button', { disabled: !hasPrev, onclick: () => onChange(Math.max(0, page.offset - page.limit)) }, '‹ Prev'),
-    el('button', { disabled: !hasNext, onclick: () => onChange(page.offset + page.limit) }, 'Next ›'),
+    el('span', {}, `${page.total === 0 ? 0 : page.offset + 1}–${Math.min(page.offset + page.limit, page.total)} ${tt('common_of')} ${page.total}`),
+    el('button', { disabled: !hasPrev, onclick: () => onChange(Math.max(0, page.offset - page.limit)) }, tt('common_prev')),
+    el('button', { disabled: !hasNext, onclick: () => onChange(page.offset + page.limit) }, tt('common_next')),
   ]);
 }
 
@@ -263,7 +268,7 @@ function openModalShell(titleText, bodyNode) {
 export function contentModal(title, bodyNode, { wide = false } = {}) {
   const { card, close } = openModalShell(title, bodyNode);
   if (wide) card.classList.add('wide');
-  const closeBtn = el('button', { class: 'modal-close', 'aria-label': 'Close' }, '×');
+  const closeBtn = el('button', { class: 'modal-close', 'aria-label': tt('common_close') }, '×');
   closeBtn.addEventListener('click', close);
   card.insertBefore(closeBtn, card.firstChild);
   return { close };
@@ -271,7 +276,7 @@ export function contentModal(title, bodyNode, { wide = false } = {}) {
 
 /** Promise-based replacement for window.confirm — styled, keyboard/overlay
  * dismissible, never blocks the whole browser tab. */
-export function confirmModal(message, { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+export function confirmModal(message, { confirmLabel = tt('common_confirm'), cancelLabel = tt('common_cancel'), danger = false } = {}) {
   return new Promise((resolve) => {
     const body = el('div', {}, [
       el('p', { style: 'margin:0 0 18px' }, message),
@@ -294,7 +299,7 @@ export function confirmModal(message, { confirmLabel = 'Confirm', cancelLabel = 
  * fields: { key, label, type: 'text'|'number'|'select'|'textarea',
  *           options?: [{value,label}], placeholder?, value? }[]
  */
-export function formModal({ title, fields, submitLabel = 'Submit', cancelLabel = 'Cancel' }) {
+export function formModal({ title, fields, submitLabel = tt('common_submit'), cancelLabel = tt('common_cancel') }) {
   return new Promise((resolve) => {
     const inputs = {};
     const body = el('div', {});
