@@ -3,6 +3,9 @@ import type {
   AgentDecision,
   AiActionRequest,
   AiPolicy,
+  AiWorkflowGoalType,
+  AiWorkflowRun,
+  AiWorkflowStepRun,
   ApprovalRequest,
   IntegrationConnection,
   IntegrationEvent,
@@ -105,6 +108,7 @@ import { PortalService } from './modules/portal/portal.service.js';
 import { TaskService } from './modules/tasks/task.service.js';
 import { AutomationService, type WorkflowStepInput } from './modules/automation/automation.service.js';
 import { AiAgentService } from './modules/ai/ai-agent.service.js';
+import { AiWorkflowService } from './modules/ai/ai-workflow.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
 import { ForecastingService } from './modules/forecasting/forecasting.service.js';
 import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
@@ -185,6 +189,7 @@ export interface Application {
     automation: AutomationService;
     eventBus: EventBus;
     aiAgent: AiAgentService;
+    aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
     /** Sweeps overdue payment schedule lines AND emits one
      * `payment.overdue_swept` domain event per swept line — use this
@@ -261,6 +266,8 @@ function buildRepos(db?: DatabaseSync) {
     refunds: repo<Refund>('refunds'),
     importSessions: repo<ImportSession>('import_sessions'),
     quotations: repo<Quotation>('quotations'),
+    aiWorkflowRuns: repo<AiWorkflowRun>('ai_workflow_runs'),
+    aiWorkflowStepRuns: repo<AiWorkflowStepRun>('ai_workflow_step_runs'),
   };
 }
 
@@ -427,6 +434,22 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // for — see the "Lead AI Outreach" workflow template.
   automation.setAiDecider((companyId, agentKey, subjectId, requestedByUserId) =>
     aiAgent.decide(agentKey, companyId, subjectId, requestedByUserId),
+  );
+
+  const aiWorkflow = new AiWorkflowService(
+    { runs: repos.aiWorkflowRuns, steps: repos.aiWorkflowStepRuns },
+    automation,
+    aiAgent,
+    crm,
+    crmStages,
+    leadScoring,
+    leadTimeline,
+    inventory,
+    paymentPlans,
+    leadDistribution,
+    communication,
+    integrations,
+    auditLog,
   );
 
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
@@ -3686,6 +3709,59 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: paginate(list, ctx.query) };
   });
 
+  // ---- AI Workflow / Agentic Orchestration Engine ----
+  // Multi-step, replanning-capable AI workflows layered on top of the AI
+  // Execution Layer above: every mutating step routes through
+  // aiAgent.requestAction() (never automation.executeActionDirect()
+  // directly), so the exact same RBAC/autonomy/approval/audit pipeline
+  // gates every action a workflow takes. See AiWorkflowService.
+  httpServer.post('/api/ai/workflows', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_action'))) {
+      throw new ForbiddenError('missing create:ai_action permission');
+    }
+    const body = parseJsonBody<{ goalType: AiWorkflowGoalType; subjectId: string }>(ctx.body);
+    const run = await aiWorkflow.startWorkflow(body.goalType, actor.companyId, body.subjectId, actor.userId);
+    return { status: 201, body: run };
+  });
+
+  httpServer.get('/api/ai/workflows', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const subjectId = ctx.query.get('subjectId') ?? undefined;
+    const list = await aiWorkflow.listRuns(actor.companyId, subjectId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.get('/api/ai/workflows/:runId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const run = await aiWorkflow.getRun(ctx.params.runId!, actor.companyId);
+    return { status: 200, body: run };
+  });
+
+  httpServer.get('/api/ai/workflows/:runId/steps', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const steps = await aiWorkflow.getSteps(ctx.params.runId!, actor.companyId);
+    return { status: 200, body: steps };
+  });
+
+  httpServer.post('/api/ai/workflows/:runId/resume', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'ai_action'))) {
+      throw new ForbiddenError('missing edit:ai_action permission');
+    }
+    const run = await aiWorkflow.resumeWorkflow(ctx.params.runId!, actor.companyId, actor.userId);
+    return { status: 200, body: run };
+  });
+
   // ---- Audit ----
   httpServer.get('/api/audit-log', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -3712,7 +3788,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, aiWorkflow, integrations,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,

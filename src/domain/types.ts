@@ -1140,3 +1140,70 @@ export interface IntegrationEvent {
   error?: string;
   createdAt: string;
 }
+
+// ---- AI Workflow / Agentic Orchestration Engine ----
+// A second, distinct execution model from WorkflowRun/WorkflowStepRun
+// above: that engine runs a fixed, human-authored sequence of steps
+// (deterministic automation). An AiWorkflowRun instead executes a *plan*
+// the orchestrator builds for a stated goal, evaluates each step's real
+// result, and can replan — searching again, trying an alternative, or
+// escalating — when the world doesn't match what the plan assumed. Every
+// mutation a step performs still goes through
+// AutomationService.executeActionDirect, so it carries the exact same
+// RBAC/AiPolicy-autonomy/ApprovalRequest/audit pipeline as any other AI
+// action or workflow step — this engine adds planning/state on top, it
+// never bypasses the safety pipeline underneath.
+export type AiWorkflowGoalType = 'high_value_lead_followup';
+
+export type AiWorkflowStatus =
+  | 'running' // actively executing steps
+  | 'waiting' // paused for an external event (e.g. a customer reply) until resumeAt
+  | 'completed' // reached a terminal, successful outcome
+  | 'escalated' // handed to a human — no reliable automatic next step
+  | 'failed'; // a step errored in a way replanning couldn't recover from
+
+export interface AiWorkflowRun {
+  id: string;
+  companyId: string;
+  goalType: AiWorkflowGoalType;
+  subjectType: string;
+  subjectId: string;
+  status: AiWorkflowStatus;
+  requestedByUserId: string;
+  /** Name of the step currently executing or last completed — lets a
+   * resumed/replanned run pick up context without re-reading every step. */
+  currentStepName?: string;
+  /** Set only when status === 'waiting'; the scheduled sweep (same 60s
+   * tick pattern as sweepOverdueAndEmit/sweepSlaBreachesAndEmit) resumes
+   * any run whose resumeAt has passed. */
+  resumeAt?: string;
+  /** Human-readable summary of the final outcome (why it completed,
+   * escalated, or failed) — shown in the execution trace UI. */
+  outcomeSummary?: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+}
+
+export type AiWorkflowStepStatus = 'succeeded' | 'failed' | 'skipped' | 'replanned';
+
+/** One executed step in an AiWorkflowRun's real trace — every planning
+ * decision, tool call, and evaluation the orchestrator made, in order,
+ * with its real input/output. This is the "full execution trace" an
+ * observability view renders (Trigger -> Decision -> Agent -> Tool ->
+ * Result -> Next step -> Final outcome). */
+export interface AiWorkflowStepRun {
+  id: string;
+  companyId: string;
+  runId: string;
+  sequence: number;
+  stepName: string;
+  status: AiWorkflowStepStatus;
+  /** What this step reasoned/decided before acting, when applicable. */
+  reasoning?: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  error?: string;
+  startedAt: string;
+  finishedAt: string;
+}

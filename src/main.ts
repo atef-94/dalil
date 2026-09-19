@@ -67,6 +67,14 @@ async function main(): Promise<void> {
   }, 60_000);
   scheduledWorkflowInterval.unref();
 
+  // AI Workflow Engine: resumes any run paused in `waiting` (e.g. waiting
+  // for a customer reply) whose resumeAt has elapsed — same 60s cadence as
+  // the other ticks above. See AiWorkflowService.sweepDueWaitingRuns.
+  const aiWorkflowSweepInterval = setInterval(() => {
+    void services.aiWorkflow.sweepDueWaitingRuns();
+  }, 60_000);
+  aiWorkflowSweepInterval.unref();
+
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
