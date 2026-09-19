@@ -20,6 +20,32 @@ export interface CreateImportSessionInput {
    * each own theirs) — used only to suggest a mapping; validation and
    * duplicate/conflict detection stay the caller's own responsibility. */
   fields: ImportFieldDef[];
+  /** Real-world exports of merged-cell spreadsheets (e.g. a developer's
+   * price list where "Project"/"Developer" is merged down a whole block of
+   * unit-type rows) read back with every row but the first blank in that
+   * column. Opt-in (never silent) — when true, a blank cell is replaced
+   * with the last non-blank value seen above it in the same column, which
+   * is exactly what a merged cell visually means. */
+  fillDownBlankCells?: boolean;
+}
+
+/** A blank cell in a merged-cell export means "same as the value above" —
+ * replaces it with the nearest non-blank value seen so far in that column.
+ * A column that is genuinely blank throughout stays blank. */
+function fillDownBlanks(headers: string[], rows: Record<string, string>[]): Record<string, string>[] {
+  const lastSeen: Record<string, string> = {};
+  return rows.map((row) => {
+    const filled: Record<string, string> = { ...row };
+    for (const header of headers) {
+      const value = filled[header];
+      if (value !== undefined && value.trim() !== '') {
+        lastSeen[header] = value;
+      } else if (lastSeen[header] !== undefined) {
+        filled[header] = lastSeen[header]!;
+      }
+    }
+    return filled;
+  });
 }
 
 /**
@@ -71,6 +97,9 @@ export class ImportSessionService {
         'this PDF\'s layout could not be reliably read as a table (common for scanned/image PDFs) — try exporting it as Excel/CSV instead, or a cleaner PDF export',
       );
     }
+    if (input.fillDownBlankCells) {
+      rows = fillDownBlanks(headers, rows);
+    }
 
     const now = Date.now();
     const session: ImportSession = {
@@ -100,9 +129,9 @@ export class ImportSessionService {
     return session;
   }
 
-  async confirmMapping(id: string, companyId: string, mapping: Record<string, string | null>): Promise<ImportSession> {
+  async confirmMapping(id: string, companyId: string, mapping: Record<string, string | null>, options?: Record<string, unknown>): Promise<ImportSession> {
     const session = await this.getSession(id, companyId);
-    const updated: ImportSession = { ...session, confirmedMapping: mapping, status: 'mapped' };
+    const updated: ImportSession = { ...session, confirmedMapping: mapping, importOptions: options, status: 'mapped' };
     return this.sessions.save(updated);
   }
 

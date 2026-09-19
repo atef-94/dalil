@@ -7,6 +7,12 @@ import type { InventoryService } from './inventory.service.js';
  * fields (code/unitType/areaSqm/listPrice) — the domain model has no
  * separate "floor"/"building"/"delivery date" fields today, so this
  * import never invents columns the rest of the system can't use.
+ *
+ * The *From/*To pairs exist for developer price-list exports that publish
+ * a range (e.g. "BUA From"/"BUA To", "Price From"/"Price To") instead of
+ * one concrete number per unit — never required on their own, and only
+ * ever used as a fallback when the plain areaSqm/listPrice column isn't
+ * present (see resolveRangeValue below).
  */
 export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
   { key: 'projectName', label: 'Project', aliases: ['project name'], required: true },
@@ -14,7 +20,50 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
   { key: 'unitType', label: 'Unit Type', aliases: ['type'], required: true },
   { key: 'areaSqm', label: 'Area (sqm)', aliases: ['area', 'size', 'area sqm'], required: true },
   { key: 'listPrice', label: 'List Price', aliases: ['price', 'total price'], required: true },
+  { key: 'areaSqmFrom', label: 'Area (sqm) — From', aliases: ['area from', 'bua from', 'size from'] },
+  { key: 'areaSqmTo', label: 'Area (sqm) — To', aliases: ['area to', 'bua to', 'size to'] },
+  { key: 'listPriceFrom', label: 'List Price — From', aliases: ['price from', 'total price from'] },
+  { key: 'listPriceTo', label: 'List Price — To', aliases: ['price to', 'total price to'] },
 ];
+
+export type InventoryRangeStrategy = 'avg' | 'from' | 'to';
+
+export interface InventoryImportOptions {
+  /** When a row has no single areaSqm/listPrice value but does have a
+   * From/To pair, how to collapse it to one number. Defaults to 'avg'. */
+  rangeStrategy?: InventoryRangeStrategy;
+  /** When true, a row with no Unit Code column value gets one generated
+   * from the project + unit type + a running sequence, unique within the
+   * project. Off by default — never invents an identifier silently. */
+  autoGenerateUnitCode?: boolean;
+  /** When true, a Project name that doesn't match any existing project is
+   * created instead of rejecting the row. Off by default. */
+  autoCreateMissingProjects?: boolean;
+}
+
+function resolveRangeValue(main: string | undefined, from: string | undefined, to: string | undefined, strategy: InventoryRangeStrategy): number {
+  const parse = (v: string | undefined): number | undefined => {
+    const n = Number((v ?? '').replace(/,/g, ''));
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+  const mainValue = parse(main);
+  if (mainValue !== undefined) return mainValue;
+  const fromValue = parse(from);
+  const toValue = parse(to);
+  if (strategy === 'from') return fromValue ?? toValue ?? NaN;
+  if (strategy === 'to') return toValue ?? fromValue ?? NaN;
+  if (fromValue !== undefined && toValue !== undefined) return (fromValue + toValue) / 2;
+  return fromValue ?? toValue ?? NaN;
+}
+
+function slugify(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-+|-+$)/g, '') || 'unit';
+}
+
+/** Prefix used on a Project id that doesn't exist yet — resolved to a real
+ * created Project only inside importRows (never during preview, which is
+ * read-only), and only when autoCreateMissingProjects is set. */
+const PENDING_PROJECT_PREFIX = 'pending-project:';
 
 export type InventoryImportRowStatus = 'valid' | 'conflict' | 'invalid';
 export type InventoryImportRowAction = 'create' | 'update';
@@ -81,10 +130,16 @@ export class InventoryImportService {
     return project;
   }
 
-  private async evaluateRows(companyId: string, mappedRows: Record<string, string>[]): Promise<InventoryImportRowPreview[]> {
+  private async evaluateRows(companyId: string, mappedRows: Record<string, string>[], options: InventoryImportOptions = {}): Promise<InventoryImportRowPreview[]> {
+    const rangeStrategy = options.rangeStrategy ?? 'avg';
     const existingUnits = await this.inventory.listUnits(companyId);
     const unitByProjectAndCode = new Map<string, Unit>();
-    for (const u of existingUnits) unitByProjectAndCode.set(`${u.projectId}:${u.code.toLowerCase()}`, u);
+    const usedCodesByProjectKey = new Map<string, Set<string>>();
+    for (const u of existingUnits) {
+      unitByProjectAndCode.set(`${u.projectId}:${u.code.toLowerCase()}`, u);
+      if (!usedCodesByProjectKey.has(u.projectId)) usedCodesByProjectKey.set(u.projectId, new Set());
+      usedCodesByProjectKey.get(u.projectId)!.add(u.code.toLowerCase());
+    }
 
     const projectCache = new Map<string, Project | null>();
     const seenInBatch = new Set<string>(); // `${projectId}:${code}` claimed earlier in this same file
@@ -96,13 +151,13 @@ export class InventoryImportService {
       const issues: string[] = [];
 
       const projectName = raw.projectName?.trim();
-      const unitCode = raw.unitCode?.trim();
+      let unitCode = raw.unitCode?.trim();
       const unitType = raw.unitType?.trim();
-      const areaSqm = Number((raw.areaSqm ?? '').replace(/,/g, ''));
-      const listPrice = Number((raw.listPrice ?? '').replace(/,/g, ''));
+      const areaSqm = resolveRangeValue(raw.areaSqm, raw.areaSqmFrom, raw.areaSqmTo, rangeStrategy);
+      const listPrice = resolveRangeValue(raw.listPrice, raw.listPriceFrom, raw.listPriceTo, rangeStrategy);
 
       if (!projectName) issues.push('"Project" is required');
-      if (!unitCode) issues.push('"Unit Code" is required');
+      if (!unitCode && !options.autoGenerateUnitCode) issues.push('"Unit Code" is required');
       if (!unitType) issues.push('"Unit Type" is required');
       if (!Number.isFinite(areaSqm) || areaSqm <= 0) issues.push('"Area (sqm)" must be a positive number');
       if (!Number.isFinite(listPrice) || listPrice <= 0) issues.push('"List Price" must be a positive number');
@@ -112,19 +167,44 @@ export class InventoryImportService {
         continue;
       }
 
+      const infoNotes: string[] = [];
       const project = await this.resolveProject(companyId, projectName!, projectCache);
-      if (!project) {
+      let projectKey: string;
+      let resolvedProjectName: string;
+      if (project) {
+        projectKey = project.id;
+        resolvedProjectName = project.name;
+      } else if (options.autoCreateMissingProjects) {
+        projectKey = PENDING_PROJECT_PREFIX + projectName!.toLowerCase();
+        resolvedProjectName = projectName!;
+        infoNotes.push(`will create new project "${projectName}"`);
+      } else {
         results.push({ row, status: 'invalid', issues: [`project "${projectName}" not found — create it first, then re-import`], raw });
         continue;
       }
 
-      const key = `${project.id}:${unitCode!.toLowerCase()}`;
+      if (!unitCode && options.autoGenerateUnitCode) {
+        if (!usedCodesByProjectKey.has(projectKey)) usedCodesByProjectKey.set(projectKey, new Set());
+        const used = usedCodesByProjectKey.get(projectKey)!;
+        const base = `${slugify(resolvedProjectName)}-${slugify(unitType || 'unit')}`;
+        let n = 1;
+        let candidate = `${base}-${n}`;
+        while (used.has(candidate.toLowerCase())) {
+          n += 1;
+          candidate = `${base}-${n}`;
+        }
+        unitCode = candidate;
+        used.add(candidate.toLowerCase());
+        infoNotes.push(`unit code auto-generated: "${candidate}"`);
+      }
+
+      const key = `${projectKey}:${unitCode!.toLowerCase()}`;
       if (seenInBatch.has(key)) {
         results.push({ row, status: 'conflict', issues: ['another row in this same file already targets this unit'], raw });
         continue;
       }
 
-      const existing = unitByProjectAndCode.get(key);
+      const existing = project ? unitByProjectAndCode.get(key) : undefined;
       if (existing && existing.status !== 'available') {
         results.push({
           row,
@@ -139,12 +219,12 @@ export class InventoryImportService {
       results.push({
         row,
         status: 'valid',
-        issues: [],
+        issues: infoNotes,
         raw,
         resolved: {
           action: existing ? 'update' : 'create',
-          projectId: project.id,
-          projectName: project.name,
+          projectId: projectKey,
+          projectName: resolvedProjectName,
           unitCode: unitCode!,
           unitType: unitType!,
           areaSqm,
@@ -157,8 +237,8 @@ export class InventoryImportService {
     return results;
   }
 
-  async buildPreview(companyId: string, mappedRows: Record<string, string>[]): Promise<InventoryImportPreview> {
-    const rows = await this.evaluateRows(companyId, mappedRows);
+  async buildPreview(companyId: string, mappedRows: Record<string, string>[], options?: InventoryImportOptions): Promise<InventoryImportPreview> {
+    const rows = await this.evaluateRows(companyId, mappedRows, options);
     return {
       rows,
       totalRows: rows.length,
@@ -172,8 +252,10 @@ export class InventoryImportService {
     companyId: string,
     mappedRows: Record<string, string>[],
     onWritten: (unit: Unit, action: InventoryImportRowAction) => Promise<void>,
+    options?: InventoryImportOptions,
   ): Promise<InventoryImportResult> {
-    const evaluated = await this.evaluateRows(companyId, mappedRows);
+    const evaluated = await this.evaluateRows(companyId, mappedRows, options);
+    const createdProjects = new Map<string, Project>(); // pending-project key -> the real Project just created for it
     const results: InventoryImportRowResult[] = [];
     for (const row of evaluated) {
       if (row.status !== 'valid') {
@@ -182,11 +264,21 @@ export class InventoryImportService {
       }
       const resolved = row.resolved!;
       try {
+        let projectId = resolved.projectId;
+        if (projectId.startsWith(PENDING_PROJECT_PREFIX)) {
+          let created = createdProjects.get(projectId);
+          if (!created) {
+            created = await this.inventory.createProject({ companyId, name: resolved.projectName });
+            createdProjects.set(projectId, created);
+          }
+          projectId = created.id;
+        }
+
         let unit: Unit;
         if (resolved.action === 'create') {
           unit = await this.inventory.createUnit({
             companyId,
-            projectId: resolved.projectId,
+            projectId,
             code: resolved.unitCode,
             unitType: resolved.unitType,
             areaSqm: resolved.areaSqm,

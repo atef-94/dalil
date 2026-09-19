@@ -796,6 +796,12 @@ export interface ImportSession {
    * frontend must show a clear error rather than let the user import
    * fabricated/misaligned data. */
   reliable: boolean;
+  /** Set alongside confirmedMapping — importer-specific resolution options
+   * (e.g. Inventory Import's rangeStrategy/autoGenerateUnitCode/
+   * autoCreateMissingProjects) the preview step was built with, replayed
+   * unchanged at confirm time so the two steps never resolve a row
+   * differently. */
+  importOptions?: Record<string, unknown>;
   createdAt: string;
   expiresAt: string;
 }

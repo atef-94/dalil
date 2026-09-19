@@ -115,7 +115,7 @@ import { ScenarioSimulationService } from './modules/forecasting/scenario-simula
 import { ImportSessionService } from './modules/imports/import-session.service.js';
 import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
 import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
-import { InventoryImportService, INVENTORY_IMPORT_FIELDS } from './modules/inventory/inventory-import.service.js';
+import { InventoryImportService, INVENTORY_IMPORT_FIELDS, type InventoryImportOptions } from './modules/inventory/inventory-import.service.js';
 import { QuotationService } from './modules/quotations/quotation.service.js';
 import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
@@ -1332,6 +1332,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
         fileBuffer: file.data,
         contentType: file.contentType,
         fields: INVENTORY_IMPORT_FIELDS,
+        fillDownBlankCells: body?.fields?.fillDownBlankCells === 'true',
       });
       return {
         status: 200,
@@ -1355,10 +1356,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
       throw new ForbiddenError('missing create:unit permission');
     }
-    const body = parseJsonBody<{ mapping: Record<string, string | null> }>(ctx.body);
-    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping);
+    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions }>(ctx.body);
+    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping, body.options as Record<string, unknown> | undefined);
     const mappedRows = importSessions.mapRows(session);
-    const preview = await inventoryImport.buildPreview(actor.companyId, mappedRows);
+    const preview = await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
     return { status: 200, body: preview };
   });
 
@@ -1372,16 +1373,21 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ValidationError('this import session has not been mapped yet — call the preview step first');
     }
     const mappedRows = importSessions.mapRows(session);
-    const result = await inventoryImport.importRows(actor.companyId, mappedRows, async (unit, action) => {
-      await auditLog.record({
-        companyId: actor.companyId,
-        actorUserId: actor.userId,
-        action: action === 'create' ? 'create' : 'edit',
-        resource: 'unit',
-        resourceId: unit.id,
-        metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
-      });
-    });
+    const result = await inventoryImport.importRows(
+      actor.companyId,
+      mappedRows,
+      async (unit, action) => {
+        await auditLog.record({
+          companyId: actor.companyId,
+          actorUserId: actor.userId,
+          action: action === 'create' ? 'create' : 'edit',
+          resource: 'unit',
+          resourceId: unit.id,
+          metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+        });
+      },
+      session.importOptions as InventoryImportOptions | undefined,
+    );
     await importSessions.markConfirmed(session.id, actor.companyId);
     return { status: 200, body: result };
   });

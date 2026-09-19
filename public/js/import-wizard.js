@@ -15,20 +15,42 @@ import { api } from './api.js';
  * '/api/crm/leads/import/upload'); preview/confirm are derived by
  * replacing the trailing '/upload' with '/:sessionId/preview' or
  * '/:sessionId/confirm'.
+ *
+ * `uploadOptions` (checkboxes shown on the Upload step, sent as extra
+ * multipart form fields — for choices that affect how the *file itself* is
+ * read, e.g. "this file has merged cells") and `mappingOptions` (checkbox
+ * or select controls shown on the Mapping step, sent as a JSON `options`
+ * object alongside the mapping — for choices that affect how a mapped
+ * *row* is resolved, e.g. "derive area from a From/To range") are both
+ * optional and importer-specific: only Inventory Import supplies them
+ * today, but any future importer can reuse the same generic controls
+ * instead of building its own wizard, per this file's whole point.
  */
-export function openImportWizard({ title, uploadPath, onImported }) {
+export function openImportWizard({ title, uploadPath, onImported, uploadOptions = [], mappingOptions = [] }) {
   const basePath = uploadPath.replace(/\/upload$/, '');
   const body = el('div', { class: 'import-wizard' });
   const modal = contentModal(title, body, { wide: true });
 
   let session = null;
   let mapping = {};
+  const uploadOptionValues = {};
+  uploadOptions.forEach((opt) => { uploadOptionValues[opt.key] = opt.default ?? false; });
+  const mappingOptionValues = {};
+  mappingOptions.forEach((opt) => { mappingOptionValues[opt.key] = opt.default; });
+
+  function optionCheckbox(opt, values) {
+    const checkbox = el('input', { type: 'checkbox' });
+    checkbox.checked = !!values[opt.key];
+    checkbox.addEventListener('change', () => { values[opt.key] = checkbox.checked; });
+    return el('label', { style: 'display:flex;align-items:center;gap:8px;font-weight:normal;margin-top:8px' }, [checkbox, opt.label]);
+  }
 
   function renderUploadStep() {
     clear(body);
     const fileInput = el('input', { type: 'file', accept: '.csv,.xlsx,.xls,.pdf' });
     const uploadBtn = el('button', { class: 'primary' }, 'Upload & continue');
     const errSlot = el('div');
+    const optionControls = uploadOptions.map((opt) => optionCheckbox(opt, uploadOptionValues));
 
     uploadBtn.addEventListener('click', async () => {
       clear(errSlot);
@@ -41,6 +63,7 @@ export function openImportWizard({ title, uploadPath, onImported }) {
       try {
         const form = new FormData();
         form.set('file', file, file.name);
+        for (const opt of uploadOptions) form.set(opt.key, String(!!uploadOptionValues[opt.key]));
         session = await api.upload(uploadPath, form);
         mapping = { ...session.suggestedMapping };
         renderMappingStep();
@@ -54,6 +77,7 @@ export function openImportWizard({ title, uploadPath, onImported }) {
     body.appendChild(el('div', {}, [
       el('p', { class: 'page-subtitle' }, 'Upload a .csv, .xlsx/.xls, or .pdf file. You will review and correct the column mapping and see exactly what would be imported before anything happens.'),
       field('File', fileInput),
+      ...optionControls,
       errSlot,
       el('div', { class: 'form-actions' }, [uploadBtn]),
     ]));
@@ -83,6 +107,16 @@ export function openImportWizard({ title, uploadPath, onImported }) {
       ]);
     });
 
+    const optionControls = mappingOptions.map((opt) => {
+      if (opt.type === 'select') {
+        const select = selectInput(opt.options, {});
+        select.value = mappingOptionValues[opt.key];
+        select.addEventListener('change', () => { mappingOptionValues[opt.key] = select.value; });
+        return field(opt.label, select);
+      }
+      return optionCheckbox(opt, mappingOptionValues);
+    });
+
     const backBtn = el('button', {}, 'Back');
     const nextBtn = el('button', { class: 'primary' }, 'Preview import');
     const errSlot = el('div');
@@ -92,7 +126,7 @@ export function openImportWizard({ title, uploadPath, onImported }) {
       clear(errSlot);
       nextBtn.disabled = true;
       try {
-        const preview = await api.post(`${basePath}/${session.sessionId}/preview`, { mapping });
+        const preview = await api.post(`${basePath}/${session.sessionId}/preview`, { mapping, options: mappingOptionValues });
         renderPreviewStep(preview);
       } catch (err) {
         errSlot.appendChild(errorBanner(err.message));
@@ -104,6 +138,7 @@ export function openImportWizard({ title, uploadPath, onImported }) {
     body.appendChild(el('div', {}, [
       el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}". Confirm or correct which column maps to which field — unmapped columns are ignored.`),
       ...mappingRows,
+      ...optionControls,
       errSlot,
       el('div', { class: 'form-actions' }, [backBtn, nextBtn]),
     ]));
