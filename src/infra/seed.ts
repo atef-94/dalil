@@ -46,6 +46,7 @@ const ALL_RESOURCES: ResourceName[] = [
   'crm_stage',
   'opportunity',
   'unit',
+  'quotation',
   'payment_plan_template',
   'payment_schedule',
   'contract',
@@ -104,6 +105,7 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
     // already-running deployment's demo company keeps working, without
     // touching any grant a real tenant may have since customized.
     await ensureCrmPhase1GrantsExist(repos, companyId);
+    await ensureQuotationGrantsExist(repos, companyId);
     const demoUsers = await repos.users.findAll((u) => u.companyId === companyId);
     return {
       companyId,
@@ -252,6 +254,10 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesManagerRole.id, 'view', 'unit', 'company');
   await addGrant(salesManagerRole.id, 'edit', 'unit', 'company');
   await addGrant(salesManagerRole.id, 'view', 'payment_plan_template', 'company');
+  // Quotation Generator: department-wide, matching lead/opportunity scope.
+  await addGrant(salesManagerRole.id, 'view', 'quotation', 'department');
+  await addGrant(salesManagerRole.id, 'create', 'quotation', 'department');
+  await addGrant(salesManagerRole.id, 'edit', 'quotation', 'department');
   await addGrant(salesManagerRole.id, 'create', 'contract', 'department');
   await addGrant(salesManagerRole.id, 'view', 'contract', 'department');
   // Override commission lines land on the manager themselves (see
@@ -294,6 +300,10 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesAgentRole.id, 'view', 'unit', 'company');
   await addGrant(salesAgentRole.id, 'edit', 'unit', 'company');
   await addGrant(salesAgentRole.id, 'view', 'payment_plan_template', 'company');
+  // Quotation Generator: own-scoped, matching lead/opportunity scope.
+  await addGrant(salesAgentRole.id, 'view', 'quotation', 'own');
+  await addGrant(salesAgentRole.id, 'create', 'quotation', 'own');
+  await addGrant(salesAgentRole.id, 'edit', 'quotation', 'own');
   await addGrant(salesAgentRole.id, 'create', 'contract', 'own');
   await addGrant(salesAgentRole.id, 'view', 'contract', 'own');
   // Lets an agent cancel or request an amendment on their own contract
@@ -396,5 +406,42 @@ async function ensureCrmPhase1GrantsExist(repos: SeedRepos, companyId: string): 
     await ensureGrant(salesAgentRole.id, 'edit', 'task', 'own');
     await ensureGrant(salesAgentRole.id, 'view', 'message', 'own');
     await ensureGrant(salesAgentRole.id, 'create', 'message', 'own');
+  }
+}
+
+/**
+ * Same reconciliation pattern as ensureCrmPhase1GrantsExist, for the
+ * Quotation Generator's 'quotation' resource added afterward — an
+ * already-running deployment's demo roles never retroactively get a new
+ * ALL_RESOURCES entry via the fresh-creation loop, so this grants CEO full
+ * CRUD and mirrors Sales Manager/Agent's existing lead/opportunity scope.
+ */
+async function ensureQuotationGrantsExist(repos: SeedRepos, companyId: string): Promise<void> {
+  const roles = await repos.roles.findAll((r) => r.companyId === companyId);
+  const ceoRole = roles.find((r) => r.name === 'CEO');
+  const salesManagerRole = roles.find((r) => r.name === 'Sales Manager');
+  const salesAgentRole = roles.find((r) => r.name === 'Sales Agent');
+
+  const ensureGrant = async (roleId: string, action: ActionName, resource: ResourceName, scope: ScopeName) => {
+    const matches = await repos.grants.findAll((g) => g.roleId === roleId && g.action === action && g.resource === resource);
+    if (matches.length === 0) {
+      await repos.grants.save({ id: randomUUID(), roleId, action, resource, scope, sensitivity: 'standard' });
+    }
+  };
+
+  if (ceoRole) {
+    for (const action of ['view', 'create', 'edit', 'approve', 'delete'] as ActionName[]) {
+      await ensureGrant(ceoRole.id, action, 'quotation', 'company');
+    }
+  }
+  if (salesManagerRole) {
+    await ensureGrant(salesManagerRole.id, 'view', 'quotation', 'department');
+    await ensureGrant(salesManagerRole.id, 'create', 'quotation', 'department');
+    await ensureGrant(salesManagerRole.id, 'edit', 'quotation', 'department');
+  }
+  if (salesAgentRole) {
+    await ensureGrant(salesAgentRole.id, 'view', 'quotation', 'own');
+    await ensureGrant(salesAgentRole.id, 'create', 'quotation', 'own');
+    await ensureGrant(salesAgentRole.id, 'edit', 'quotation', 'own');
   }
 }

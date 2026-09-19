@@ -8,6 +8,7 @@ export const RESOURCES: ResourceName[] = [
   'crm_stage',
   'opportunity',
   'unit',
+  'quotation',
   'payment_plan_template',
   'payment_schedule',
   'contract',

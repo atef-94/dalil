@@ -28,6 +28,7 @@ const ICONS = {
   opportunities: '<path d="M4 4h16l-6 8v6l-4 2v-8z"/>',
   units: '<rect x="4" y="9" width="16" height="12" rx="1"/><path d="M8 9V5a4 4 0 0 1 8 0v4"/>',
   templates: '<rect x="5" y="3" width="14" height="18" rx="1.5"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/>',
+  quotations: '<rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M8 8h8M8 12h5" /><path d="M9 16l1.5 1.5L14 14"/>',
   finance: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/>',
   brokers: '<circle cx="9" cy="12" r="5"/><circle cx="15" cy="12" r="5" opacity="0.5"/>',
   commissions: '<circle cx="12" cy="12" r="9"/><path d="M9.5 15.5c0 1 1 1.8 2.5 1.8s2.5-.8 2.5-1.8-1-1.5-2.5-1.9-2.5-.9-2.5-1.9 1-1.8 2.5-1.8 2.5.8 2.5 1.8"/><line x1="12" y1="6.5" x2="12" y2="8" /><line x1="12" y1="16" x2="12" y2="17.5"/>',

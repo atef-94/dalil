@@ -102,7 +102,8 @@ export type ResourceName =
   | 'integration_connection'
   | 'sales_commission'
   | 'forecast'
-  | 'crm_stage';
+  | 'crm_stage'
+  | 'quotation';
 
 export type ActionName =
   | 'view'
@@ -202,6 +203,47 @@ export interface PaymentScheduleLine {
   amount: number;
   amountPaid: number;
   status: PaymentScheduleLineStatus;
+}
+
+// ---- Quotations ----
+// Wraps the existing PaymentPlansService calculation engine
+// (schedule-generator.ts's generateSchedule) for pre-sale, no-commitment
+// "what would this deal look like" documents — never a second calculation
+// engine. Generating or re-generating a quotation never writes to
+// Unit/Reservation/Contract/Finance; it only ever reads a Unit's listPrice
+// and an existing PaymentPlanTemplate.
+
+export type QuotationStatus = 'draft' | 'generated' | 'sent' | 'accepted' | 'expired' | 'cancelled';
+
+export interface Quotation {
+  id: string;
+  companyId: string;
+  /** Human-facing, unique-per-company identifier (e.g. "Q-20260101-0007")
+   * — never reused, even after cancellation. */
+  referenceNumber: string;
+  /** Monotonically increasing per (companyId, unitId, leadId) — a new
+   * quotation for the same unit/client is always a new version, never an
+   * overwrite of a prior one. */
+  version: number;
+  unitId: string;
+  projectId: string;
+  leadId?: string;
+  paymentPlanTemplateId: string;
+  status: QuotationStatus;
+  /** The exact inputs the schedule was computed from — stored so the
+   * quotation stays byte-for-byte reproducible even if the unit's price or
+   * the template are edited later (see QuotationService.recompute, which
+   * always replays these inputs through the same generateSchedule engine
+   * rather than re-reading current, possibly-changed, Unit/Template data). */
+  inputs: {
+    totalPrice: number;
+    discountPercent: number;
+    escalationPercentPerYear: number;
+    startDate: string;
+  };
+  createdByUserId: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---- Inventory ----
@@ -668,7 +710,7 @@ export interface Campaign {
 
 // ---- Communication ----
 
-export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket' | 'campaign' | 'payment_schedule_line' | 'leave_request';
+export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket' | 'campaign' | 'payment_schedule_line' | 'leave_request' | 'quotation';
 export type MessageChannel = 'internal' | 'email' | 'whatsapp' | 'sms' | 'call' | 'note';
 export type MessageStatus = 'sent' | 'read';
 

@@ -37,6 +37,8 @@ import type {
   DiscountApprovalPolicy,
   ImportSession,
   PurchaseOrder,
+  Quotation,
+  QuotationStatus,
   Receipt,
   Refund,
   Reservation,
@@ -110,6 +112,8 @@ import { ImportSessionService } from './modules/imports/import-session.service.j
 import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
 import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
 import { InventoryImportService, INVENTORY_IMPORT_FIELDS } from './modules/inventory/inventory-import.service.js';
+import { QuotationService } from './modules/quotations/quotation.service.js';
+import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
 import type { MultipartBody } from './infra/multipart.js';
 
@@ -153,6 +157,7 @@ export interface Application {
     leadTimeline: LeadTimelineService;
     inventory: InventoryService;
     paymentPlans: PaymentPlansService;
+    quotations: QuotationService;
     sales: SalesService;
     finance: FinanceService;
     brokers: BrokersService;
@@ -255,6 +260,7 @@ function buildRepos(db?: DatabaseSync) {
     discountApprovalPolicies: repo<DiscountApprovalPolicy>('discount_approval_policies'),
     refunds: repo<Refund>('refunds'),
     importSessions: repo<ImportSession>('import_sessions'),
+    quotations: repo<Quotation>('quotations'),
   };
 }
 
@@ -340,6 +346,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
   const inventoryImport = new InventoryImportService(inventory);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
+  const quotations = new QuotationService(repos.quotations, repos.units, paymentPlans);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
@@ -1091,6 +1098,121 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const lines = await paymentPlans.getScheduleForContract(ctx.params.contractId!, actor.companyId);
     return { status: 200, body: lines };
+  });
+
+  // ---- Quotations (Dynamic Payment Plan & Quotation Generator) ----
+  // Reuses PaymentPlansService.previewSchedule under the hood (see
+  // quotation.service.ts) — never a second calculation engine.
+  interface QuotationRequestBody {
+    unitId: string;
+    paymentPlanTemplateId: string;
+    discountPercent?: number;
+    escalationPercentPerYear?: number;
+    totalPriceOverride?: number;
+    leadId?: string;
+  }
+
+  httpServer.post('/api/quotations/calculate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'quotation', { companyId: actor.companyId, ownerUserId: actor.userId }))) {
+      throw new ForbiddenError('missing create:quotation permission');
+    }
+    const body = parseJsonBody<QuotationRequestBody>(ctx.body);
+    const calculation = await quotations.calculate(actor.companyId, body);
+    return { status: 200, body: calculation };
+  });
+
+  httpServer.post('/api/quotations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'quotation', { companyId: actor.companyId, ownerUserId: actor.userId }))) {
+      throw new ForbiddenError('missing create:quotation permission');
+    }
+    const body = parseJsonBody<QuotationRequestBody>(ctx.body);
+    const quotation = await quotations.generate({ ...body, companyId: actor.companyId, createdByUserId: actor.userId });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'quotation', resourceId: quotation.id });
+    return { status: 201, body: quotation };
+  });
+
+  httpServer.get('/api/quotations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'quotation');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:quotation permission' } };
+    const all = await quotations.listForCompany(actor.companyId, {
+      unitId: ctx.query.get('unitId') ?? undefined,
+      leadId: ctx.query.get('leadId') ?? undefined,
+    });
+    const filtered = await filterByListScope(all, scope, (q) => employeeScopeKeys(q.createdByUserId));
+    return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  const quotationScopeCheck = async (actor: Actor, action: ActionName, quotationId: string) => {
+    const quotation = await quotations.getQuotation(quotationId, actor.companyId);
+    const ownerKeys = await employeeScopeKeys(quotation.createdByUserId);
+    const allowed = await rbac.can(actor.userId, action, 'quotation', {
+      companyId: quotation.companyId,
+      ownerUserId: quotation.createdByUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError(`missing ${action}:quotation permission for this quotation`);
+    return quotation;
+  };
+
+  httpServer.get('/api/quotations/:id', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    return { status: 200, body: { quotation, calculation } };
+  });
+
+  httpServer.patch('/api/quotations/:id/status', async (ctx) => {
+    const actor = await actorOf(ctx);
+    await quotationScopeCheck(actor, 'edit', ctx.params.id!);
+    const body = parseJsonBody<{ status: QuotationStatus }>(ctx.body);
+    const updated = await quotations.updateStatus(ctx.params.id!, actor.companyId, body.status);
+    return { status: 200, body: updated };
+  });
+
+  httpServer.get('/api/quotations/:id/excel', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const buffer = await buildQuotationWorkbook(quotation, calculation);
+    return {
+      status: 200,
+      body: { filename: `${quotation.referenceNumber}.xlsx`, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', base64: buffer.toString('base64') },
+    };
+  });
+
+  // Returns a print-ready HTML document rather than a server-rendered PDF —
+  // the frontend opens it and calls window.print() so the browser's own
+  // "Save as PDF" produces the file; see quotation-export.service.ts for
+  // why this avoids a fabricated server PDF pipeline.
+  httpServer.get('/api/quotations/:id/print', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const html = buildQuotationPrintHtml(quotation, calculation, calculation.unit);
+    return { status: 200, body: { html } };
+  });
+
+  httpServer.post('/api/quotations/:id/share', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const body = parseJsonBody<{ channel: 'whatsapp' | 'email'; message: string; toUserId?: string }>(ctx.body);
+    if (body.channel !== 'whatsapp' && body.channel !== 'email') throw new ValidationError('channel must be "whatsapp" or "email"');
+    const message = await communication.sendMessage({
+      companyId: actor.companyId,
+      fromUserId: actor.userId,
+      toUserId: body.toUserId,
+      subject: `Quotation ${quotation.referenceNumber}`,
+      body: body.message,
+      channel: body.channel,
+      relatedResource: 'quotation',
+      relatedResourceId: quotation.id,
+    });
+    return { status: 201, body: message };
   });
 
   // ---- Inventory ----
@@ -3591,7 +3713,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, integrations,
-      importSessions, leadImport, paymentImport, inventoryImport,
+      importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,
   };

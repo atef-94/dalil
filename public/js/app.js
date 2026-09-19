@@ -15,6 +15,7 @@ import { renderContracts } from './pages/contracts.js';
 import { renderReservations } from './pages/reservations.js';
 import { renderUnits } from './pages/units.js';
 import { renderTemplates } from './pages/templates.js';
+import { renderQuotations } from './pages/quotations.js';
 import { renderFinance } from './pages/finance.js';
 import { renderBrokers } from './pages/brokers.js';
 import { renderSalesCommissions } from './pages/sales-commissions.js';
@@ -56,6 +57,7 @@ const NAV = [
     { path: '/reservations', labelKey: 'nav_reservations', render: renderReservations, icon: 'reservations', resource: 'unit', action: 'view' },
     { path: '/units', labelKey: 'nav_units', render: renderUnits, icon: 'units', resource: 'unit', action: 'view' },
     { path: '/templates', labelKey: 'nav_templates', render: renderTemplates, icon: 'templates', resource: 'payment_plan_template', action: 'view' },
+    { path: '/quotations', labelKey: 'nav_quotations', render: renderQuotations, icon: 'quotations', resource: 'quotation', action: 'view' },
     { path: '/finance', labelKey: 'nav_finance', render: renderFinance, icon: 'finance', resource: 'payment_schedule', action: 'view' },
     { path: '/brokers', labelKey: 'nav_brokers', render: renderBrokers, icon: 'brokers', resource: 'broker_company', action: 'view' },
     { path: '/sales-commissions', labelKey: 'nav_sales_commissions', render: renderSalesCommissions, icon: 'commissions', resource: 'sales_commission', action: 'view' },
