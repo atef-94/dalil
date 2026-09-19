@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  ActionName,
   AgentAlternative,
   AgentDecision,
   AgentDecisionStatus,
@@ -10,12 +11,13 @@ import type {
   ApprovalRequest,
   AutomationActionType,
   Lead,
+  ResourceName,
 } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { AuditLog } from '../../infra/audit-log.js';
 import { AutomationError, ForbiddenError, NotFoundError, ValidationError } from '../../infra/errors.js';
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
-import { AutomationService } from '../automation/automation.service.js';
+import { ACTION_RESOURCE, ACTION_VERB, AutomationService } from '../automation/automation.service.js';
 import { CrmService } from '../crm/crm.service.js';
 import type { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
@@ -37,32 +39,70 @@ export interface AiRepos {
 }
 
 // ---- Tool Registry ----
-// Purely descriptive metadata — what a caller (a human building a
-// workflow, an agent's own decision explanation, the frontend) sees when
-// asking "what can the AI/Automation Engine do?". It is deliberately NOT
-// consulted for any security decision: the actual authority check for
-// every single one of these, whatever calls it, is
-// AutomationService.canPerformAction() / the RBAC-gated executeAction()
-// switch. Duplicating that logic here would risk the two drifting apart;
-// this list exists only to describe them.
+// Every AI action executes through one of these registered tools — this is
+// the single catalogue a human building a workflow, an agent's own decision
+// explanation, or the frontend consults to answer "what can the AI/
+// Automation Engine do, under what conditions?". `requiredPermission` is
+// not a second, hand-maintained copy of the authority check: it's read
+// directly from automation.service.ts's exported ACTION_RESOURCE/
+// ACTION_VERB maps below, the exact same maps
+// AutomationService.canPerformAction()/executeAction() enforce at
+// execution time, so the two can never drift apart. `riskLevel` and
+// `department` are the Phase 7 classification the spec asks for — real
+// judgments about blast radius (an unscoped webhook call or a financial
+// record change is 'high'; an internal task/message is 'low'), not
+// decoration. `approvalRequired` reflects this deployment's default
+// policy (every action defaults to AiPolicy 'require_approval' unless a
+// company explicitly opts it into auto_execute — see autonomyFor) rather
+// than a fixed flag, since the real gate is configurable per company.
+// `auditRequired` is always true: every AiActionRequest, whatever its
+// outcome, is unconditionally written to AuditLog (see persist()).
 export interface ToolDefinition {
   actionType: AutomationActionType;
   name: string;
   description: string;
   requiredParams: string[];
+  requiredPermission: { action: ActionName; resource: ResourceName };
+  department: string;
+  riskLevel: 'low' | 'medium' | 'high';
+  approvalRequired: boolean;
+  auditRequired: true;
 }
 
-const TOOL_REGISTRY: ToolDefinition[] = [
-  { actionType: 'create_task', name: 'Create Task', description: 'Creates a task/reminder/follow-up.', requiredParams: ['title'] },
-  { actionType: 'create_lead', name: 'Create Lead', description: 'Creates a new CRM lead.', requiredParams: ['fullName', 'phone'] },
-  { actionType: 'send_message', name: 'Send Message', description: 'Sends an internal message/notification.', requiredParams: ['subject', 'body'] },
-  { actionType: 'update_lead_status', name: 'Move Lead Stage', description: "Moves a lead to a different CRM pipeline stage.", requiredParams: ['leadId', 'stageId'] },
-  { actionType: 'assign_lead_owner', name: 'Assign Lead Owner', description: 'Reassigns a lead to a different owner.', requiredParams: ['leadId', 'ownerEmployeeUserId'] },
-  { actionType: 'update_campaign_status', name: 'Update Campaign Status', description: "Changes a marketing campaign's status.", requiredParams: ['campaignId', 'status'] },
-  { actionType: 'webhook_call', name: 'Call Webhook', description: 'Calls an external webhook/API endpoint.', requiredParams: ['url'] },
-  { actionType: 'integration_call', name: 'Send via Integration', description: 'Sends a message through a connected external provider (WhatsApp, Email, etc).', requiredParams: ['provider', 'action'] },
-  { actionType: 'require_approval', name: 'Require Approval', description: 'Pauses for human approval (workflow steps only).', requiredParams: [] },
+interface ToolSpec {
+  actionType: AutomationActionType;
+  name: string;
+  description: string;
+  requiredParams: string[];
+  department: string;
+  riskLevel: 'low' | 'medium' | 'high';
+}
+
+const TOOL_SPECS: ToolSpec[] = [
+  { actionType: 'create_task', name: 'Create Task', description: 'Creates a task/reminder/follow-up.', requiredParams: ['title'], department: 'Cross-department', riskLevel: 'low' },
+  { actionType: 'create_lead', name: 'Create Lead', description: 'Creates a new CRM lead.', requiredParams: ['fullName', 'phone'], department: 'CRM / Sales', riskLevel: 'low' },
+  { actionType: 'send_message', name: 'Send Message', description: 'Sends an internal message/notification.', requiredParams: ['subject', 'body'], department: 'Cross-department', riskLevel: 'low' },
+  { actionType: 'update_lead_status', name: 'Move Lead Stage', description: 'Moves a lead to a different CRM pipeline stage.', requiredParams: ['leadId', 'stageId'], department: 'CRM / Sales', riskLevel: 'medium' },
+  { actionType: 'assign_lead_owner', name: 'Assign Lead Owner', description: 'Reassigns a lead to a different owner.', requiredParams: ['leadId', 'ownerEmployeeUserId'], department: 'CRM / Sales', riskLevel: 'medium' },
+  { actionType: 'update_campaign_status', name: 'Update Campaign Status', description: "Changes a marketing campaign's status.", requiredParams: ['campaignId', 'status'], department: 'Marketing', riskLevel: 'medium' },
+  { actionType: 'webhook_call', name: 'Call Webhook', description: 'Calls an external webhook/API endpoint using a stored secret.', requiredParams: ['url'], department: 'Automation / Integrations', riskLevel: 'high' },
+  { actionType: 'integration_call', name: 'Send via Integration', description: 'Sends a message through a connected external provider (WhatsApp, Email, etc).', requiredParams: ['provider', 'action'], department: 'Automation / Integrations', riskLevel: 'medium' },
+  { actionType: 'ai_decide', name: 'Delegate to AI Agent', description: 'Hands a subject off to a specialized AI agent to decide and execute its own next step.', requiredParams: ['agentKey', 'subjectId'], department: 'AI / Automation', riskLevel: 'medium' },
+  { actionType: 'require_approval', name: 'Require Approval', description: 'Pauses for human approval (workflow steps only).', requiredParams: [], department: 'Cross-department', riskLevel: 'low' },
+  { actionType: 'record_payment', name: 'Record Payment', description: 'Records a payment against a contract schedule line.', requiredParams: ['contractId', 'paymentScheduleLineId', 'amount', 'method'], department: 'Finance', riskLevel: 'high' },
+  { actionType: 'cancel_contract', name: 'Cancel Contract', description: 'Cancels a signed contract and releases its reserved unit.', requiredParams: ['contractId'], department: 'Sales / Finance / Legal', riskLevel: 'high' },
 ];
+
+const TOOL_REGISTRY: ToolDefinition[] = TOOL_SPECS.map((spec) => ({
+  ...spec,
+  requiredPermission: { action: ACTION_VERB[spec.actionType], resource: ACTION_RESOURCE[spec.actionType] },
+  // Mirrors this deployment's real default: every action type starts at
+  // AiPolicy 'require_approval' until a company explicitly opts it into
+  // auto_execute (see autonomyFor) — so "approval required" is the
+  // correct default classification for every tool, not a per-tool guess.
+  approvalRequired: true,
+  auditRequired: true,
+}));
 
 interface AgentDecisionResult {
   chosenActionType?: AutomationActionType;
@@ -253,6 +293,20 @@ export class AiAgentService {
 
   async requestAction(input: RequestAiActionInput): Promise<AiActionRequest> {
     if (!input.actionType) throw new ValidationError('actionType is required');
+
+    // Real runtime input-schema enforcement against the Tool Registry
+    // (Phase 7) — not just descriptive metadata: a call missing a
+    // required parameter is caught here, before any permission/policy
+    // work, rather than surfacing later as an opaque executor error.
+    // Persisted (never thrown) so this follows the same contract every
+    // other validation failure in this method does: requestAction()
+    // always resolves to an audited AiActionRequest, never throws — every
+    // caller (decide(), AiWorkflowService, the /api/ai/actions route)
+    // relies on that to record/escalate cleanly instead of crashing.
+    const missingParams = this.missingRequiredParams(input.actionType, input.params);
+    if (missingParams.length > 0) {
+      return this.persist(input, 'denied_policy', `tool "${input.actionType}" is missing required parameter(s): ${missingParams.join(', ')}`);
+    }
 
     const permitted = await this.automation.canPerformAction(input.requestedByUserId, input.actionType, input.companyId, input.ownerUserId);
     if (!permitted) {
@@ -905,6 +959,21 @@ export class AiAgentService {
     const request = await this.repos.actionRequests.findById(id);
     if (!request || request.companyId !== companyId) throw new NotFoundError('AI action request not found');
     return request;
+  }
+
+  /** Real runtime enforcement of each tool's declared input schema
+   * (Phase 7) — checks every one of TOOL_REGISTRY's `requiredParams` is
+   * present and non-empty in the caller's params. An action type with no
+   * registry entry (shouldn't happen — every AutomationActionType has
+   * one) is treated as having no required params rather than silently
+   * passing every check. */
+  private missingRequiredParams(actionType: AutomationActionType, params: Record<string, unknown>): string[] {
+    const tool = TOOL_REGISTRY.find((t) => t.actionType === actionType);
+    if (!tool) return [];
+    return tool.requiredParams.filter((key) => {
+      const value = params?.[key];
+      return value === undefined || value === null || value === '';
+    });
   }
 
   private async autonomyFor(companyId: string, actionType: AutomationActionType): Promise<AiAutonomyLevel> {

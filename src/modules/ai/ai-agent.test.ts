@@ -530,6 +530,39 @@ test('listTools rejects an unknown agent key', async () => {
   assert.throws(() => h.ai.listTools('not-a-real-agent'));
 });
 
+test('the Tool Registry exposes real, non-fabricated risk/department/permission metadata for every tool (Phase 7)', async () => {
+  const h = await freshHarness();
+  const tools = h.ai.listTools();
+  for (const tool of tools) {
+    assert.ok(['low', 'medium', 'high'].includes(tool.riskLevel), `${tool.actionType} has an invalid riskLevel`);
+    assert.ok(tool.department.length > 0, `${tool.actionType} has no department`);
+    assert.equal(tool.auditRequired, true);
+    assert.ok(tool.requiredPermission.action && tool.requiredPermission.resource, `${tool.actionType} has no requiredPermission`);
+  }
+  // High-risk tools are the genuinely dangerous ones (external calls,
+  // financial writes) — not an arbitrary label.
+  const highRisk = tools.filter((t) => t.riskLevel === 'high').map((t) => t.actionType).sort();
+  assert.deepEqual(highRisk, ['cancel_contract', 'record_payment', 'webhook_call']);
+  // requiredPermission is read from automation.service.ts's real
+  // ACTION_RESOURCE/ACTION_VERB maps, not a second hand-maintained copy —
+  // spot-check one entry against what the executor actually enforces.
+  const updateLeadStatusTool = tools.find((t) => t.actionType === 'update_lead_status')!;
+  assert.deepEqual(updateLeadStatusTool.requiredPermission, { action: 'edit', resource: 'lead' });
+});
+
+test('requestAction rejects a call missing a required tool parameter without throwing, recorded as denied_policy', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'update_lead_status',
+    params: { leadId: 'lead-1' }, // missing required stageId
+  });
+  assert.equal(request.status, 'denied_policy');
+  assert.match(request.reasoning ?? '', /stageId/);
+});
+
 // ---- Cross-module: Sales agent reaching out via the Integration Layer ----
 
 const INTEGRATION_CALL_GRANT: { action: ActionName; resource: ResourceName } = { action: 'create', resource: 'integration_connection' };

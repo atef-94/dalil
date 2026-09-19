@@ -203,7 +203,11 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   },
 ];
 
-const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
+// Exported so the AI Tool Registry (ai-agent.service.ts) can describe each
+// tool's real required permission by reading the same maps the executor
+// enforces, instead of a second, hand-maintained copy that could drift out
+// of sync with what's actually checked at execution time.
+export const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   create_task: 'task',
   send_message: 'message',
   create_lead: 'lead',
@@ -218,7 +222,7 @@ const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   cancel_contract: 'contract',
 };
 
-const ACTION_VERB: Record<AutomationActionType, ActionName> = {
+export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   create_task: 'create',
   send_message: 'create',
   create_lead: 'create',
