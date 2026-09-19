@@ -1,10 +1,45 @@
-import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, loadingState } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, paginationControls, loadingState, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
 import { api } from '../api.js';
+import { can, getLocale } from '../state.js';
+import { openImportWizard } from '../import-wizard.js';
 
 export async function renderUnits(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Inventory')));
+  let q = '';
+  const headerActions = el('div');
+  container.appendChild(el('div', { class: 'page-header' }, [el('h1', {}, t(locale, 'page_title_units')), headerActions]));
+  if (can('unit', 'create')) {
+    const importBtn = el('button', {}, 'Import Units');
+    importBtn.addEventListener('click', () => {
+      openImportWizard({
+        title: 'Import Units',
+        uploadPath: '/api/inventory/units/import/upload',
+        onImported: () => { load(); loadImportHistory(); },
+        uploadOptions: [
+          { key: 'fillDownBlankCells', label: 'My file has merged cells — repeat the value above into blank cells (e.g. a Project/Developer name shown once above a block of unit rows)', default: false },
+        ],
+        mappingOptions: [
+          {
+            key: 'rangeStrategy',
+            type: 'select',
+            label: "If a row has a range (e.g. Price From/To or BUA From/To) instead of one value, use:",
+            options: [
+              { value: 'avg', label: 'Average of From & To' },
+              { value: 'from', label: 'The "From" value' },
+              { value: 'to', label: 'The "To" value' },
+            ],
+            default: 'avg',
+          },
+          { key: 'autoGenerateUnitCode', type: 'checkbox', label: "Auto-generate a unit code for rows that don't have one", default: false },
+          { key: 'autoCreateMissingProjects', type: 'checkbox', label: "Automatically create any project named in the file that doesn't exist yet", default: false },
+        ],
+      });
+    });
+    headerActions.appendChild(importBtn);
+  }
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
@@ -108,8 +143,41 @@ export async function renderUnits(container) {
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
 
+  const search = searchInput('Search by code or type…', (value) => { q = value; offset = 0; load(); });
+  container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
+
   const listSlot = el('div');
   container.appendChild(listSlot);
+
+  const importHistorySlot = el('div');
+  if (can('unit', 'view')) {
+    container.appendChild(el('div', { class: 'card' }, [
+      el('h3', { style: 'margin-top:0' }, 'Import History'),
+      el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, 'Every Inventory Import run for this company, newest first.'),
+      importHistorySlot,
+    ]));
+  }
+
+  async function loadImportHistory() {
+    if (!can('unit', 'view')) return;
+    clear(importHistorySlot);
+    try {
+      const sessions = await api.get('/api/imports/history', { targetType: 'inventory_unit' });
+      importHistorySlot.appendChild(table(
+        [
+          { label: 'File', key: 'fileName' },
+          { label: 'Type', render: (s) => s.fileType.toUpperCase() },
+          { label: 'Rows', render: (s) => String(s.rawRows.length) },
+          { label: 'Status', render: (s) => statusBadge(s.status) },
+          { label: 'Uploaded', render: (s) => new Date(s.createdAt).toLocaleString() },
+        ],
+        sessions,
+        { empty: 'No imports yet.' },
+      ));
+    } catch (err) {
+      importHistorySlot.appendChild(errorBanner(err.message));
+    }
+  }
 
   async function hold(unit, btn) {
     try {
@@ -127,7 +195,7 @@ export async function renderUnits(container) {
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/inventory/units', { limit: 20, offset });
+      const page = await api.get('/api/inventory/units', { limit: 20, offset, q });
       clear(listSlot);
       listSlot.append(table(
         [
@@ -156,4 +224,5 @@ export async function renderUnits(container) {
   }
 
   await load();
+  await loadImportHistory();
 }

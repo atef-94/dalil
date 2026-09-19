@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Contract, Opportunity } from '../../domain/types.js';
+import type { Contract, DiscountApprovalPolicy, Opportunity } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { SalesError, ValidationError, NotFoundError } from '../../infra/errors.js';
 import { KeyedMutex } from '../../infra/keyed-mutex.js';
@@ -22,6 +22,13 @@ export interface SignContractInput {
   escalationPercentPerYear?: number;
 }
 
+export interface AmendContractInput {
+  companyId: string;
+  contractId: string;
+  newTotalPrice: number;
+  discountPercent?: number;
+}
+
 export class SalesService {
   // Keyed by reservationId — protects the "does a contract already exist for
   // this reservation" check from concurrent double-signing.
@@ -32,7 +39,36 @@ export class SalesService {
     private readonly contracts: Repository<Contract>,
     private readonly inventory: InventoryService,
     private readonly paymentPlans: PaymentPlansService,
+    private readonly discountApprovalPolicies?: Repository<DiscountApprovalPolicy>,
   ) {}
+
+  /** Optional so existing tests/callers that never touch discount policy
+   * don't need to pass a repo they don't have. */
+  private requirePolicyRepo(): Repository<DiscountApprovalPolicy> {
+    if (!this.discountApprovalPolicies) throw new SalesError('discount approval policy is not configured for this deployment', 500);
+    return this.discountApprovalPolicies;
+  }
+
+  async setDiscountApprovalPolicy(companyId: string, maxDiscountPercentWithoutApproval: number): Promise<DiscountApprovalPolicy> {
+    if (!(maxDiscountPercentWithoutApproval >= 0 && maxDiscountPercentWithoutApproval <= 100)) {
+      throw new ValidationError('maxDiscountPercentWithoutApproval must be between 0 and 100');
+    }
+    const policy: DiscountApprovalPolicy = { id: companyId, companyId, maxDiscountPercentWithoutApproval };
+    return this.requirePolicyRepo().save(policy);
+  }
+
+  async getDiscountApprovalPolicy(companyId: string): Promise<DiscountApprovalPolicy | undefined> {
+    return this.requirePolicyRepo().findById(companyId);
+  }
+
+  /** No policy configured for a company means no gate at all — a company
+   * that never opts in sees the exact discount behavior it always had. */
+  async discountRequiresApproval(companyId: string, discountPercent: number | undefined): Promise<boolean> {
+    if (!discountPercent) return false;
+    const policy = await this.requirePolicyRepo().findById(companyId);
+    if (!policy) return false;
+    return discountPercent > policy.maxDiscountPercentWithoutApproval;
+  }
 
   async createOpportunity(input: CreateOpportunityInput): Promise<Opportunity> {
     if (!input.leadId?.trim()) throw new ValidationError('leadId is required');
@@ -108,6 +144,8 @@ export class SalesService {
         status: 'signed',
         signedAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
+        totalPrice: input.totalPrice,
+        discountPercent: input.discountPercent,
       };
       await this.contracts.save(contract);
 
@@ -152,6 +190,41 @@ export class SalesService {
     await this.contracts.save(updated);
     await this.inventory.markAvailable(contract.unitId);
     await this.inventory.markReservationCancelled(contract.reservationId);
+    return updated;
+  }
+
+  /**
+   * Real post-signing renegotiation: changes a signed contract's total
+   * price/discount and rescales its not-yet-paid installments to match,
+   * leaving every already-paid or partially-paid line untouched. Always
+   * requires approval via the Universal Approval Engine (see app.ts's
+   * 'contract_amendment' actionType) — this changes money already
+   * committed to a client, so it's never applied unilaterally.
+   */
+  async amendContract(input: AmendContractInput): Promise<Contract> {
+    const contract = await this.contracts.findById(input.contractId);
+    if (!contract || contract.companyId !== input.companyId) throw new NotFoundError('contract not found');
+    if (contract.status !== 'signed') {
+      throw new SalesError(`only a signed contract can be amended (current status: ${contract.status})`);
+    }
+    if (!(input.newTotalPrice > 0)) throw new ValidationError('newTotalPrice must be positive');
+    const discountPercent = input.discountPercent ?? 0;
+    if (discountPercent < 0 || discountPercent >= 100) {
+      throw new ValidationError('discountPercent must be between 0 and 100 (exclusive)');
+    }
+
+    const lines = await this.paymentPlans.getScheduleForContract(input.contractId, input.companyId);
+    const lockedTotal = lines.filter((l) => l.amountPaid > 0).reduce((sum, l) => sum + l.amount, 0);
+    const newEffectivePrice = Math.round(input.newTotalPrice * (1 - discountPercent / 100) * 100) / 100;
+    const newRemainingBalance = Math.round((newEffectivePrice - lockedTotal) * 100) / 100;
+    if (newRemainingBalance < 0) {
+      throw new SalesError('amended total price is less than the amounts already paid on this contract');
+    }
+
+    await this.paymentPlans.rescaleUnpaidLines(input.contractId, input.companyId, newRemainingBalance);
+
+    const updated: Contract = { ...contract, totalPrice: input.newTotalPrice, discountPercent: input.discountPercent };
+    await this.contracts.save(updated);
     return updated;
   }
 }

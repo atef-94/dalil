@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Payment, PaymentMethod, PaymentScheduleLine, Receipt } from '../../domain/types.js';
+import type { Payment, PaymentMethod, PaymentScheduleLine, Receipt, Refund } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { FinanceError, NotFoundError, ValidationError } from '../../infra/errors.js';
 
@@ -9,6 +9,15 @@ export interface RecordPaymentInput {
   paymentScheduleLineId: string;
   amount: number;
   method: PaymentMethod;
+  recordedByUserId: string;
+}
+
+export interface RecordRefundInput {
+  companyId: string;
+  contractId: string;
+  paymentScheduleLineId: string;
+  amount: number;
+  reason: string;
   recordedByUserId: string;
 }
 
@@ -26,6 +35,7 @@ export class FinanceService {
     private readonly payments: Repository<Payment>,
     private readonly receipts: Repository<Receipt>,
     private readonly scheduleLines: Repository<PaymentScheduleLine>,
+    private readonly refunds: Repository<Refund>,
   ) {}
 
   async recordPayment(input: RecordPaymentInput): Promise<{ payment: Payment; receipt: Receipt; line: PaymentScheduleLine }> {
@@ -74,6 +84,52 @@ export class FinanceService {
     await this.receipts.save(receipt);
 
     return { payment, receipt, line: updatedLine };
+  }
+
+  /** Reverses money already collected on a schedule line. Always a
+   * distinct, auditable Refund row rather than silently editing the
+   * original Payment — the Universal Approval Engine gates every call
+   * to this behind approval (see app.ts's 'refund' actionType), since
+   * undoing a recorded receipt is inherently sensitive. */
+  async recordRefund(input: RecordRefundInput): Promise<{ refund: Refund; line: PaymentScheduleLine }> {
+    if (!(input.amount > 0)) throw new ValidationError('amount must be positive');
+    if (!input.reason?.trim()) throw new ValidationError('reason is required');
+
+    const line = await this.scheduleLines.findById(input.paymentScheduleLineId);
+    if (!line || line.contractId !== input.contractId || line.companyId !== input.companyId) {
+      throw new NotFoundError('payment schedule line not found for this contract');
+    }
+    if (input.amount > line.amountPaid + 0.005) {
+      throw new FinanceError('refund amount cannot exceed the amount already paid on this line');
+    }
+
+    const newAmountPaid = Math.round((line.amountPaid - input.amount) * 100) / 100;
+    // Anything less than fully paid can no longer carry the 'paid' status —
+    // whether it was fully or only partially refunded, it reverts to
+    // 'overdue' or 'upcoming' based on its due date, same as a line that
+    // was never paid at all.
+    const status: PaymentScheduleLine['status'] =
+      newAmountPaid >= line.amount - 0.005 ? 'paid' : Date.parse(line.dueDate) < Date.now() ? 'overdue' : 'upcoming';
+    const updatedLine: PaymentScheduleLine = { ...line, amountPaid: Math.max(0, newAmountPaid), status };
+    await this.scheduleLines.save(updatedLine);
+
+    const refund: Refund = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      contractId: input.contractId,
+      paymentScheduleLineId: input.paymentScheduleLineId,
+      amount: input.amount,
+      reason: input.reason.trim(),
+      recordedByUserId: input.recordedByUserId,
+      createdAt: new Date().toISOString(),
+    };
+    await this.refunds.save(refund);
+
+    return { refund, line: updatedLine };
+  }
+
+  async listRefunds(companyId: string): Promise<Refund[]> {
+    return this.refunds.findAll((r) => r.companyId === companyId);
   }
 
   async getScheduleLine(id: string, companyId: string): Promise<PaymentScheduleLine | undefined> {

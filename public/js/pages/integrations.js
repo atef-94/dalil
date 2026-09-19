@@ -1,9 +1,13 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderIntegrations(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Integrations')));
+  const locale = getLocale();
+  let eventsOffset = 0;
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_integrations'))));
   container.appendChild(el('p', { class: 'muted' },
     'Connect external providers with securely encrypted credentials. Every send is rate-limited, retried on failure, and logged below — nothing is silent.'));
   const errorSlot = el('div');
@@ -127,7 +131,7 @@ export async function renderIntegrations(container) {
     clear(eventsSlot);
     eventsSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/integrations/events', { limit: 50 });
+      const page = await api.get('/api/integrations/events', { limit: 20, offset: eventsOffset });
       clear(eventsSlot);
       eventsSlot.appendChild(el('h3', {}, 'Delivery log'));
       eventsSlot.appendChild(table(
@@ -142,6 +146,7 @@ export async function renderIntegrations(container) {
         page.items.slice().reverse(),
         { empty: 'No delivery attempts logged yet.' },
       ));
+      eventsSlot.appendChild(paginationControls(page, (next) => { eventsOffset = next; loadEvents(); }));
     } catch (err) {
       clear(eventsSlot);
       eventsSlot.appendChild(errorBanner(err.message));

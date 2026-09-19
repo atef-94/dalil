@@ -40,6 +40,13 @@ export interface Employee {
   status: EmployeeStatus;
   createdAt: string;
   terminatedAt?: string;
+  /** Tags used by skill-based Lead Distribution to match this employee
+   * against a lead's requiredSkill (e.g. ["luxury", "arabic"]). */
+  skills?: string[];
+  /** Accumulates one point every time a lead assigned to this employee
+   * breaches its first-contact SLA and gets auto-reassigned or
+   * re-flagged. Never decremented automatically — a manager resets it. */
+  slaPenaltyPoints?: number;
 }
 
 export type UserType =
@@ -92,7 +99,11 @@ export type ResourceName =
   | 'secret'
   | 'task'
   | 'ai_action'
-  | 'integration_connection';
+  | 'integration_connection'
+  | 'sales_commission'
+  | 'forecast'
+  | 'crm_stage'
+  | 'quotation';
 
 export type ActionName =
   | 'view'
@@ -194,6 +205,47 @@ export interface PaymentScheduleLine {
   status: PaymentScheduleLineStatus;
 }
 
+// ---- Quotations ----
+// Wraps the existing PaymentPlansService calculation engine
+// (schedule-generator.ts's generateSchedule) for pre-sale, no-commitment
+// "what would this deal look like" documents — never a second calculation
+// engine. Generating or re-generating a quotation never writes to
+// Unit/Reservation/Contract/Finance; it only ever reads a Unit's listPrice
+// and an existing PaymentPlanTemplate.
+
+export type QuotationStatus = 'draft' | 'generated' | 'sent' | 'accepted' | 'expired' | 'cancelled';
+
+export interface Quotation {
+  id: string;
+  companyId: string;
+  /** Human-facing, unique-per-company identifier (e.g. "Q-20260101-0007")
+   * — never reused, even after cancellation. */
+  referenceNumber: string;
+  /** Monotonically increasing per (companyId, unitId, leadId) — a new
+   * quotation for the same unit/client is always a new version, never an
+   * overwrite of a prior one. */
+  version: number;
+  unitId: string;
+  projectId: string;
+  leadId?: string;
+  paymentPlanTemplateId: string;
+  status: QuotationStatus;
+  /** The exact inputs the schedule was computed from — stored so the
+   * quotation stays byte-for-byte reproducible even if the unit's price or
+   * the template are edited later (see QuotationService.recompute, which
+   * always replays these inputs through the same generateSchedule engine
+   * rather than re-reading current, possibly-changed, Unit/Template data). */
+  inputs: {
+    totalPrice: number;
+    discountPercent: number;
+    escalationPercentPerYear: number;
+    startDate: string;
+  };
+  createdByUserId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ---- Inventory ----
 
 export interface Project {
@@ -242,7 +294,51 @@ export interface Reservation {
 
 // ---- CRM ----
 
+/** @deprecated superseded by CrmStage (Lead.stageId) — kept only so old
+ * stored rows and any code still reading it don't lose data. Never written
+ * by new code. */
 export type LeadStatus = 'new' | 'contacted' | 'qualified' | 'opportunity' | 'lost';
+
+/**
+ * A company-configurable pipeline stage a Lead can sit in — replaces the
+ * old hardcoded LeadStatus union as the single source of truth for a
+ * lead's classification. Seeded with a default set (Fresh Leads,
+ * Contacted, Follow Up, Qualified, Meeting, Negotiation, Proposal,
+ * Booking, Won, Lost, Unqualified, Recycle — see
+ * CrmStageService.seedDefaultStages) but an admin can add/edit/reorder/
+ * deactivate their own without any code change: every place that used to
+ * branch on a literal status string now reads isDefault/isWon/isLost/
+ * order instead.
+ */
+export interface CrmStage {
+  id: string;
+  companyId: string;
+  /** Stable slug for the seeded defaults (e.g. 'fresh', 'won') — purely
+   * informational for custom admin-created stages, never branched on by
+   * business logic (which uses the flags below instead). */
+  key: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+  /** Pipeline position — lower sorts first. Drives tab ordering and the
+   * "advance to the next stage" logic in decideSales/lead-scoring. */
+  order: number;
+  isActive: boolean;
+  /** The stage a newly created Lead lands in unless a distribution rule
+   * says otherwise (exactly one per company; enforced by
+   * CrmStageService). This is what "Fresh Leads" means structurally. */
+  isDefault: boolean;
+  /** Terminal-success flag (e.g. "Won"). */
+  isWon: boolean;
+  /** Terminal-failure flag (e.g. "Lost") — moving a lead into any
+   * isLost-flagged stage requires a lostReason. */
+  isLost: boolean;
+  allowManualMove: boolean;
+  allowAutomationMove: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface Lead {
   id: string;
@@ -250,11 +346,79 @@ export interface Lead {
   fullName: string;
   phone: string;
   email?: string;
+  /** National ID / civil ID — the strongest identity signal for duplicate
+   * detection, since a phone or email can be swapped out but this can't. */
+  nationalId?: string;
   sourceId?: string;
-  status: LeadStatus;
+  /** The lead's real classification — see CrmStage. Always set (defaults
+   * to the company's isDefault stage on creation). */
+  stageId: string;
+  /** @deprecated superseded by stageId. Left in place, never written by
+   * new code, so historical rows keep their original value. */
+  status?: LeadStatus;
   lostReason?: string;
+  tags?: string[];
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
   ownerEmployeeUserId?: string;
+  /** Set once at creation and never changed afterward, even when
+   * ownerEmployeeUserId is later reassigned — see
+   * CrmService.resolveCommissionOwner (the 60-day lead-ownership
+   * protection law). */
+  originalOwnerEmployeeUserId?: string;
   createdAt: string;
+  /** A skill tag (e.g. "luxury") the Lead Distribution pool can match
+   * against Employee.skills for skill-based routing. Optional — leads
+   * created without one always route by plain round-robin. */
+  requiredSkill?: string;
+  /** Set when a distribution pool assigns (or auto-reassigns) this lead —
+   * the deadline by which its owner must move it past 'new' before the
+   * SLA sweep treats it as breached. Absent when no pool is configured. */
+  firstContactSlaDueAt?: string;
+  /** Timestamp of the most recent SLA breach sweep that touched this
+   * lead, if any — purely informational (the sweep itself is idempotent
+   * per cycle via firstContactSlaDueAt, not via this field). */
+  slaBreachedAt?: string;
+  /** How many times the SLA sweep has auto-reassigned or re-flagged this
+   * lead for missing first contact. */
+  reassignmentCount?: number;
+
+  // ---- Custom fields ----
+  // Real-estate/financial qualifying details captured progressively as
+  // the agent learns more about the client — all optional, all free-form
+  // where the value genuinely varies by market (no fixed enum invented
+  // for e.g. "property type" or "transfer method").
+  propertyTypeWanted?: string;
+  purchaseGoal?: string;
+  preferredLocation?: string;
+  minAreaSqm?: number;
+  maxAreaSqm?: number;
+  expectedDeliveryTimeline?: string;
+  maxDownPayment?: number;
+  maxInstallment?: number;
+  preferredTenorMonths?: number;
+  preferredTransferMethod?: string;
+}
+
+export type LeadDistributionMode = 'round_robin' | 'skill_based';
+
+/**
+ * One per company: the pool of employee-users new leads are auto-assigned
+ * across, plus the SLA window their owner has to make first contact
+ * before the sweep (sweepSlaBreachesAndEmit, on the same 60s tick as the
+ * payment-overdue sweep) auto-reassigns them and penalizes the original
+ * owner. `memberUserIds` holds employee_user User ids — the same id shape
+ * Lead.ownerEmployeeUserId already uses — in a fixed order that both
+ * round-robin and skill-based fall back to for fair rotation.
+ */
+export interface LeadDistributionPool {
+  id: string; // === companyId; one pool per company
+  companyId: string;
+  mode: LeadDistributionMode;
+  memberUserIds: string[];
+  slaMinutes: number;
+  lastAssignedIndex: number; // index into memberUserIds; -1 before first assignment
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---- Sales ----
@@ -288,6 +452,18 @@ export interface Contract {
   status: ContractStatus;
   signedAt?: string;
   createdAt: string;
+  /** The negotiated contract value BEFORE discount, set once at signing
+   * (SalesService.signContract already receives this as input — this just
+   * persists it instead of discarding it). Optional only so pre-existing
+   * test fixtures built before this field existed keep type-checking;
+   * every contract signed through the real flow always has one. */
+  totalPrice?: number;
+  /** Discount applied at signing (or the most recent amendment), 0-100.
+   * Needed alongside totalPrice to recover the actual net/collectible
+   * contract value (totalPrice * (1 - discountPercent/100)) — the figure
+   * the Sales Commission Engine and Forecasting must use, not the raw
+   * pre-discount totalPrice, since a discount reduces real deal value. */
+  discountPercent?: number;
 }
 
 // ---- Finance ----
@@ -311,6 +487,20 @@ export interface Receipt {
   paymentId: string;
   receiptNumber: string;
   issuedAt: string;
+}
+
+/** A real reversal of money already collected on a payment schedule line —
+ * always requires approval via the Universal Approval Engine (see the
+ * 'refund' ActionApproval type), since it undoes a recorded receipt. */
+export interface Refund {
+  id: string;
+  companyId: string;
+  contractId: string;
+  paymentScheduleLineId: string;
+  amount: number;
+  reason: string;
+  recordedByUserId: string;
+  createdAt: string;
 }
 
 // ---- Brokers ----
@@ -339,6 +529,7 @@ export interface BrokerLead {
   fullName: string;
   phone: string;
   email?: string;
+  nationalId?: string;
   approvalStatus: BrokerLeadApprovalStatus;
   leadId?: string; // nullable until approved
   createdAt: string;
@@ -361,6 +552,43 @@ export interface Commission {
   amount: number;
   status: CommissionStatus;
   createdAt: string;
+}
+
+// ---- Internal Sales Commission Engine ----
+// Parallel to the broker Commission above but for internal employees —
+// kept as its own model rather than overloading Commission/CommissionRule
+// with an optional brokerCompanyId-or-employeeUserId discriminant, since
+// broker and internal-employee commissions are genuinely different payee
+// concepts with different resolution rules (tiered by org hierarchy here,
+// not by broker company).
+
+/** 'base' is paid to the contract's credited employee (the same one the
+ * 60-day lead-ownership law resolves — see CrmService.resolveCommissionOwner);
+ * 'override' is paid to that employee's direct manager, only when an
+ * override rule is configured and a manager actually exists. */
+export type SalesCommissionTier = 'base' | 'override';
+
+export interface SalesCommissionRule {
+  id: string;
+  companyId: string;
+  tier: SalesCommissionTier;
+  employeeUserId?: string; // if unset, this is the company-wide default for this tier
+  ratePercent: number;
+}
+
+export type SalesCommissionStatus = 'pending' | 'approved' | 'paid' | 'clawed_back';
+
+export interface SalesCommission {
+  id: string;
+  companyId: string;
+  contractId: string;
+  employeeUserId: string; // who earns this line
+  tier: SalesCommissionTier;
+  ratePercent: number;
+  amount: number;
+  status: SalesCommissionStatus;
+  createdAt: string;
+  clawedBackReason?: string;
 }
 
 // ---- Audit ----
@@ -482,8 +710,8 @@ export interface Campaign {
 
 // ---- Communication ----
 
-export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket' | 'campaign' | 'payment_schedule_line' | 'leave_request';
-export type MessageChannel = 'internal' | 'email' | 'whatsapp' | 'sms';
+export type MessageRelatedResource = 'lead' | 'contract' | 'opportunity' | 'maintenance_ticket' | 'campaign' | 'payment_schedule_line' | 'leave_request' | 'quotation';
+export type MessageChannel = 'internal' | 'email' | 'whatsapp' | 'sms' | 'call' | 'note';
 export type MessageStatus = 'sent' | 'read';
 
 export interface Message {
@@ -532,6 +760,52 @@ export interface Task {
   completedAt?: string;
 }
 
+// ---- File Import Pipeline ----
+// Shared by Lead Import, Inventory Import, and Payment Import — one staged
+// upload -> parse -> map -> preview -> confirm pipeline, not three separate
+// import systems. Each specific importer (see modules/imports) owns its own
+// field dictionary, duplicate/conflict detection, and write path (e.g.
+// CrmService.createLead) — this type only carries the shared parsing/mapping
+// state common to all of them.
+
+export type ImportTargetType = 'lead' | 'inventory_unit' | 'payment';
+export type ImportFileType = 'csv' | 'xlsx' | 'pdf';
+export type ImportSessionStatus = 'uploaded' | 'mapped' | 'confirmed' | 'failed';
+
+export interface ImportSession {
+  id: string;
+  companyId: string;
+  createdByUserId: string;
+  targetType: ImportTargetType;
+  fileName: string;
+  fileType: ImportFileType;
+  status: ImportSessionStatus;
+  /** Column headers as detected in the source file, in original order. */
+  detectedColumns: string[];
+  /** detectedColumn -> target field key, guessed by fuzzy header matching.
+   * Never applied silently — the frontend always shows this for the user to
+   * confirm or correct before anything is imported (see field-mapping.ts). */
+  suggestedMapping: Record<string, string | null>;
+  /** Set once the user confirms (or edits) the mapping via the preview step. */
+  confirmedMapping?: Record<string, string | null>;
+  /** Parsed data rows keyed by detectedColumns header — the raw, unmapped
+   * values exactly as read from the file. */
+  rawRows: Record<string, string>[];
+  /** Populated for PDF imports whose table reconstruction is a best-effort
+   * heuristic — see pdf-parser.ts's assessTableConfidence. When false the
+   * frontend must show a clear error rather than let the user import
+   * fabricated/misaligned data. */
+  reliable: boolean;
+  /** Set alongside confirmedMapping — importer-specific resolution options
+   * (e.g. Inventory Import's rangeStrategy/autoGenerateUnitCode/
+   * autoCreateMissingProjects) the preview step was built with, replayed
+   * unchanged at confirm time so the two steps never resolve a row
+   * differently. */
+  importOptions?: Record<string, unknown>;
+  createdAt: string;
+  expiresAt: string;
+}
+
 // ---- Automation Engine ----
 
 export type TriggerType = 'event' | 'scheduled' | 'webhook';
@@ -545,6 +819,8 @@ export type TriggerType = 'event' | 'scheduled' | 'webhook';
 export type DomainEventType =
   | 'lead.created'
   | 'lead.status_changed'
+  | 'lead.stage_changed'
+  | 'lead.sla_breached'
   | 'opportunity.created'
   | 'contract.signed'
   | 'contract.cancelled'
@@ -559,7 +835,13 @@ export type DomainEventType =
   | 'legal_document.status_changed'
   | 'campaign.status_changed'
   | 'broker_lead.submitted'
-  | 'employee.created';
+  | 'employee.created'
+  | 'sales_commission.recorded'
+  | 'sales_commission.status_changed'
+  | 'action_approval.requested'
+  | 'action_approval.decided'
+  | 'contract.amended'
+  | 'payment.refunded';
 
 export type ConditionOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'exists';
 
@@ -579,7 +861,9 @@ export type AutomationActionType =
   | 'webhook_call'
   | 'integration_call'
   | 'ai_decide'
-  | 'require_approval';
+  | 'require_approval'
+  | 'record_payment'
+  | 'cancel_contract';
 
 export interface WorkflowActionConfig {
   type: AutomationActionType;
@@ -676,6 +960,48 @@ export interface ApprovalRequest {
   createdAt: string;
 }
 
+// ---- Universal Approval Engine ----
+// ApprovalRequest above only ever exists as part of an Automation Workflow
+// run (it requires a runId/stepId) — there's no way for an ordinary route
+// to gate a single action behind a manager's approval without wrapping it
+// in a full workflow. ActionApproval is that missing generic mechanism:
+// any route can create one, store enough context to finish the gated
+// action later, and resume it once approved — see
+// app.ts recordActionApprovalDecision + the discount-override gate on
+// contract signing for the first real, wired example.
+export type ApprovableActionType = 'discount_override' | 'contract_amendment' | 'refund';
+
+export interface ActionApproval {
+  id: string;
+  companyId: string;
+  actionType: ApprovableActionType;
+  requestedByUserId: string;
+  reason: string;
+  /** Exactly what's needed to finish the gated action once approved —
+   * shape depends on actionType (see app.ts's dispatch for each type). */
+  context: Record<string, unknown>;
+  status: ApprovalStatus;
+  decidedByUserId?: string;
+  decidedAt?: string;
+  rejectionReason?: string;
+  /** Set if the action itself failed when resumed after approval (e.g. the
+   * reservation was no longer active by the time someone approved it) —
+   * the approval decision still stands; this just records that acting on
+   * it didn't succeed, instead of silently losing that information. */
+  resumeFailedReason?: string;
+  createdAt: string;
+}
+
+/** Per-company policy: a contract's discountPercent above this threshold
+ * can't be signed directly — it creates an ActionApproval instead. Absent
+ * entirely (no row for a company) means no gate at all, so a company
+ * that never configures one sees zero behavior change. */
+export interface DiscountApprovalPolicy {
+  id: string; // === companyId, one policy per company
+  companyId: string;
+  maxDiscountPercentWithoutApproval: number;
+}
+
 /** Encrypted-at-rest credential store for outbound webhook_call actions
  * (bearer tokens, API keys, etc.) — see infra/secret-store.ts. Never
  * returned in plaintext by any list/get route. */
@@ -764,6 +1090,24 @@ export interface AgentDecision {
    * (when status === 'proceeded') — lets a caller show the outcome without
    * a second round trip. */
   resultActionStatus?: AiActionStatus;
+  /** Read from the Tool Registry entry for chosenActionType (see
+   * ai-agent.service.ts's TOOL_REGISTRY) — the same real blast-radius
+   * classification used for every other AI action, not a second,
+   * decision-specific guess. Undefined when no action was chosen. */
+  riskLevel?: 'low' | 'medium' | 'high';
+  /** The RBAC grant chosenActionType actually requires, read from the same
+   * ACTION_RESOURCE/ACTION_VERB maps AutomationService enforces at
+   * execution time. Undefined when no action was chosen. */
+  requiredPermission?: { action: ActionName; resource: ResourceName };
+  /** Whether this company's AiPolicy for chosenActionType requires a human
+   * approval step (i.e. autonomy is not 'auto_execute') at the moment this
+   * decision was made. Undefined when no action was chosen. */
+  approvalRequired?: boolean;
+  /** A concrete, deterministic description of what happens next — derived
+   * from this decision's actual outcome (proceeded/escalated/no_action and,
+   * for 'proceeded', the resulting AiActionRequest's status), never a
+   * fabricated or generic string. */
+  nextRecommendedStep: string;
   requestedByUserId: string;
   createdAt: string;
 }
@@ -819,4 +1163,71 @@ export interface IntegrationEvent {
   attempts: number;
   error?: string;
   createdAt: string;
+}
+
+// ---- AI Workflow / Agentic Orchestration Engine ----
+// A second, distinct execution model from WorkflowRun/WorkflowStepRun
+// above: that engine runs a fixed, human-authored sequence of steps
+// (deterministic automation). An AiWorkflowRun instead executes a *plan*
+// the orchestrator builds for a stated goal, evaluates each step's real
+// result, and can replan — searching again, trying an alternative, or
+// escalating — when the world doesn't match what the plan assumed. Every
+// mutation a step performs still goes through
+// AutomationService.executeActionDirect, so it carries the exact same
+// RBAC/AiPolicy-autonomy/ApprovalRequest/audit pipeline as any other AI
+// action or workflow step — this engine adds planning/state on top, it
+// never bypasses the safety pipeline underneath.
+export type AiWorkflowGoalType = 'high_value_lead_followup';
+
+export type AiWorkflowStatus =
+  | 'running' // actively executing steps
+  | 'waiting' // paused for an external event (e.g. a customer reply) until resumeAt
+  | 'completed' // reached a terminal, successful outcome
+  | 'escalated' // handed to a human — no reliable automatic next step
+  | 'failed'; // a step errored in a way replanning couldn't recover from
+
+export interface AiWorkflowRun {
+  id: string;
+  companyId: string;
+  goalType: AiWorkflowGoalType;
+  subjectType: string;
+  subjectId: string;
+  status: AiWorkflowStatus;
+  requestedByUserId: string;
+  /** Name of the step currently executing or last completed — lets a
+   * resumed/replanned run pick up context without re-reading every step. */
+  currentStepName?: string;
+  /** Set only when status === 'waiting'; the scheduled sweep (same 60s
+   * tick pattern as sweepOverdueAndEmit/sweepSlaBreachesAndEmit) resumes
+   * any run whose resumeAt has passed. */
+  resumeAt?: string;
+  /** Human-readable summary of the final outcome (why it completed,
+   * escalated, or failed) — shown in the execution trace UI. */
+  outcomeSummary?: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+}
+
+export type AiWorkflowStepStatus = 'succeeded' | 'failed' | 'skipped' | 'replanned';
+
+/** One executed step in an AiWorkflowRun's real trace — every planning
+ * decision, tool call, and evaluation the orchestrator made, in order,
+ * with its real input/output. This is the "full execution trace" an
+ * observability view renders (Trigger -> Decision -> Agent -> Tool ->
+ * Result -> Next step -> Final outcome). */
+export interface AiWorkflowStepRun {
+  id: string;
+  companyId: string;
+  runId: string;
+  sequence: number;
+  stepName: string;
+  status: AiWorkflowStepStatus;
+  /** What this step reasoned/decided before acting, when applicable. */
+  reasoning?: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  error?: string;
+  startedAt: string;
+  finishedAt: string;
 }

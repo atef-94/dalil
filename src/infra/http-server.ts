@@ -4,6 +4,7 @@ import { join, extname, normalize } from 'node:path';
 import { HttpError } from './errors.js';
 import { logRequest, logServerError } from './logger.js';
 import { SlidingWindowRateLimiter } from './rate-limiter.js';
+import { parseMultipart } from './multipart.js';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
 
@@ -23,9 +24,22 @@ interface Route {
   method: HttpMethod;
   segments: string[];
   handler: RouteHandler;
+  maxBodyBytes?: number;
 }
 
-const MAX_BODY_BYTES = 1024 * 1024; // 1MB cap
+export interface RouteOptions {
+  /** Overrides the default MAX_BODY_BYTES cap for this one route — used by
+   * file-import routes, which legitimately receive multi-megabyte
+   * Excel/PDF uploads that would otherwise be rejected as "too large" by
+   * the same cap that protects every ordinary JSON route from abuse. */
+  maxBodyBytes?: number;
+}
+
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB cap for ordinary JSON routes
+// File-import routes (Lead/Inventory/Payment) accept real spreadsheet/PDF
+// uploads — 25MB comfortably covers a large Excel workbook or a
+// multi-page PDF export while still bounding worst-case memory use.
+export const IMPORT_MAX_BODY_BYTES = 25 * 1024 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -47,8 +61,8 @@ export class HttpServer {
 
   constructor(private readonly options: HttpServerOptions) {}
 
-  register(method: HttpMethod, path: string, handler: RouteHandler): void {
-    this.routes.push({ method, segments: path.split('/').filter(Boolean), handler });
+  register(method: HttpMethod, path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.routes.push({ method, segments: path.split('/').filter(Boolean), handler, maxBodyBytes: options?.maxBodyBytes });
   }
 
   get(path: string, handler: RouteHandler): void {
@@ -59,11 +73,11 @@ export class HttpServer {
       return result ? { status: result.status } : undefined;
     });
   }
-  post(path: string, handler: RouteHandler): void {
-    this.register('POST', path, handler);
+  post(path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.register('POST', path, handler, options);
   }
-  patch(path: string, handler: RouteHandler): void {
-    this.register('PATCH', path, handler);
+  patch(path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.register('PATCH', path, handler, options);
   }
   delete(path: string, handler: RouteHandler): void {
     this.register('DELETE', path, handler);
@@ -91,21 +105,31 @@ export class HttpServer {
     return undefined;
   }
 
-  private async readBody(req: IncomingMessage): Promise<unknown> {
+  private async readBody(req: IncomingMessage, maxBodyBytes: number): Promise<unknown> {
     const chunks: Buffer[] = [];
     let total = 0;
     for await (const chunk of req) {
       total += chunk.length;
-      if (total > MAX_BODY_BYTES) {
+      if (total > maxBodyBytes) {
         throw new HttpError(413, 'request body too large');
       }
       chunks.push(chunk as Buffer);
     }
     if (chunks.length === 0) return undefined;
-    const raw = Buffer.concat(chunks).toString('utf8');
-    if (!raw.trim()) return undefined;
+    const raw = Buffer.concat(chunks);
+
+    // Multipart/form-data (real file uploads — Lead/Inventory/Payment
+    // import routes) never goes through JSON.parse; everything else on
+    // this hand-written server is JSON as before.
+    const contentType = req.headers['content-type'] ?? '';
+    if (contentType.startsWith('multipart/form-data')) {
+      return parseMultipart(raw, contentType);
+    }
+
+    const text = raw.toString('utf8');
+    if (!text.trim()) return undefined;
     try {
-      return JSON.parse(raw);
+      return JSON.parse(text);
     } catch {
       throw new HttpError(400, 'invalid JSON body');
     }
@@ -214,7 +238,7 @@ export class HttpServer {
         throw new HttpError(404, 'not found');
       }
 
-      const body = method === 'POST' || method === 'PATCH' ? await this.readBody(req) : undefined;
+      const body = method === 'POST' || method === 'PATCH' ? await this.readBody(req, match.route.maxBodyBytes ?? MAX_BODY_BYTES) : undefined;
       const ctx: RequestContext = {
         method,
         path,

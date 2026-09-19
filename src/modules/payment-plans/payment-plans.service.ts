@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { PaymentPlanFeeLine, PaymentPlanTemplate, PaymentScheduleLine } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
-import { NotFoundError } from '../../infra/errors.js';
+import { NotFoundError, ValidationError } from '../../infra/errors.js';
 import { generateSchedule, validateTemplate, type GenerateScheduleInput } from './schedule-generator.js';
 
 export interface CreateTemplateInput {
@@ -120,5 +120,38 @@ export class PaymentPlansService {
   async getScheduleForContract(contractId: string, companyId: string): Promise<PaymentScheduleLine[]> {
     const lines = await this.scheduleLines.findAll((l) => l.contractId === contractId && l.companyId === companyId);
     return lines.sort((a, b) => a.sequence - b.sequence);
+  }
+
+  /**
+   * Contract Amendment support: rescales every not-yet-paid line
+   * (amountPaid === 0) proportionally so they sum exactly to
+   * `newUnpaidTotal`, keeping each line's original label/dueDate/sequence.
+   * Lines already paid or partially paid are never touched here — the
+   * caller (SalesService.amendContract) is responsible for excluding
+   * their amounts from `newUnpaidTotal` first. Fee lines are rescaled
+   * along with installments for simplicity, since an amendment changes
+   * the deal's economics as a whole.
+   */
+  async rescaleUnpaidLines(contractId: string, companyId: string, newUnpaidTotal: number): Promise<PaymentScheduleLine[]> {
+    if (newUnpaidTotal < 0) throw new ValidationError('newUnpaidTotal cannot be negative');
+    const lines = await this.getScheduleForContract(contractId, companyId);
+    const unpaid = lines.filter((l) => l.amountPaid === 0);
+    if (unpaid.length === 0) {
+      if (newUnpaidTotal > 0.005) throw new ValidationError('no unpaid schedule lines exist to absorb the new balance');
+      return [];
+    }
+
+    const oldTotal = unpaid.reduce((sum, l) => sum + l.amount, 0);
+    const rawAmounts = unpaid.map((l) => (oldTotal > 0 ? (l.amount * newUnpaidTotal) / oldTotal : newUnpaidTotal / unpaid.length));
+    const rounded = rawAmounts.map((a) => Math.round(a * 100) / 100);
+    const sum = rounded.reduce((a, b) => a + b, 0);
+    const residual = Math.round((newUnpaidTotal - sum) * 100) / 100;
+    rounded[rounded.length - 1] = Math.round((rounded[rounded.length - 1]! + residual) * 100) / 100;
+
+    const saved: PaymentScheduleLine[] = [];
+    for (let i = 0; i < unpaid.length; i++) {
+      saved.push(await this.scheduleLines.save({ ...unpaid[i]!, amount: rounded[i]! }));
+    }
+    return saved;
   }
 }

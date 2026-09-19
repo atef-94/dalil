@@ -1,13 +1,17 @@
-import { el, clear, table, toast, errorBanner, paginationControls, loadingState, confirmModal, formModal, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, paginationControls, loadingState, confirmModal, formModal, selectInput, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderEmployees(container) {
   clear(container);
+  const locale = getLocale();
   let offset = 0;
+  let q = '';
   const errorSlot = el('div');
   const listSlot = el('div');
 
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Employees')));
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_employees'))));
   container.appendChild(errorSlot);
 
   let branches = [];
@@ -63,6 +67,9 @@ export async function renderEmployees(container) {
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
+
+  const search = searchInput('Search by name, email, or title…', (value) => { q = value; offset = 0; load(); });
+  container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
 
   container.appendChild(listSlot);
 
@@ -143,7 +150,7 @@ export async function renderEmployees(container) {
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/organization/employees', { limit: 20, offset });
+      const page = await api.get('/api/organization/employees', { limit: 20, offset, q });
       clear(listSlot);
       currentItems = page.items;
       const rows = table(

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Contract, Customer, Lead, PaymentScheduleLine } from '../../domain/types.js';
+import type { Contract, Customer, Lead, LegalDocument, Message, Opportunity, PaymentScheduleLine, Task } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { NotFoundError, ValidationError } from '../../infra/errors.js';
 import type { AuthService } from '../auth/auth.service.js';
@@ -9,6 +9,17 @@ export interface GrantPortalAccessInput {
   leadId: string;
   email: string;
   password: string;
+}
+
+export interface Customer360 {
+  customer: Customer;
+  lead?: Lead;
+  opportunities: Opportunity[];
+  contracts: Contract[];
+  scheduleByContract: { contractId: string; lines: PaymentScheduleLine[] }[];
+  legalDocuments: LegalDocument[];
+  messages: Message[];
+  tasks: Task[];
 }
 
 /**
@@ -25,6 +36,10 @@ export class PortalService {
     private readonly contracts: Repository<Contract>,
     private readonly scheduleLines: Repository<PaymentScheduleLine>,
     private readonly auth: AuthService,
+    private readonly opportunities: Repository<Opportunity>,
+    private readonly legalDocuments: Repository<LegalDocument>,
+    private readonly messages: Repository<Message>,
+    private readonly tasks: Repository<Task>,
   ) {}
 
   async grantPortalAccess(input: GrantPortalAccessInput): Promise<{ customer: Customer }> {
@@ -81,5 +96,46 @@ export class PortalService {
     if (!contracts.some((c) => c.id === contractId)) throw new NotFoundError('contract not found');
     const lines = await this.scheduleLines.findAll((l) => l.companyId === companyId && l.contractId === contractId);
     return lines.sort((a, b) => a.sequence - b.sequence);
+  }
+
+  /**
+   * Staff-facing Customer 360: one connected view of everything ACTIVE
+   * already knows about a customer, joined from the modules that already
+   * own each piece — no new data model, no duplicated storage. The join
+   * key throughout is `customer.leadId` (the same key `myContracts` uses),
+   * since a Customer record is just a portal-access wrapper around the
+   * Lead that became them.
+   */
+  async getCustomer360(customerId: string, companyId: string): Promise<Customer360> {
+    const customer = await this.getCustomer(customerId, companyId);
+    if (!customer) throw new NotFoundError('customer not found');
+
+    const lead = await this.leads.findById(customer.leadId);
+    const opportunities = await this.opportunities.findAll((o) => o.companyId === companyId && o.leadId === customer.leadId);
+    const contracts = await this.contracts.findAll((c) => c.companyId === companyId && c.clientId === customer.leadId);
+
+    const scheduleByContract = await Promise.all(
+      contracts.map(async (c) => ({
+        contractId: c.id,
+        lines: (await this.scheduleLines.findAll((l) => l.companyId === companyId && l.contractId === c.id)).sort((a, b) => a.sequence - b.sequence),
+      })),
+    );
+    const legalDocumentsByContract = await Promise.all(
+      contracts.map((c) => this.legalDocuments.findAll((d) => d.companyId === companyId && d.contractId === c.id)),
+    );
+
+    const messages = await this.messages.findAll((m) => m.companyId === companyId && m.relatedResource === 'lead' && m.relatedResourceId === customer.leadId);
+    const tasks = await this.tasks.findAll((t) => t.companyId === companyId && t.relatedResource === 'lead' && t.relatedResourceId === customer.leadId);
+
+    return {
+      customer,
+      lead: lead && lead.companyId === companyId ? lead : undefined,
+      opportunities,
+      contracts,
+      scheduleByContract,
+      legalDocuments: legalDocumentsByContract.flat(),
+      messages,
+      tasks,
+    };
   }
 }

@@ -1,9 +1,11 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, confirmModal, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 const TRIGGER_TYPES = [{ value: 'event', label: 'Event' }, { value: 'scheduled', label: 'Scheduled' }, { value: 'webhook', label: 'Webhook' }];
 const EVENT_TYPES = [
-  'lead.created', 'lead.status_changed', 'opportunity.created', 'contract.signed', 'contract.cancelled',
+  'lead.created', 'lead.status_changed', 'lead.stage_changed', 'opportunity.created', 'contract.signed', 'contract.cancelled',
   'payment.recorded', 'payment.overdue_swept', 'maintenance_ticket.created', 'maintenance_ticket.status_changed',
   'leave_request.created', 'leave_request.decided', 'purchase_order.created', 'purchase_order.status_changed',
   'legal_document.status_changed', 'campaign.status_changed', 'broker_lead.submitted', 'employee.created',
@@ -45,7 +47,8 @@ const ACTION_PARAM_FIELDS = {
   ],
   update_lead_status: [
     { key: 'leadId', label: 'Lead id', placeholder: '{{lead.id}} or a literal id' },
-    { key: 'status', label: 'New status', placeholder: 'new / contacted / qualified / opportunity / lost' },
+    { key: 'stageId', label: 'Target CRM stage id', placeholder: 'see CRM → stage settings for each stage\'s id' },
+    { key: 'lostReason', label: 'Lost reason (required only when moving into a Lost-flagged stage)' },
   ],
   assign_lead_owner: [
     { key: 'leadId', label: 'Lead id' },
@@ -178,9 +181,11 @@ function stepEditor(step = {}) {
 
 export async function renderAutomation(container) {
   clear(container);
+  const locale = getLocale();
+  let workflowsOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
-      el('h1', {}, 'Automation Engine'),
+      el('h1', {}, t(locale, 'page_title_automation')),
       el('p', { class: 'page-subtitle' }, ['Pending approvals moved to ', el('a', { href: '#/approvals' }, 'Approvals'), '; run history across every workflow lives on ', el('a', { href: '#/workflow-history' }, 'Workflow History'), '.']),
     ]),
   ]));
@@ -374,7 +379,7 @@ export async function renderAutomation(container) {
     clear(workflowsSlot);
     workflowsSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/automation/workflows', { limit: 50 });
+      const page = await api.get('/api/automation/workflows', { limit: 20, offset: workflowsOffset });
       clear(workflowsSlot);
       workflowsSlot.appendChild(el('h3', {}, 'Workflows'));
       workflowsSlot.appendChild(table(
@@ -410,6 +415,7 @@ export async function renderAutomation(container) {
         page.items,
         { empty: 'No workflows yet — build one above, or use a template.' },
       ));
+      workflowsSlot.appendChild(paginationControls(page, (next) => { workflowsOffset = next; loadWorkflows(); }));
     } catch (err) {
       clear(workflowsSlot);
       workflowsSlot.appendChild(errorBanner(err.message));

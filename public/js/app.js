@@ -1,28 +1,24 @@
 import { el, clear, icon, errorBanner, emptyState, deniedState } from './ui.js';
 import { isAuthenticated, clearToken } from './api.js';
 import { loadSession, session, getLocale, setLocale, can } from './state.js';
-import { registerRoute, startRouter } from './router.js';
+import { registerRoute, startRouter, navigate } from './router.js';
 import { t } from './i18n.js';
 import { renderLogin } from './pages/login.js';
 import { renderDashboard } from './pages/dashboard.js';
 import { renderEmployees } from './pages/employees.js';
 import { renderRoles } from './pages/roles.js';
-import { renderLeads } from './pages/leads.js';
-import { renderCustomers } from './pages/customers.js';
-import { renderOpportunities } from './pages/opportunities.js';
-import { renderContracts } from './pages/contracts.js';
-import { renderReservations } from './pages/reservations.js';
+import { renderCrm } from './pages/crm.js';
+import { mountAiAssistant, clearAiContext } from './pages/ai-panel.js';
 import { renderUnits } from './pages/units.js';
-import { renderTemplates } from './pages/templates.js';
 import { renderFinance } from './pages/finance.js';
 import { renderBrokers } from './pages/brokers.js';
+import { renderSalesCommissions } from './pages/sales-commissions.js';
 import { renderAudit } from './pages/audit.js';
 import { renderHr } from './pages/hr.js';
 import { renderOperations } from './pages/operations.js';
 import { renderLegal } from './pages/legal.js';
 import { renderPurchasing } from './pages/purchasing.js';
 import { renderMarketing } from './pages/marketing.js';
-import { renderCommunication } from './pages/communication.js';
 import { renderAnalytics } from './pages/analytics.js';
 import { renderPortal } from './pages/portal.js';
 import { renderAutomation } from './pages/automation.js';
@@ -30,9 +26,12 @@ import { renderWorkflowHistory } from './pages/workflow-history.js';
 import { renderApprovals } from './pages/approvals.js';
 import { renderAi } from './pages/ai.js';
 import { renderAiActivity } from './pages/ai-activity.js';
+import { renderAiWorkflows } from './pages/ai-workflows.js';
 import { renderIntegrations } from './pages/integrations.js';
 import { renderBranches } from './pages/branches.js';
 import { renderSettings } from './pages/settings.js';
+import { renderForecasting } from './pages/forecasting.js';
+import { renderScenarioSimulation } from './pages/scenario-simulation.js';
 
 // Each item's `resource`/`action` is checked against the live permission
 // manifest (state.js `can()`, backed by GET /api/me/manifest) before it's
@@ -44,21 +43,28 @@ const NAV = [
   { section: 'section_overview', items: [
     { path: '/dashboard', labelKey: 'nav_dashboard', render: renderDashboard, icon: 'dashboard', resource: null },
   ] },
+  // Leads, Follow-ups, Customers, Offers, Payment Plans, Quotations,
+  // Reservations, Contracts, Communications, and Tasks are the Sales/CRM
+  // lifecycle — per the sidebar restructuring, they live as tabs inside the
+  // single CRM workspace (see crm.js's moduleTabs) instead of as separate
+  // top-level sections. Nothing was rebuilt: every one of those pages still
+  // exists exactly as before and is simply mounted into CRM's tab body.
   { section: 'section_sales', items: [
-    { path: '/leads', labelKey: 'nav_leads', render: renderLeads, icon: 'leads', resource: 'lead', action: 'view' },
-    { path: '/customers', labelKey: 'nav_customers', render: renderCustomers, icon: 'customers', resource: 'portal_access', action: 'view' },
-    { path: '/opportunities', labelKey: 'nav_opportunities', render: renderOpportunities, icon: 'opportunities', resource: 'opportunity', action: 'view' },
-    { path: '/contracts', labelKey: 'nav_contracts', render: renderContracts, icon: 'contracts', resource: 'contract', action: 'view' },
-    { path: '/reservations', labelKey: 'nav_reservations', render: renderReservations, icon: 'reservations', resource: 'unit', action: 'view' },
+    { path: '/crm', labelKey: 'nav_crm', render: renderCrm, icon: 'leads', resource: 'lead', action: 'view' },
+  ] },
+  { section: 'section_inventory', items: [
     { path: '/units', labelKey: 'nav_units', render: renderUnits, icon: 'units', resource: 'unit', action: 'view' },
-    { path: '/templates', labelKey: 'nav_templates', render: renderTemplates, icon: 'templates', resource: 'payment_plan_template', action: 'view' },
+  ] },
+  { section: 'section_finance', items: [
     { path: '/finance', labelKey: 'nav_finance', render: renderFinance, icon: 'finance', resource: 'payment_schedule', action: 'view' },
     { path: '/brokers', labelKey: 'nav_brokers', render: renderBrokers, icon: 'brokers', resource: 'broker_company', action: 'view' },
+    { path: '/sales-commissions', labelKey: 'nav_sales_commissions', render: renderSalesCommissions, icon: 'commissions', resource: 'sales_commission', action: 'view' },
   ] },
   { section: 'section_growth', items: [
     { path: '/marketing', labelKey: 'nav_marketing', render: renderMarketing, icon: 'marketing', resource: 'campaign', action: 'view' },
-    { path: '/communication', labelKey: 'nav_communication', render: renderCommunication, icon: 'communication', resource: 'message', action: 'view' },
     { path: '/analytics', labelKey: 'nav_analytics', render: renderAnalytics, icon: 'analytics', resource: 'analytics', action: 'view' },
+    { path: '/forecasting', labelKey: 'nav_forecasting', render: renderForecasting, icon: 'forecasting', resource: 'forecast', action: 'view' },
+    { path: '/scenario-simulation', labelKey: 'nav_scenario_simulation', render: renderScenarioSimulation, icon: 'scenario', resource: 'forecast', action: 'view' },
   ] },
   { section: 'section_ops', items: [
     { path: '/operations', labelKey: 'nav_operations', render: renderOperations, icon: 'operations', resource: 'maintenance_ticket', action: 'view' },
@@ -70,6 +76,7 @@ const NAV = [
     { path: '/workflow-history', labelKey: 'nav_workflow_history', render: renderWorkflowHistory, icon: 'history', resource: 'workflow_run', action: 'view' },
     { path: '/approvals', labelKey: 'nav_approvals', render: renderApprovals, icon: 'approvals', resource: 'approval', action: 'view' },
     { path: '/ai', labelKey: 'nav_ai', render: renderAi, icon: 'ai', resource: 'ai_action', action: 'view' },
+    { path: '/ai-workflows', labelKey: 'nav_ai_workflows', render: renderAiWorkflows, icon: 'ai', resource: 'ai_action', action: 'view' },
     { path: '/ai-activity', labelKey: 'nav_ai_activity', render: renderAiActivity, icon: 'bell', resource: 'ai_action', action: 'view' },
     { path: '/integrations', labelKey: 'nav_integrations', render: renderIntegrations, icon: 'integrations', resource: 'integration_connection', action: 'view' },
   ] },
@@ -173,15 +180,41 @@ async function showApp() {
     return;
   }
 
+  // Mounted once, outside the router's content area, so it's visible on
+  // every route — not just the CRM workspace.
+  mountAiAssistant();
+
   flatNav().forEach((item) => registerRoute(item.path, item.render));
 
+  // Two rounds of sidebar changes keep old links working instead of
+  // 404ing: "Opportunities" was renamed to "Offers" (module/RBAC/routes
+  // unchanged, only the name), and the whole Sales/CRM lifecycle — Offers
+  // included — then moved from standalone top-level pages into tabs
+  // inside the single CRM workspace. Every one of these now lands on CRM
+  // itself; the specific module remains one click away as a CRM tab.
+  const LEGACY_PATH_REDIRECTS = {
+    '/opportunities': '/crm',
+    '/offers': '/crm',
+    '/customers': '/crm',
+    '/contracts': '/crm',
+    '/reservations': '/crm',
+    '/templates': '/crm',
+    '/quotations': '/crm',
+    '/communication': '/crm',
+  };
+
   async function onRouteChange(path) {
+    if (LEGACY_PATH_REDIRECTS[path]) {
+      navigate(LEGACY_PATH_REDIRECTS[path]);
+      return;
+    }
     closeSidebar();
+    if (path !== '/crm') clearAiContext(); // stale lead context shouldn't follow you to another page
     const match = flatNav().find((item) => item.path === path);
     Object.entries(navLinks).forEach(([p, a]) => a.classList.toggle('active', p === path));
     if (!match) {
       clear(content);
-      content.appendChild(emptyState({ icon: 'search', title: 'Page not found' }));
+      content.appendChild(emptyState({ icon: 'search', title: t(locale, 'common_page_not_found') }));
       return;
     }
     topbarTitle.textContent = t(locale, match.labelKey);

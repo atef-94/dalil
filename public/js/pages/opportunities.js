@@ -1,4 +1,6 @@
-import { el, clear, table, toast, errorBanner, statusBadge, selectInput, formModal, loadingState } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, selectInput, formModal, loadingState, paginationControls } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 // Tracks reservationId + unit price per opportunity for this browser session,
@@ -9,12 +11,14 @@ const sessionReservations = new Map();
 
 export async function renderOpportunities(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Sales Opportunities')));
+  const locale = getLocale();
+  let offset = 0;
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_offers'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
   const leadSelect = selectInput([], { id: 'opp-lead-select' });
-  const createBtn = el('button', { class: 'primary' }, 'Create opportunity');
+  const createBtn = el('button', { class: 'primary' }, 'Create offer');
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!leadSelect.value) {
@@ -24,7 +28,7 @@ export async function renderOpportunities(container) {
     createBtn.disabled = true;
     try {
       await api.post('/api/sales/opportunities', { leadId: leadSelect.value });
-      toast('Opportunity created.', 'success');
+      toast('Offer created.', 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -33,7 +37,7 @@ export async function renderOpportunities(container) {
     }
   });
   const createCard = el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Create an opportunity from a qualified lead'),
+    el('h3', { style: 'margin-top:0' }, 'Create an offer from a qualified lead'),
     el('div', { class: 'form-row' }, [el('div', {}, [el('label', {}, 'Lead'), leadSelect])]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]);
@@ -74,7 +78,7 @@ export async function renderOpportunities(container) {
   async function signContract(opportunity) {
     const cached = sessionReservations.get(opportunity.id);
     if (!cached) {
-      errorSlot.appendChild(errorBanner('Reservation not found in this browser session — reserve a unit for this opportunity again first (the reservation isn’t otherwise addressable from the opportunity alone).'));
+      errorSlot.appendChild(errorBanner('Reservation not found in this browser session — reserve a unit for this offer again first (the reservation isn’t otherwise addressable from the offer alone).'));
       return;
     }
     try {
@@ -93,16 +97,25 @@ export async function renderOpportunities(container) {
             options: templatesPage.items.map((t) => ({ value: t.id, label: t.name })),
           },
           { key: 'totalPrice', label: 'Total contract price', type: 'number', value: String(cached.unitPrice) },
+          { key: 'discountPercent', label: 'Discount (%, optional)', type: 'number' },
         ],
         submitLabel: 'Sign contract',
       });
       if (!result || !result.templateId || !result.totalPrice) return;
-      const contract = await api.post('/api/sales/contracts', {
+      const response = await api.post('/api/sales/contracts', {
         reservationId: cached.reservationId,
         paymentPlanTemplateId: result.templateId,
         totalPrice: Number(result.totalPrice),
+        discountPercent: result.discountPercent ? Number(result.discountPercent) : undefined,
       });
-      toast(`Contract signed (${contract.id.slice(0, 8)}…).`, 'success');
+      // A discount above the company's configured threshold returns a
+      // pending ActionApproval (HTTP 202) instead of a signed Contract
+      // (HTTP 201) — only the latter has no actionType.
+      if (response.actionType) {
+        toast('Discount exceeds the no-approval threshold — sent for approval instead of signing.', 'success');
+      } else {
+        toast(`Contract signed (${response.id.slice(0, 8)}…).`, 'success');
+      }
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -113,11 +126,18 @@ export async function renderOpportunities(container) {
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const [leadsPage, oppsPage] = await Promise.all([
+      const [leadsPage, oppsPage, stages] = await Promise.all([
         api.get('/api/crm/leads', { limit: 200 }),
-        api.get('/api/sales/opportunities', { limit: 50 }),
+        api.get('/api/sales/opportunities', { limit: 20, offset }),
+        api.get('/api/crm/stages'),
       ]);
-      const qualified = leadsPage.items.filter((l) => l.status === 'qualified');
+      // Leads moved to the configurable CRM stage engine (stageId), which
+      // replaced the old fixed status enum — 'qualified' is the seeded
+      // default stage's stable key, not a status string.
+      const qualifiedStage = stages.find((s) => s.key === 'qualified');
+      const qualified = qualifiedStage
+        ? leadsPage.items.filter((l) => l.stageId === qualifiedStage.id)
+        : leadsPage.items.filter((l) => l.status === 'qualified');
       clear(leadSelect);
       qualified.forEach((l) => leadSelect.appendChild(el('option', { value: l.id }, l.fullName)));
       if (qualified.length === 0) {
@@ -145,8 +165,9 @@ export async function renderOpportunities(container) {
           } },
         ],
         oppsPage.items,
-        { empty: 'No opportunities yet.' },
+        { empty: 'No offers yet.' },
       ));
+      listSlot.appendChild(paginationControls(oppsPage, (next) => { offset = next; load(); }));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));
     }

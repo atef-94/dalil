@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { FinanceService } from './finance.service.js';
-import type { Payment, PaymentScheduleLine, Receipt } from '../../domain/types.js';
+import type { Payment, PaymentScheduleLine, Receipt, Refund } from '../../domain/types.js';
 
 function freshService() {
   const lines = new InMemoryRepository<PaymentScheduleLine>();
-  const svc = new FinanceService(new InMemoryRepository<Payment>(), new InMemoryRepository<Receipt>(), lines);
-  return { svc, lines };
+  const refunds = new InMemoryRepository<Refund>();
+  const svc = new FinanceService(new InMemoryRepository<Payment>(), new InMemoryRepository<Receipt>(), lines, refunds);
+  return { svc, lines, refunds };
 }
 
 async function seedLine(lines: InMemoryRepository<PaymentScheduleLine>, overrides: Partial<PaymentScheduleLine> = {}): Promise<PaymentScheduleLine> {
@@ -99,4 +100,41 @@ test('sweepOverdue never touches a line already marked paid', async () => {
   assert.equal(swept, 0);
   const line = await lines.findById('line-1');
   assert.equal(line!.status, 'paid');
+});
+
+test('recordRefund reverses money already collected and records a Refund row', async () => {
+  const { svc, lines, refunds } = freshService();
+  await seedLine(lines, { amountPaid: 1000, status: 'paid' });
+  const { refund, line } = await svc.recordRefund({ companyId: 'c1', contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 400, reason: 'client requested partial refund', recordedByUserId: 'u1' });
+  assert.equal(line.amountPaid, 600);
+  assert.notEqual(line.status, 'paid');
+  assert.equal(refund.amount, 400);
+  const stored = await refunds.findAll(() => true);
+  assert.equal(stored.length, 1);
+});
+
+test('recordRefund rejects an amount exceeding what was actually paid on the line', async () => {
+  const { svc, lines } = freshService();
+  await seedLine(lines, { amountPaid: 400 });
+  await assert.rejects(() => svc.recordRefund({ companyId: 'c1', contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 500, reason: 'test', recordedByUserId: 'u1' }));
+});
+
+test('recordRefund requires a non-empty reason', async () => {
+  const { svc, lines } = freshService();
+  await seedLine(lines, { amountPaid: 1000, status: 'paid' });
+  await assert.rejects(() => svc.recordRefund({ companyId: 'c1', contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 100, reason: '  ', recordedByUserId: 'u1' }));
+});
+
+test('recordRefund rejects a schedule line belonging to a different company (cross-tenant)', async () => {
+  const { svc, lines } = freshService();
+  await seedLine(lines, { amountPaid: 1000, status: 'paid' });
+  await assert.rejects(() => svc.recordRefund({ companyId: 'c2', contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 100, reason: 'test', recordedByUserId: 'u1' }));
+});
+
+test('a full refund of a fully-paid, not-yet-due line returns it to upcoming', async () => {
+  const { svc, lines } = freshService();
+  await seedLine(lines, { amountPaid: 1000, status: 'paid', dueDate: new Date(Date.now() + 86_400_000).toISOString() });
+  const { line } = await svc.recordRefund({ companyId: 'c1', contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 1000, reason: 'full refund', recordedByUserId: 'u1' });
+  assert.equal(line.amountPaid, 0);
+  assert.equal(line.status, 'upcoming');
 });

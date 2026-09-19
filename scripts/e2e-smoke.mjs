@@ -70,6 +70,21 @@ try {
   await page.waitForSelector('text=Sara Client', { timeout: 5000 });
   step('lead created and appears in the list', true);
 
+  const saraRow = page.locator('tr', { hasText: 'Sara Client' });
+  await saraRow.locator('button:has-text("Requirements")').click();
+  await page.waitForSelector('.modal-card:has-text("Requirements for Sara Client")', { timeout: 5000 });
+  await page.fill('.modal-card input[placeholder="e.g. apartment, villa"]', 'apartment');
+  await page.click('.modal-card button:has-text("Save requirements")');
+  await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 5000 });
+  step('lead custom fields (requirements) saved via the real in-app modal', true);
+
+  await saraRow.locator('button:has-text("Timeline")').click();
+  await page.waitForSelector('.modal-card:has-text("Sara Client — Timeline")', { timeout: 5000 });
+  await page.waitForSelector('.modal-card:has-text("Lead created")', { timeout: 5000 });
+  step('lead unified timeline shows the real lead_created entry', true);
+  await page.click('.modal-close');
+  await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 5000 });
+
   await page.click('button:has-text("→ contacted")');
   await page.waitForTimeout(300);
   await page.click('button:has-text("→ qualified")');

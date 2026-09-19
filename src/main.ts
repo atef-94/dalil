@@ -50,6 +50,14 @@ async function main(): Promise<void> {
   }, 60_000);
   sweepInterval.unref();
 
+  // Lead Distribution + SLA: auto-reassigns any lead still sitting in
+  // 'new' past its first-contact deadline, on the same 60s cadence as the
+  // payment-overdue sweep above.
+  const slaSweepInterval = setInterval(() => {
+    void services.sweepSlaBreachesAndEmit();
+  }, 60_000);
+  slaSweepInterval.unref();
+
   // Scheduled/recurring workflow trigger tick — checks every minute for any
   // active `scheduled` workflow whose interval has elapsed (each workflow
   // tracks its own lastScheduledRunAt, so this can run as often as we like
@@ -59,12 +67,21 @@ async function main(): Promise<void> {
   }, 60_000);
   scheduledWorkflowInterval.unref();
 
+  // AI Workflow Engine: resumes any run paused in `waiting` (e.g. waiting
+  // for a customer reply) whose resumeAt has elapsed — same 60s cadence as
+  // the other ticks above. See AiWorkflowService.sweepDueWaitingRuns.
+  const aiWorkflowSweepInterval = setInterval(() => {
+    void services.aiWorkflow.sweepDueWaitingRuns();
+  }, 60_000);
+  aiWorkflowSweepInterval.unref();
+
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     process.stdout.write(`received ${signal}, shutting down gracefully\n`);
     clearInterval(sweepInterval);
+    clearInterval(slaSweepInterval);
     clearInterval(scheduledWorkflowInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');

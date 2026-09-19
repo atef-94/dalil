@@ -88,6 +88,30 @@ export class InventoryService {
     return this.units.findAll((u) => u.companyId === companyId && (!projectId || u.projectId === projectId));
   }
 
+  /** Updates commercial/descriptive fields (type/area/price) on an existing
+   * unit — used by Inventory Import to correct/refresh a price list without
+   * ever touching `status`. Refuses to touch a unit that's reserved,
+   * contracted, or otherwise off the market: a real financial relationship
+   * (a hold, reservation, or signed contract) already depends on that
+   * unit's current data, and a bulk import is the wrong place to silently
+   * change it out from under that relationship. Only 'available' units are
+   * safe to bulk-update this way. */
+  async updateUnitDetails(unitId: string, companyId: string, updates: { unitType?: string; areaSqm?: number; listPrice?: number }): Promise<Unit> {
+    const unit = await this.units.findById(unitId);
+    if (!unit || unit.companyId !== companyId) throw new NotFoundError('unit not found');
+    if (unit.status !== 'available') {
+      throw new InventoryError(`cannot update unit "${unit.code}" — it is currently ${unit.status}, not available`, 409);
+    }
+    if (updates.areaSqm !== undefined && !(updates.areaSqm > 0)) throw new ValidationError('areaSqm must be positive');
+    if (updates.listPrice !== undefined && !(updates.listPrice > 0)) throw new ValidationError('listPrice must be positive');
+    return this.units.save({
+      ...unit,
+      unitType: updates.unitType?.trim() || unit.unitType,
+      areaSqm: updates.areaSqm ?? unit.areaSqm,
+      listPrice: updates.listPrice ?? unit.listPrice,
+    });
+  }
+
   async getUnit(id: string): Promise<Unit | undefined> {
     return this.units.findById(id);
   }

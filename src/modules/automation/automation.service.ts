@@ -6,9 +6,9 @@ import type {
   ApprovalStatus,
   AutomationActionType,
   CampaignStatus,
-  LeadStatus,
   MessageChannel,
   MessageRelatedResource,
+  PaymentMethod,
   ResourceName,
   Secret,
   StepRunStatus,
@@ -32,8 +32,11 @@ import { ConcurrencyLimiter } from '../../infra/concurrency-queue.js';
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
 import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
-import { CrmService } from '../crm/crm.service.js';
+import { CrmService, LEGACY_STATUS_TO_STAGE_KEY } from '../crm/crm.service.js';
+import type { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
+import { FinanceService } from '../finance/finance.service.js';
+import { SalesService } from '../sales/sales.service.js';
 
 export interface AutomationRepos {
   workflows: Repository<WorkflowDefinition>;
@@ -115,14 +118,24 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
     key: 'qualified-lead-reassignment-approval',
     name: 'Qualified Lead Reassignment Approval',
-    description: 'Requires manager approval before a newly qualified lead can be reassigned.',
-    trigger: { type: 'event', eventType: 'lead.status_changed' },
+    description: 'Requires manager approval before a lead newly moved into the "qualified" CRM stage can be reassigned. Edit the condition\'s stageKey if your company renamed or replaced that default stage.',
+    trigger: { type: 'event', eventType: 'lead.stage_changed' },
     steps: [
       {
-        name: 'Only when qualified',
-        conditions: [{ field: 'status', operator: 'eq', value: 'qualified' }],
+        name: 'Only when moved into the "qualified" stage',
+        conditions: [{ field: 'stageKey', operator: 'eq', value: 'qualified' }],
         action: { type: 'require_approval', params: { reason: 'Approve reassignment of a newly qualified lead' } },
       },
+    ],
+  },
+  {
+    key: 'new-lead-crm-pipeline-kickoff',
+    name: 'New Lead CRM Pipeline Kickoff',
+    description: 'The default new-lead flow requested for the CRM workspace: create a follow-up task and notify the assigned owner as soon as a lead lands in Fresh Leads (assignment/SLA timer are already handled by Lead Distribution before this fires).',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [
+      { name: 'Create follow-up task', action: { type: 'create_task', params: { title: 'Follow up with {{fullName}}', relatedResource: 'lead', relatedResourceId: '{{id}}' } } },
+      { name: 'Notify assigned owner', action: { type: 'send_message', params: { toUserId: '{{ownerEmployeeUserId}}', subject: 'New lead assigned to you', body: '{{fullName}} was just added to Fresh Leads and assigned to you.', relatedResource: 'lead', relatedResourceId: '{{id}}' } } },
     ],
   },
   {
@@ -132,6 +145,15 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     trigger: { type: 'event', eventType: 'payment.overdue_swept' },
     steps: [
       { name: 'Notify finance', action: { type: 'send_message', params: { subject: 'Overdue payment', body: 'A scheduled payment was marked overdue.' } } },
+    ],
+  },
+  {
+    key: 'lead-sla-breach-notice',
+    name: 'Lead SLA Breach Notice',
+    description: 'Notifies the sales team internally whenever a lead misses its first-contact SLA and gets auto-reassigned by the Lead Distribution pool.',
+    trigger: { type: 'event', eventType: 'lead.sla_breached' },
+    steps: [
+      { name: 'Notify sales', action: { type: 'send_message', params: { subject: 'Lead SLA breached', body: 'A lead missed its first-contact SLA and was auto-reassigned.' } } },
     ],
   },
   {
@@ -181,7 +203,11 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   },
 ];
 
-const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
+// Exported so the AI Tool Registry (ai-agent.service.ts) can describe each
+// tool's real required permission by reading the same maps the executor
+// enforces, instead of a second, hand-maintained copy that could drift out
+// of sync with what's actually checked at execution time.
+export const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   create_task: 'task',
   send_message: 'message',
   create_lead: 'lead',
@@ -192,9 +218,11 @@ const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   integration_call: 'integration_connection',
   ai_decide: 'ai_action',
   require_approval: 'approval',
+  record_payment: 'payment_schedule',
+  cancel_contract: 'contract',
 };
 
-const ACTION_VERB: Record<AutomationActionType, ActionName> = {
+export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   create_task: 'create',
   send_message: 'create',
   create_lead: 'create',
@@ -205,6 +233,8 @@ const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   integration_call: 'create',
   ai_decide: 'create',
   require_approval: 'approve',
+  record_payment: 'edit',
+  cancel_contract: 'edit',
 };
 
 /**
@@ -254,7 +284,10 @@ export class AutomationService {
     private readonly tasks: TaskService,
     private readonly communication: CommunicationService,
     private readonly crm: CrmService,
+    private readonly crmStages: CrmStageService,
     private readonly marketing: MarketingService,
+    private readonly finance: FinanceService,
+    private readonly sales: SalesService,
     private readonly auditLog: AuditLog,
     private readonly encryptionSecret: string,
     private readonly fetchImpl: typeof fetch = fetch,
@@ -837,9 +870,20 @@ export class AutomationService {
         const lead = await this.crm.getLead(leadId);
         if (!lead || lead.companyId !== companyId) throw new AutomationError('lead not found for this company', 404);
         await this.requirePermission(actorUserId, action, companyId, lead.ownerEmployeeUserId);
-        const status = this.requireString(params.status, 'status') as LeadStatus;
-        const updated = await this.crm.updateStatus(leadId, status, this.optionalString(params.lostReason));
-        return { leadId: updated.id, status: updated.status };
+        // Prefers a real stageId; falls back to mapping a legacy literal
+        // status string (from a workflow/AiPolicy row created before the
+        // CrmStage engine existed) to the matching default stage's id.
+        let stageId = this.optionalString(params.stageId);
+        if (!stageId) {
+          const legacyStatus = this.optionalString(params.status);
+          const stageKey = legacyStatus ? LEGACY_STATUS_TO_STAGE_KEY[legacyStatus] : undefined;
+          if (!stageKey) throw new ValidationError('"stageId" (or a recognized legacy "status") is required');
+          const stages = await this.crmStages.listStages(companyId, true);
+          stageId = stages.find((s) => s.key === stageKey)?.id;
+          if (!stageId) throw new AutomationError(`no CRM stage found for legacy status "${legacyStatus}"`, 404);
+        }
+        const updated = await this.crm.moveToStage(leadId, companyId, stageId, this.optionalString(params.lostReason));
+        return { leadId: updated.id, stageId: updated.stageId };
       }
       case 'assign_lead_owner': {
         const leadId = this.requireString(params.leadId, 'leadId');
@@ -858,6 +902,26 @@ export class AutomationService {
         const status = this.requireString(params.status, 'status') as CampaignStatus;
         const updated = await this.marketing.updateStatus(campaignId, companyId, status);
         return { campaignId: updated.id, status: updated.status };
+      }
+      case 'record_payment': {
+        const contractId = this.requireString(params.contractId, 'contractId');
+        const contract = await this.sales.getContract(contractId);
+        if (!contract || contract.companyId !== companyId) throw new AutomationError('contract not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, contract.creditedEmployeeUserId);
+        const paymentScheduleLineId = this.requireString(params.paymentScheduleLineId, 'paymentScheduleLineId');
+        const amount = params.amount;
+        if (typeof amount !== 'number' || amount <= 0) throw new ValidationError('"amount" must be a positive number');
+        const method = this.requireString(params.method, 'method') as PaymentMethod;
+        const result = await this.finance.recordPayment({ companyId, contractId, paymentScheduleLineId, amount, method, recordedByUserId: actorUserId });
+        return { paymentId: result.payment.id, lineId: result.line.id, lineStatus: result.line.status };
+      }
+      case 'cancel_contract': {
+        const contractId = this.requireString(params.contractId, 'contractId');
+        const contract = await this.sales.getContract(contractId);
+        if (!contract || contract.companyId !== companyId) throw new AutomationError('contract not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, contract.creditedEmployeeUserId);
+        const cancelled = await this.sales.cancelContract(contractId, companyId);
+        return { contractId: cancelled.id, status: cancelled.status };
       }
       case 'webhook_call': {
         await this.requirePermission(actorUserId, action, companyId);

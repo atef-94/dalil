@@ -6,23 +6,40 @@ import { AuditLog } from '../../infra/audit-log.js';
 import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
+import { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
+import { FinanceService } from '../finance/finance.service.js';
+import { SalesService } from '../sales/sales.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from './integration.service.js';
 import type {
   ApprovalRequest,
   AuditLogEntry,
   Campaign,
+  Contract,
+  CrmStage,
   Employee,
   IntegrationConnection,
   IntegrationEvent,
   Lead,
   Message,
+  Opportunity,
+  Payment,
+  PaymentPlanTemplate,
+  PaymentScheduleLine,
   PermissionGrant,
   PermissionOverride,
+  Project,
+  Receipt,
+  Refund,
+  Reservation,
   Role,
   Secret,
   Task,
+  Unit,
+  UnitHold,
   User,
   UserRole,
   WorkflowDefinition,
@@ -50,11 +67,28 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   const campaigns = new InMemoryRepository<Campaign>();
   const auditLogRepo = new InMemoryRepository<AuditLogEntry>();
 
+  const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
   const tasks = new TaskService(tasksRepo);
   const communication = new CommunicationService(messages);
-  const crm = new CrmService(leads);
-  const marketing = new MarketingService(campaigns, leads);
+  const crm = new CrmService(leads, crmStages);
+  const marketing = new MarketingService(campaigns, leads, crmStages);
   const auditLog = new AuditLog(auditLogRepo);
+
+  const opportunities = new InMemoryRepository<Opportunity>();
+  const contracts = new InMemoryRepository<Contract>();
+  const payments = new InMemoryRepository<Payment>();
+  const receipts = new InMemoryRepository<Receipt>();
+  const refunds = new InMemoryRepository<Refund>();
+  const scheduleLines = new InMemoryRepository<PaymentScheduleLine>();
+  const units = new InMemoryRepository<Unit>();
+  const holds = new InMemoryRepository<UnitHold>();
+  const reservations = new InMemoryRepository<Reservation>();
+  const projects = new InMemoryRepository<Project>();
+  const templates = new InMemoryRepository<PaymentPlanTemplate>();
+  const inventory = new InventoryService(units, holds, reservations, projects);
+  const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
+  const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
   const automation = new AutomationService(
     { workflows, runs, stepRuns, approvals, secrets },
@@ -62,7 +96,10 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
     tasks,
     communication,
     crm,
+    crmStages,
     marketing,
+    finance,
+    sales,
     auditLog,
     'test-encryption-secret-not-for-production',
   );
