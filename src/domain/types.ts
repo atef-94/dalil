@@ -1084,6 +1084,24 @@ export interface AgentDecision {
    * (when status === 'proceeded') — lets a caller show the outcome without
    * a second round trip. */
   resultActionStatus?: AiActionStatus;
+  /** Read from the Tool Registry entry for chosenActionType (see
+   * ai-agent.service.ts's TOOL_REGISTRY) — the same real blast-radius
+   * classification used for every other AI action, not a second,
+   * decision-specific guess. Undefined when no action was chosen. */
+  riskLevel?: 'low' | 'medium' | 'high';
+  /** The RBAC grant chosenActionType actually requires, read from the same
+   * ACTION_RESOURCE/ACTION_VERB maps AutomationService enforces at
+   * execution time. Undefined when no action was chosen. */
+  requiredPermission?: { action: ActionName; resource: ResourceName };
+  /** Whether this company's AiPolicy for chosenActionType requires a human
+   * approval step (i.e. autonomy is not 'auto_execute') at the moment this
+   * decision was made. Undefined when no action was chosen. */
+  approvalRequired?: boolean;
+  /** A concrete, deterministic description of what happens next — derived
+   * from this decision's actual outcome (proceeded/escalated/no_action and,
+   * for 'proceeded', the resulting AiActionRequest's status), never a
+   * fabricated or generic string. */
+  nextRecommendedStep: string;
   requestedByUserId: string;
   createdAt: string;
 }

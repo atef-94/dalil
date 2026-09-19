@@ -483,6 +483,7 @@ test('ai_decide dispatches to the configured AI decider and returns its decision
       reasoning: 'stubbed decision',
       alternatives: [],
       status: 'proceeded',
+      nextRecommendedStep: 'stubbed next step',
       requestedByUserId,
       createdAt: new Date().toISOString(),
     };

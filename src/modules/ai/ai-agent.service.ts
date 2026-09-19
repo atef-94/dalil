@@ -518,6 +518,28 @@ export class AiAgentService {
    * terminal outcome yet ('suggested'/'pending_approval'). A decision
    * whose request was executed or denied is stale — the situation may
    * have changed, so the next decide() call re-evaluates from scratch. */
+  /** A concrete "what happens next" string derived from this decision's
+   * actual, already-known outcome — never a generic placeholder. */
+  private nextRecommendedStepFor(status: AgentDecisionStatus, resultActionStatus: AiActionStatus | undefined, result: AgentDecisionResult): string {
+    if (status === 'no_action') return 'No further action needed at this time.';
+    if (status === 'escalated') return 'Needs human review — see the reasoning above before deciding manually.';
+    // status === 'proceeded'
+    switch (resultActionStatus) {
+      case 'executed':
+        return 'Action already executed automatically — monitor the outcome and re-run if the situation changes.';
+      case 'pending_approval':
+        return 'Awaiting a human approval decision in Approvals before this executes.';
+      case 'suggested':
+        return "This company's AI policy only suggests this action type — review it in AI Activity and act manually if appropriate.";
+      case 'denied_permission':
+        return 'Blocked: the requesting user lacks the required permission — grant it, or have an authorized user request this action.';
+      case 'denied_policy':
+        return 'Blocked by policy/validation — see the AI action request for the exact reason.';
+      default:
+        return result.alternatives[0]?.reasoning ?? 'Review the outcome in AI Activity.';
+    }
+  }
+
   private async findRecentDecision(companyId: string, agentKey: string, subjectId: string): Promise<AgentDecision | undefined> {
     const COOLDOWN_MS = 60 * 60 * 1000;
     const now = Date.now();
@@ -544,6 +566,8 @@ export class AiAgentService {
     aiActionRequestId?: string,
     resultActionStatus?: AiActionStatus,
   ): Promise<AgentDecision> {
+    const tool = result.chosenActionType ? TOOL_REGISTRY.find((t) => t.actionType === result.chosenActionType) : undefined;
+    const approvalRequired = result.chosenActionType ? (await this.autonomyFor(companyId, result.chosenActionType)) !== 'auto_execute' : undefined;
     const decision: AgentDecision = {
       id: randomUUID(),
       companyId,
@@ -558,6 +582,10 @@ export class AiAgentService {
       status,
       aiActionRequestId,
       resultActionStatus,
+      riskLevel: tool?.riskLevel,
+      requiredPermission: tool?.requiredPermission,
+      approvalRequired,
+      nextRecommendedStep: this.nextRecommendedStepFor(status, resultActionStatus, result),
       requestedByUserId,
       createdAt: new Date().toISOString(),
     };

@@ -1,4 +1,4 @@
-import { el, clear, table, errorBanner, statusBadge, loadingState, statCard, paginationControls } from '../ui.js';
+import { el, clear, table, errorBanner, statusBadge, loadingState, statCard, paginationControls, badge } from '../ui.js';
 import { t } from '../i18n.js';
 import { getLocale } from '../state.js';
 import { api } from '../api.js';
@@ -47,8 +47,11 @@ export async function renderAiActivity(container) {
           { label: 'Agent', key: 'agentKey' },
           { label: 'Subject', render: (d) => `${d.subjectType}:${d.subjectId.slice(0, 8)}…` },
           { label: 'Chosen action', render: (d) => d.chosenActionType || '—' },
+          { label: 'Risk', render: (d) => d.riskLevel ? badge(d.riskLevel, d.riskLevel === 'high' ? 'red' : d.riskLevel === 'medium' ? 'amber' : 'green') : '—' },
+          { label: 'Approval req.', render: (d) => d.approvalRequired === undefined ? '—' : (d.approvalRequired ? 'Yes' : 'No') },
           { label: 'Confidence', render: (d) => `${d.confidence}%` },
           { label: 'Reasoning', render: (d) => el('span', { class: 'wrap' }, d.reasoning) },
+          { label: 'Next step', render: (d) => el('span', { class: 'wrap' }, d.nextRecommendedStep || '—') },
           { label: 'Status', render: (d) => statusBadge(d.status) },
           { label: 'When', render: (d) => new Date(d.createdAt).toLocaleString() },
         ],

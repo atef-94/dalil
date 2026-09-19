@@ -463,6 +463,39 @@ test('suggestNextAction proposes advancing a well-scored new lead to contacted',
   assert.equal(decision.chosenActionType, 'update_lead_status');
   assert.equal((decision.params as { stageId: string }).stageId, contacted.id);
   assert.match(decision.reasoning, /score/i);
+  // Phase 3: the structured decision output — riskLevel/requiredPermission
+  // are read from the real Tool Registry, not fabricated per-decision.
+  assert.equal(decision.riskLevel, 'medium');
+  assert.deepEqual(decision.requiredPermission, { action: 'edit', resource: 'lead' });
+  assert.equal(decision.approvalRequired, true); // no AiPolicy set -> defaults to require_approval
+  assert.match(decision.nextRecommendedStep, /approval/i);
+});
+
+test('a proceeded decision that auto-executes reports approvalRequired: false and a concrete next step', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Auto Client', phone: '0101', sourceId: 'campaign-1', ownerEmployeeUserId: 'human-1' });
+  const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.resultActionStatus, 'executed');
+  assert.equal(decision.approvalRequired, false);
+  assert.match(decision.nextRecommendedStep, /already executed/i);
+});
+
+test('an escalated decision has no riskLevel/requiredPermission (no action was chosen to execute)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Qualified Client', phone: '0100' });
+  const recycle = await stageByKey(h.crmStages, 'c1', 'recycle');
+  await h.crm.moveToStage(lead.id, 'c1', recycle.id);
+  const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
+  assert.equal(decision.status, 'escalated');
+  // decideSales's escalation path still proposes a create_task action
+  // (it's the alternative it would take if not escalated), so risk
+  // metadata is still populated from that chosen action type.
+  assert.equal(decision.riskLevel, 'low');
+  assert.match(decision.nextRecommendedStep, /human review/i);
 });
 
 test('suggestNextAction reports no_action for a lead already lost, without proposing anything', async () => {
