@@ -55,7 +55,11 @@ export class PortalService {
       leadId: lead.id,
       fullName: lead.fullName,
       phone: lead.phone,
-      email: lead.email,
+      // The lead's own contact email wins when captured (it may predate
+      // and differ from the portal login), but a customer who now has a
+      // real, working login should never show blank in the staff-facing
+      // Customers list just because their originating lead never had one.
+      email: lead.email ?? input.email,
       createdAt: new Date().toISOString(),
     };
     await this.customers.save(customer);
