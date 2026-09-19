@@ -134,11 +134,9 @@ test('AI Workflow Engine: full lead-followup plan runs over real HTTP, waits, th
 
 test('AI Workflow Engine rejects a request from a user without create:ai_action permission', async () => {
   await withServer(async (base, app) => {
-    const salesAgentUserId = app.seedResult!.demoUsers.find((u) => u.label?.includes('Sales Agent'))?.userId
-      ?? app.seedResult!.demoUsers.find((u) => u.label !== 'CEO')!.userId;
-    const headers = { 'x-demo-user': salesAgentUserId };
-    // A Sales Agent with only 'own'-scoped ai_action grants cannot start a
-    // workflow against a lead they do not own.
+    // The seeded Finance role carries no ai_action grants at all (see
+    // seed.ts) — a genuine, unambiguous deny case, not a scope edge case.
+    const financeUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Finance')!.userId;
     const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
     const leadRes = await call(base, 'POST', '/api/crm/leads', {
       fullName: 'Someone Elses Lead', phone: `+2011${Date.now()}`.slice(0, 14),
@@ -146,14 +144,21 @@ test('AI Workflow Engine rejects a request from a user without create:ai_action 
     assert.equal(leadRes.status, 201);
     const lead = leadRes.body as { id: string };
 
-    const startRes = await call(base, 'POST', '/api/ai/workflows', { goalType: 'high_value_lead_followup', subjectId: lead.id }, headers);
-    // Either forbidden outright (no create:ai_action grant at all) or,
-    // if this seeded role does carry an own-scoped grant, the workflow
-    // still runs — the important, security-relevant assertion is that an
-    // unauthenticated/ungranted caller is never allowed through silently.
-    assert.ok([201, 403].includes(startRes.status));
-    if (startRes.status === 403) {
-      assert.match(JSON.stringify(startRes.body), /permission/i);
-    }
+    const startRes = await call(base, 'POST', '/api/ai/workflows', { goalType: 'high_value_lead_followup', subjectId: lead.id }, { 'x-demo-user': financeUserId });
+    assert.equal(startRes.status, 403);
+    assert.match(JSON.stringify(startRes.body), /permission/i);
+
+    // Cross-tenant: a run created under one company is invisible to a
+    // fresh, unrelated company/user pair even with a valid create grant.
+    const startedRes = await call(base, 'POST', '/api/ai/workflows', { goalType: 'high_value_lead_followup', subjectId: lead.id }, { 'x-demo-user': ceoUserId });
+    assert.equal(startedRes.status, 201);
+    const runId = (startedRes.body as { id: string }).id;
+
+    const otherSignup = await call(base, 'POST', '/api/auth/signup', {
+      companyName: `Other Co ${Date.now()}`, fullName: 'Other CEO', email: `other-${Date.now()}@example.com`, password: 'Passw0rd!123',
+    });
+    const otherToken = (otherSignup.body as { token: string }).token;
+    const getRes = await call(base, 'GET', `/api/ai/workflows/${runId}`, undefined, { Authorization: `Bearer ${otherToken}` });
+    assert.equal(getRes.status, 404);
   });
 });
