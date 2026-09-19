@@ -26,6 +26,7 @@ import { renderWorkflowHistory } from './pages/workflow-history.js';
 import { renderApprovals } from './pages/approvals.js';
 import { renderAi } from './pages/ai.js';
 import { renderAiActivity } from './pages/ai-activity.js';
+import { renderAiWorkflows } from './pages/ai-workflows.js';
 import { renderIntegrations } from './pages/integrations.js';
 import { renderBranches } from './pages/branches.js';
 import { renderSettings } from './pages/settings.js';
@@ -75,6 +76,7 @@ const NAV = [
     { path: '/workflow-history', labelKey: 'nav_workflow_history', render: renderWorkflowHistory, icon: 'history', resource: 'workflow_run', action: 'view' },
     { path: '/approvals', labelKey: 'nav_approvals', render: renderApprovals, icon: 'approvals', resource: 'approval', action: 'view' },
     { path: '/ai', labelKey: 'nav_ai', render: renderAi, icon: 'ai', resource: 'ai_action', action: 'view' },
+    { path: '/ai-workflows', labelKey: 'nav_ai_workflows', render: renderAiWorkflows, icon: 'ai', resource: 'ai_action', action: 'view' },
     { path: '/ai-activity', labelKey: 'nav_ai_activity', render: renderAiActivity, icon: 'bell', resource: 'ai_action', action: 'view' },
     { path: '/integrations', labelKey: 'nav_integrations', render: renderIntegrations, icon: 'integrations', resource: 'integration_connection', action: 'view' },
   ] },
