@@ -9,13 +9,7 @@ import { renderEmployees } from './pages/employees.js';
 import { renderRoles } from './pages/roles.js';
 import { renderCrm } from './pages/crm.js';
 import { mountAiAssistant, clearAiContext } from './pages/ai-panel.js';
-import { renderCustomers } from './pages/customers.js';
-import { renderOpportunities } from './pages/opportunities.js';
-import { renderContracts } from './pages/contracts.js';
-import { renderReservations } from './pages/reservations.js';
 import { renderUnits } from './pages/units.js';
-import { renderTemplates } from './pages/templates.js';
-import { renderQuotations } from './pages/quotations.js';
 import { renderFinance } from './pages/finance.js';
 import { renderBrokers } from './pages/brokers.js';
 import { renderSalesCommissions } from './pages/sales-commissions.js';
@@ -25,7 +19,6 @@ import { renderOperations } from './pages/operations.js';
 import { renderLegal } from './pages/legal.js';
 import { renderPurchasing } from './pages/purchasing.js';
 import { renderMarketing } from './pages/marketing.js';
-import { renderCommunication } from './pages/communication.js';
 import { renderAnalytics } from './pages/analytics.js';
 import { renderPortal } from './pages/portal.js';
 import { renderAutomation } from './pages/automation.js';
@@ -49,22 +42,25 @@ const NAV = [
   { section: 'section_overview', items: [
     { path: '/dashboard', labelKey: 'nav_dashboard', render: renderDashboard, icon: 'dashboard', resource: null },
   ] },
+  // Leads, Follow-ups, Customers, Offers, Payment Plans, Quotations,
+  // Reservations, Contracts, Communications, and Tasks are the Sales/CRM
+  // lifecycle — per the sidebar restructuring, they live as tabs inside the
+  // single CRM workspace (see crm.js's moduleTabs) instead of as separate
+  // top-level sections. Nothing was rebuilt: every one of those pages still
+  // exists exactly as before and is simply mounted into CRM's tab body.
   { section: 'section_sales', items: [
     { path: '/crm', labelKey: 'nav_crm', render: renderCrm, icon: 'leads', resource: 'lead', action: 'view' },
-    { path: '/customers', labelKey: 'nav_customers', render: renderCustomers, icon: 'customers', resource: 'portal_access', action: 'view' },
-    { path: '/offers', labelKey: 'nav_offers', render: renderOpportunities, icon: 'opportunities', resource: 'opportunity', action: 'view' },
-    { path: '/contracts', labelKey: 'nav_contracts', render: renderContracts, icon: 'contracts', resource: 'contract', action: 'view' },
-    { path: '/reservations', labelKey: 'nav_reservations', render: renderReservations, icon: 'reservations', resource: 'unit', action: 'view' },
+  ] },
+  { section: 'section_inventory', items: [
     { path: '/units', labelKey: 'nav_units', render: renderUnits, icon: 'units', resource: 'unit', action: 'view' },
-    { path: '/templates', labelKey: 'nav_templates', render: renderTemplates, icon: 'templates', resource: 'payment_plan_template', action: 'view' },
-    { path: '/quotations', labelKey: 'nav_quotations', render: renderQuotations, icon: 'quotations', resource: 'quotation', action: 'view' },
+  ] },
+  { section: 'section_finance', items: [
     { path: '/finance', labelKey: 'nav_finance', render: renderFinance, icon: 'finance', resource: 'payment_schedule', action: 'view' },
     { path: '/brokers', labelKey: 'nav_brokers', render: renderBrokers, icon: 'brokers', resource: 'broker_company', action: 'view' },
     { path: '/sales-commissions', labelKey: 'nav_sales_commissions', render: renderSalesCommissions, icon: 'commissions', resource: 'sales_commission', action: 'view' },
   ] },
   { section: 'section_growth', items: [
     { path: '/marketing', labelKey: 'nav_marketing', render: renderMarketing, icon: 'marketing', resource: 'campaign', action: 'view' },
-    { path: '/communication', labelKey: 'nav_communication', render: renderCommunication, icon: 'communication', resource: 'message', action: 'view' },
     { path: '/analytics', labelKey: 'nav_analytics', render: renderAnalytics, icon: 'analytics', resource: 'analytics', action: 'view' },
     { path: '/forecasting', labelKey: 'nav_forecasting', render: renderForecasting, icon: 'forecasting', resource: 'forecast', action: 'view' },
     { path: '/scenario-simulation', labelKey: 'nav_scenario_simulation', render: renderScenarioSimulation, icon: 'scenario', resource: 'forecast', action: 'view' },
@@ -188,11 +184,22 @@ async function showApp() {
 
   flatNav().forEach((item) => registerRoute(item.path, item.render));
 
-  // "Opportunities" was renamed to "Offers" (the module itself — RBAC
-  // resource, API routes, and data model — is unchanged; only the
-  // user-facing name moved). This keeps any old #/opportunities link or
-  // bookmark working instead of 404ing.
-  const LEGACY_PATH_REDIRECTS = { '/opportunities': '/offers' };
+  // Two rounds of sidebar changes keep old links working instead of
+  // 404ing: "Opportunities" was renamed to "Offers" (module/RBAC/routes
+  // unchanged, only the name), and the whole Sales/CRM lifecycle — Offers
+  // included — then moved from standalone top-level pages into tabs
+  // inside the single CRM workspace. Every one of these now lands on CRM
+  // itself; the specific module remains one click away as a CRM tab.
+  const LEGACY_PATH_REDIRECTS = {
+    '/opportunities': '/crm',
+    '/offers': '/crm',
+    '/customers': '/crm',
+    '/contracts': '/crm',
+    '/reservations': '/crm',
+    '/templates': '/crm',
+    '/quotations': '/crm',
+    '/communication': '/crm',
+  };
 
   async function onRouteChange(path) {
     if (LEGACY_PATH_REDIRECTS[path]) {
