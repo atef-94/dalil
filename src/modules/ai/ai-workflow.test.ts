@@ -14,6 +14,9 @@ import { HrService } from '../hr/hr.service.js';
 import { FinanceService } from '../finance/finance.service.js';
 import { SalesService } from '../sales/sales.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
+import { LegalService } from '../legal/legal.service.js';
+import { BrokersService } from '../brokers/brokers.service.js';
+import { AnalyticsService } from '../analytics/analytics.service.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from '../integrations/integration.service.js';
@@ -32,13 +35,18 @@ import type {
   AiWorkflowStepRun,
   ApprovalRequest,
   AuditLogEntry,
+  BrokerCompany,
+  BrokerLead,
   Campaign,
+  Commission,
+  CommissionRule,
   Employee,
   IntegrationConnection,
   IntegrationEvent,
   Lead,
   LeadDistributionPool,
   LeaveRequest,
+  LegalDocument,
   MaintenanceTicket,
   Message,
   Contract,
@@ -100,6 +108,11 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const projects = new InMemoryRepository<Project>();
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
   const pools = new InMemoryRepository<LeadDistributionPool>();
+  const legalDocuments = new InMemoryRepository<LegalDocument>();
+  const brokerCompanies = new InMemoryRepository<BrokerCompany>();
+  const brokerLeads = new InMemoryRepository<BrokerLead>();
+  const commissionRules = new InMemoryRepository<CommissionRule>();
+  const commissions = new InMemoryRepository<Commission>();
 
   const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
   for (const companyId of companyIds) {
@@ -119,6 +132,9 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
+  const legal = new LegalService(legalDocuments, contracts);
+  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm);
+  const analytics = new AnalyticsService(leads, opportunities, contracts, scheduleLines, units, commissions, auditLogRepo, campaigns, crmStages);
 
   const automation = new AutomationService(
     { workflows, runs, stepRuns, approvals, secrets },
@@ -164,6 +180,10 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     hr,
     finance,
     integrations,
+    legal,
+    brokers,
+    inventory,
+    analytics,
   );
 
   const aiWorkflowRuns = new InMemoryRepository<AiWorkflowRun>();

@@ -24,6 +24,10 @@ import { HrService } from '../hr/hr.service.js';
 import { FinanceService } from '../finance/finance.service.js';
 import { IntegrationService } from '../integrations/integration.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
+import { LegalService } from '../legal/legal.service.js';
+import { BrokersService } from '../brokers/brokers.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { AnalyticsService } from '../analytics/analytics.service.js';
 
 export interface AiRepos {
   actionRequests: Repository<AiActionRequest>;
@@ -157,6 +161,10 @@ export class AiAgentService {
     private readonly hr: HrService,
     private readonly finance: FinanceService,
     private readonly integrations: IntegrationService,
+    private readonly legal: LegalService,
+    private readonly brokers: BrokersService,
+    private readonly inventory: InventoryService,
+    private readonly analytics: AnalyticsService,
   ) {
     this.agents = {
       sales: {
@@ -202,6 +210,42 @@ export class AiAgentService {
         goal: 'Nudge managers on leave requests that have sat pending too long.',
         subjectType: 'leave_request',
         allowedActionTypes: ['create_task', 'send_message'],
+        escalateBelowConfidence: 20,
+      },
+      legal: {
+        key: 'legal',
+        name: 'Legal Agent',
+        businessFunction: 'Legal',
+        goal: 'Keep contract-required legal documents from stalling in "pending" or unverified "received" states.',
+        subjectType: 'legal_document',
+        allowedActionTypes: ['create_task', 'send_message'],
+        escalateBelowConfidence: 20,
+      },
+      broker: {
+        key: 'broker',
+        name: 'Broker Agent',
+        businessFunction: 'Broker / B2B',
+        goal: 'Flag broker-submitted leads awaiting the quarantine review too long — never auto-approves one itself, since that decision is a deliberate fraud/duplicate-prevention control.',
+        subjectType: 'broker_lead',
+        allowedActionTypes: ['create_task', 'send_message'],
+        escalateBelowConfidence: 20,
+      },
+      inventory: {
+        key: 'inventory',
+        name: 'Project & Inventory Agent',
+        businessFunction: 'Projects & Inventory',
+        goal: 'Surface units that have sat available with no reservation activity for an unusually long time.',
+        subjectType: 'unit',
+        allowedActionTypes: ['create_task'],
+        escalateBelowConfidence: 20,
+      },
+      management: {
+        key: 'management',
+        name: 'Management Intelligence Agent',
+        businessFunction: 'Management',
+        goal: "Give leadership an early flag when company-wide collections risk (overdue vs. tracked receivables) crosses a concerning threshold — a cross-department read, not a single record.",
+        subjectType: 'company',
+        allowedActionTypes: ['create_task'],
         escalateBelowConfidence: 20,
       },
     };
@@ -487,6 +531,14 @@ export class AiAgentService {
         return this.decideSupport(companyId, subjectId);
       case 'hr':
         return this.decideHr(companyId, subjectId);
+      case 'legal':
+        return this.decideLegal(companyId, subjectId);
+      case 'broker':
+        return this.decideBroker(companyId, subjectId);
+      case 'inventory':
+        return this.decideInventory(companyId, subjectId);
+      case 'management':
+        return this.decideManagement(companyId, subjectId);
       default:
         throw new NotFoundError(`no decision rules registered for agent: ${agent.key}`);
     }
@@ -714,6 +766,118 @@ export class AiAgentService {
       };
     }
     return { confidence: 70, reasoning: `Leave request pending for ${Math.round(ageHours)}h — still within a normal review window.`, alternatives: [] };
+  }
+
+  /** Legal Agent: a contract-required document stuck in "pending" too
+   * long needs chasing; one already "received" but not yet "verified"
+   * needs a human to actually check it — the agent never verifies a
+   * document itself, since that's a compliance judgment call. Ages off
+   * `createdAt` (the schema has no separate "received at" timestamp). */
+  private async decideLegal(companyId: string, documentId: string): Promise<AgentDecisionResult> {
+    const documents = await this.legal.listForCompany(companyId);
+    const doc = documents.find((d) => d.id === documentId);
+    if (!doc) throw new NotFoundError('legal document not found');
+    if (doc.status === 'verified' || doc.status === 'rejected') {
+      return { confidence: 100, reasoning: `Document is already ${doc.status}; no action needed.`, alternatives: [] };
+    }
+    const ageHours = Math.max(0, (Date.now() - Date.parse(doc.createdAt)) / (60 * 60 * 1000));
+    if (doc.status === 'pending' && ageHours > 72) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Chase pending legal document "${doc.name}" (${Math.round(ageHours)}h since requested)`, relatedResource: 'contract', relatedResourceId: doc.contractId },
+        confidence: Math.min(90, 50 + ageHours / 4),
+        reasoning: `Document "${doc.name}" has been pending for ${Math.round(ageHours)}h — recommend a follow-up to collect it.`,
+        alternatives: [],
+      };
+    }
+    if (doc.status === 'received' && ageHours > 48) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Verify received legal document "${doc.name}"`, relatedResource: 'contract', relatedResourceId: doc.contractId },
+        confidence: Math.min(85, 45 + ageHours / 6),
+        reasoning: `Document "${doc.name}" was received ${Math.round(ageHours)}h ago but hasn't been verified — recommend a review.`,
+        alternatives: [],
+      };
+    }
+    return { confidence: 70, reasoning: `Document is ${doc.status}, ${Math.round(ageHours)}h old — still within a normal review window.`, alternatives: [] };
+  }
+
+  /** Broker Agent: flags a broker-submitted lead that's sat in the
+   * quarantine review queue too long. Deliberately never chooses
+   * approveBrokerLead itself — that quarantine gate exists specifically
+   * to prevent auto-approved fraud/duplicate leads, so it always stays a
+   * human decision; the agent's only job is to make sure it isn't
+   * forgotten. */
+  private async decideBroker(companyId: string, brokerLeadId: string): Promise<AgentDecisionResult> {
+    const leads = await this.brokers.listBrokerLeads(companyId);
+    const lead = leads.find((l) => l.id === brokerLeadId);
+    if (!lead) throw new NotFoundError('broker lead not found');
+    if (lead.approvalStatus !== 'pending_approval') {
+      return { confidence: 100, reasoning: `Broker lead is already ${lead.approvalStatus}; no action needed.`, alternatives: [] };
+    }
+    const ageHours = Math.max(0, (Date.now() - Date.parse(lead.createdAt)) / (60 * 60 * 1000));
+    if (ageHours > 24) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Review quarantined broker lead "${lead.fullName}" (${Math.round(ageHours)}h pending)` },
+        confidence: Math.min(90, 40 + ageHours),
+        reasoning: `Broker-submitted lead has waited ${Math.round(ageHours)}h in the quarantine queue — recommend a review (never auto-approved by AI).`,
+        alternatives: [],
+      };
+    }
+    return { confidence: 60, reasoning: `Broker lead pending for ${Math.round(ageHours)}h — still within a normal review window.`, alternatives: [] };
+  }
+
+  /** Project & Inventory Agent: flags a unit that's been listed as
+   * available for a long time with zero reservation history — a real
+   * "stale inventory" signal worth a marketing/pricing review, not
+   * something the agent would ever act on by changing price or status
+   * itself (outside this agent's declared action boundary). */
+  private async decideInventory(companyId: string, unitId: string): Promise<AgentDecisionResult> {
+    const unit = await this.inventory.getUnit(unitId);
+    if (!unit || unit.companyId !== companyId) throw new NotFoundError('unit not found');
+    if (unit.status !== 'available') {
+      return { confidence: 100, reasoning: `Unit is ${unit.status}, not available; no action needed.`, alternatives: [] };
+    }
+    const ageDays = Math.max(0, (Date.now() - Date.parse(unit.createdAt)) / (24 * 60 * 60 * 1000));
+    const reservations = await this.inventory.listReservations(companyId);
+    const everReserved = reservations.some((r) => r.unitId === unitId);
+    if (!everReserved && ageDays > 90) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Review stale listing: unit ${unit.code} has been available ${Math.round(ageDays)}d with no reservation activity` },
+        confidence: Math.min(85, 40 + ageDays / 4),
+        reasoning: `Unit ${unit.code} has been available for ${Math.round(ageDays)}d with zero reservation history — recommend a pricing/marketing review.`,
+        alternatives: [],
+      };
+    }
+    return { confidence: 60, reasoning: `Unit ${unit.code} is available for ${Math.round(ageDays)}d — within a normal range or has reservation history.`, alternatives: [] };
+  }
+
+  /** Management Intelligence Agent: a cross-department read rather than a
+   * single-record decision — reuses AnalyticsService.collectionsAging
+   * (real payment-schedule-line data) to flag when the company's overdue
+   * receivables share of total tracked (upcoming + due + overdue) crosses
+   * a concerning threshold. subjectId is the companyId itself, since this
+   * agent's "subject" is the company, not one record. */
+  private async decideManagement(companyId: string, subjectCompanyId: string): Promise<AgentDecisionResult> {
+    if (subjectCompanyId !== companyId) throw new NotFoundError('company not found');
+    const aging = await this.analytics.collectionsAging(companyId);
+    const tracked = aging.upcoming + aging.due + aging.overdue;
+    if (tracked <= 0) {
+      return { confidence: 90, reasoning: 'No tracked receivables yet; no collections risk to flag.', alternatives: [] };
+    }
+    const overdueShare = Math.round((aging.overdue / tracked) * 1000) / 10;
+    if (overdueShare >= 25) {
+      return {
+        chosenActionType: 'create_task',
+        params: { title: `Collections risk review: ${overdueShare}% of tracked receivables are overdue (${aging.overdue} outstanding)` },
+        confidence: Math.min(90, 50 + overdueShare / 2),
+        reasoning: `${overdueShare}% of tracked receivables (upcoming+due+overdue = ${tracked}) are currently overdue — recommend a leadership-level collections review.`,
+        alternatives: [],
+      };
+    }
+    return { confidence: 80, reasoning: `Overdue receivables are ${overdueShare}% of tracked total — within a normal range.`, alternatives: [] };
   }
 
   async setPolicy(companyId: string, actionType: AutomationActionType, autonomyLevel: AiAutonomyLevel, updatedByUserId: string): Promise<AiPolicy> {

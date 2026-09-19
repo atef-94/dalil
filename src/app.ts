@@ -424,6 +424,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
     hr,
     finance,
     integrations,
+    legal,
+    brokers,
+    inventory,
+    analytics,
   );
   // Wires the `ai_decide` action type — a workflow step (or a manual
   // trigger) can hand a subject off to a specialized agent and let it

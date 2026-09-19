@@ -14,6 +14,9 @@ import { HrService } from '../hr/hr.service.js';
 import { FinanceService } from '../finance/finance.service.js';
 import { SalesService } from '../sales/sales.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
+import { LegalService } from '../legal/legal.service.js';
+import { BrokersService } from '../brokers/brokers.service.js';
+import { AnalyticsService } from '../analytics/analytics.service.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from '../integrations/integration.service.js';
@@ -26,12 +29,17 @@ import type {
   AiPolicy,
   ApprovalRequest,
   AuditLogEntry,
+  BrokerCompany,
+  BrokerLead,
   Campaign,
+  Commission,
+  CommissionRule,
   Employee,
   IntegrationConnection,
   IntegrationEvent,
   Lead,
   LeaveRequest,
+  LegalDocument,
   MaintenanceTicket,
   Message,
   Contract,
@@ -92,6 +100,11 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const reservations = new InMemoryRepository<Reservation>();
   const projects = new InMemoryRepository<Project>();
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
+  const legalDocuments = new InMemoryRepository<LegalDocument>();
+  const brokerCompanies = new InMemoryRepository<BrokerCompany>();
+  const brokerLeads = new InMemoryRepository<BrokerLead>();
+  const commissionRules = new InMemoryRepository<CommissionRule>();
+  const commissions = new InMemoryRepository<Commission>();
 
   const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
   for (const companyId of companyIds) {
@@ -109,6 +122,9 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
+  const legal = new LegalService(legalDocuments, contracts);
+  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm);
+  const analytics = new AnalyticsService(leads, opportunities, contracts, scheduleLines, units, commissions, auditLogRepo, campaigns, crmStages);
 
   const automation = new AutomationService(
     { workflows, runs, stepRuns, approvals, secrets },
@@ -159,6 +175,10 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     hr,
     finance,
     integrations,
+    legal,
+    brokers,
+    inventory,
+    analytics,
   );
 
   return {
@@ -170,6 +190,12 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     setIntegrationFetchImpl: (impl: typeof fetch) => {
       integrationFetchImpl = impl;
     },
+    legal,
+    brokers,
+    analytics,
+    legalDocuments,
+    brokerCompanies,
+    brokerLeads,
     users,
     roles,
     grants,
@@ -484,10 +510,10 @@ test('every AI action request is recorded in the audit log with executedByAI met
 
 // ---- Phase 2: Agent Orchestration Layer ----
 
-test('listAgents returns the 5 specialized business-function agents', async () => {
+test('listAgents returns all 9 specialized business-function agents', async () => {
   const h = await freshHarness();
   const keys = h.ai.listAgents().map((a) => a.key);
-  assert.deepEqual(keys.sort(), ['finance', 'hr', 'marketing', 'sales', 'support']);
+  assert.deepEqual(keys.sort(), ['broker', 'finance', 'hr', 'inventory', 'legal', 'management', 'marketing', 'sales', 'support']);
 });
 
 test('listTools returns the full tool registry, or a per-agent boundary-filtered subset', async () => {
@@ -722,6 +748,131 @@ test('hr agent reports no_action for a leave request still within the normal rev
   const leave = await h.hr.requestLeave({ companyId: 'c1', employeeId: 'emp-1', type: 'annual', startDate: '2026-03-01', endDate: '2026-03-05' });
   const decision = await h.ai.decide('hr', 'c1', leave.id, 'human-1');
   assert.equal(decision.status, 'no_action');
+});
+
+// ---- Legal Agent ----
+
+test('legal agent recommends chasing a document stuck pending too long', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.legalDocuments.save({
+    id: 'doc-1', companyId: 'c1', contractId: 'contract-1', type: 'title_deed', name: 'Title Deed',
+    status: 'pending', uploadedByUserId: 'human-1', createdAt: new Date(Date.now() - 80 * 60 * 60 * 1000).toISOString(),
+  });
+  const decision = await h.ai.decide('legal', 'c1', 'doc-1', 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.match(decision.reasoning, /pending/i);
+});
+
+test('legal agent recommends verifying a received-but-unverified document', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.legalDocuments.save({
+    id: 'doc-2', companyId: 'c1', contractId: 'contract-1', type: 'id_verification', name: 'ID Card',
+    status: 'received', uploadedByUserId: 'human-1', createdAt: new Date(Date.now() - 55 * 60 * 60 * 1000).toISOString(),
+  });
+  const decision = await h.ai.decide('legal', 'c1', 'doc-2', 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.match(decision.reasoning, /verif/i);
+});
+
+test('legal agent reports no_action for an already-verified document', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.legalDocuments.save({
+    id: 'doc-3', companyId: 'c1', contractId: 'contract-1', type: 'id_verification', name: 'ID Card',
+    status: 'verified', uploadedByUserId: 'human-1', createdAt: new Date().toISOString(), verifiedAt: new Date().toISOString(),
+  });
+  const decision = await h.ai.decide('legal', 'c1', 'doc-3', 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+// ---- Broker Agent ----
+
+test('broker agent flags a quarantined lead pending review too long, but never auto-approves it', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.brokerCompanies.save({ id: 'bc-1', companyId: 'c1', name: 'Acme Brokers', status: 'approved', createdAt: new Date().toISOString() });
+  await h.brokerLeads.save({
+    id: 'bl-1', companyId: 'c1', brokerCompanyId: 'bc-1', submittedByUserId: 'broker-user-1',
+    fullName: 'Broker Lead', phone: '0100', approvalStatus: 'pending_approval',
+    createdAt: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+  });
+  const decision = await h.ai.decide('broker', 'c1', 'bl-1', 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.match(decision.reasoning, /never auto-approved/i);
+  // Boundary check: 'approve broker lead' isn't even a valid AutomationActionType,
+  // so there's no risk of this agent choosing it — confirmed via its allowedActionTypes.
+  const brokerAgent = h.ai.listAgents().find((a) => a.key === 'broker')!;
+  assert.deepEqual(brokerAgent.allowedActionTypes.sort(), ['create_task', 'send_message']);
+});
+
+test('broker agent reports no_action for a lead already decided', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.brokerCompanies.save({ id: 'bc-2', companyId: 'c1', name: 'Acme Brokers', status: 'approved', createdAt: new Date().toISOString() });
+  await h.brokerLeads.save({
+    id: 'bl-2', companyId: 'c1', brokerCompanyId: 'bc-2', submittedByUserId: 'broker-user-1',
+    fullName: 'Broker Lead 2', phone: '0101', approvalStatus: 'approved', leadId: 'lead-x', createdAt: new Date().toISOString(),
+  });
+  const decision = await h.ai.decide('broker', 'c1', 'bl-2', 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+// ---- Project & Inventory Agent ----
+
+test('inventory agent flags a unit that has sat available for a long time with no reservation history', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const staleUnit = await h.units.save({
+    id: 'unit-stale', companyId: 'c1', projectId: 'project-1', code: 'A-999', unitType: 'apartment',
+    areaSqm: 100, listPrice: 1000000, status: 'available', createdAt: new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+  const decision = await h.ai.decide('inventory', 'c1', staleUnit.id, 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.match(decision.reasoning, /stale|reservation/i);
+});
+
+test('inventory agent reports no_action for a recently-listed unit', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  const freshUnit = await h.units.save({
+    id: 'unit-fresh', companyId: 'c1', projectId: 'project-1', code: 'A-1', unitType: 'apartment',
+    areaSqm: 100, listPrice: 1000000, status: 'available', createdAt: new Date().toISOString(),
+  });
+  const decision = await h.ai.decide('inventory', 'c1', freshUnit.id, 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+// ---- Management Intelligence Agent ----
+
+test('management agent flags a company-wide collections risk when overdue share crosses the threshold', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.scheduleLines.save({ id: 'l1', companyId: 'c1', contractId: 'c-1', sourceTemplateId: 't', sourceTemplateVersion: 1, sequence: 1, label: 'Overdue', dueDate: '2026-01-01', amount: 8000, amountPaid: 0, status: 'overdue' });
+  await h.scheduleLines.save({ id: 'l2', companyId: 'c1', contractId: 'c-1', sourceTemplateId: 't', sourceTemplateVersion: 1, sequence: 2, label: 'Upcoming', dueDate: '2026-06-01', amount: 2000, amountPaid: 0, status: 'upcoming' });
+  const decision = await h.ai.decide('management', 'c1', 'c1', 'human-1');
+  assert.equal(decision.status, 'proceeded');
+  assert.equal(decision.chosenActionType, 'create_task');
+  assert.match(decision.reasoning, /overdue/i);
+});
+
+test('management agent reports no_action when collections risk is within normal range', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await h.scheduleLines.save({ id: 'l3', companyId: 'c1', contractId: 'c-1', sourceTemplateId: 't', sourceTemplateVersion: 1, sequence: 1, label: 'Overdue', dueDate: '2026-01-01', amount: 500, amountPaid: 0, status: 'overdue' });
+  await h.scheduleLines.save({ id: 'l4', companyId: 'c1', contractId: 'c-1', sourceTemplateId: 't', sourceTemplateVersion: 1, sequence: 2, label: 'Upcoming', dueDate: '2026-06-01', amount: 9500, amountPaid: 0, status: 'upcoming' });
+  const decision = await h.ai.decide('management', 'c1', 'c1', 'human-1');
+  assert.equal(decision.status, 'no_action');
+});
+
+test('management agent rejects a subjectId that does not match the calling companyId', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT]);
+  await assert.rejects(() => h.ai.decide('management', 'c1', 'c2', 'human-1'));
 });
 
 // ---- Execution history / monitoring ----
