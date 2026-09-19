@@ -1987,6 +1987,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
       discountPercent?: number;
       escalationPercentPerYear?: number;
     }>(ctx.body);
+    if (!body.reservationId) throw new ValidationError('"reservationId" is required');
+    if (!body.paymentPlanTemplateId) throw new ValidationError('"paymentPlanTemplateId" is required');
+    if (!Number.isFinite(body.totalPrice) || body.totalPrice <= 0) throw new ValidationError('"totalPrice" must be a positive number');
     const creditedEmployeeUserId = await resolveCreditedEmployee(actor.companyId, body.reservationId, actor.userId);
     const signInput = {
       reservationId: body.reservationId,
