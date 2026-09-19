@@ -95,7 +95,23 @@ test('recompute replays the stored inputs through the same engine as calculate',
   });
   const { calculation } = await quotations.recompute(quotation.id, 'c1');
   const direct = await quotations.calculate('c1', { unitId: unit.id, paymentPlanTemplateId: template.id, discountPercent: 8, totalPriceOverride: 950_000 });
-  assert.deepEqual(calculation.schedule, direct.schedule);
+  // Each call's schedule starts from its own new Date() (see
+  // schedule-generator.ts), so the two calls can legitimately land in
+  // different milliseconds if the two calls straddle a tick — compare
+  // everything the engine actually derives from the inputs (sequence,
+  // label, amount, status) and assert dueDate is only ever off by a
+  // sub-second amount, rather than asserting byte-for-byte timestamp
+  // equality across two independently-timed calls.
+  assert.equal(calculation.schedule.length, direct.schedule.length);
+  for (let i = 0; i < calculation.schedule.length; i++) {
+    const a = calculation.schedule[i]!;
+    const b = direct.schedule[i]!;
+    assert.equal(a.sequence, b.sequence);
+    assert.equal(a.label, b.label);
+    assert.equal(a.amount, b.amount);
+    assert.equal(a.status, b.status);
+    assert.ok(Math.abs(Date.parse(a.dueDate) - Date.parse(b.dueDate)) < 1000, `dueDate drift too large at index ${i}: ${a.dueDate} vs ${b.dueDate}`);
+  }
   assert.equal(calculation.netValue, direct.netValue);
 });
 
