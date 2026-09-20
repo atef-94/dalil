@@ -52,6 +52,7 @@ import type {
   ScopeName,
   Secret,
   SensitivityTier,
+  SignatureEnvelope,
   Task,
   Unit,
   UnitHold,
@@ -110,6 +111,7 @@ import { AutomationService, type WorkflowStepInput } from './modules/automation/
 import { AiAgentService } from './modules/ai/ai-agent.service.js';
 import { AiWorkflowService } from './modules/ai/ai-workflow.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
+import { SignatureService } from './modules/integrations/e-signature.service.js';
 import { ForecastingService } from './modules/forecasting/forecasting.service.js';
 import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
 import { ImportSessionService } from './modules/imports/import-session.service.js';
@@ -191,6 +193,7 @@ export interface Application {
     aiAgent: AiAgentService;
     aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
+    signatures: SignatureService;
     /** Sweeps overdue payment schedule lines AND emits one
      * `payment.overdue_swept` domain event per swept line — use this
      * instead of `finance.sweepOverdue()` wherever the sweep should also
@@ -204,6 +207,10 @@ export interface Application {
      * also feed the Automation Engine (the HTTP route and main.ts's tick
      * both do), mirroring sweepOverdueAndEmit above. */
     sweepSlaBreachesAndEmit: () => Promise<number>;
+    /** Expires active Reservations past their expiresAt and emits one
+     * `reservation.expired` domain event per reservation, mirroring
+     * sweepOverdueAndEmit/sweepSlaBreachesAndEmit above. */
+    sweepExpiredReservationsAndEmit: () => Promise<number>;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -268,6 +275,7 @@ function buildRepos(db?: DatabaseSync) {
     quotations: repo<Quotation>('quotations'),
     aiWorkflowRuns: repo<AiWorkflowRun>('ai_workflow_runs'),
     aiWorkflowStepRuns: repo<AiWorkflowStepRun>('ai_workflow_step_runs'),
+    signatureEnvelopes: repo<SignatureEnvelope>('signature_envelopes'),
   };
 }
 
@@ -410,6 +418,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   automation.setIntegrationSender((companyId, provider, action, params, userId) =>
     integrations.send(companyId, provider as IntegrationConnection['provider'], action, params, userId),
   );
+  const signatures = new SignatureService(repos.signatureEnvelopes, repos.contracts, integrations, automation);
 
   const aiAgent = new AiAgentService(
     { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals, agentDecisions: repos.agentDecisions },
@@ -527,6 +536,23 @@ export async function buildApplication(options: AppOptions): Promise<Application
       });
     }
     return breaches.length;
+  };
+
+  // Same shared-by-manual-route-and-tick shape as sweepOverdueAndEmit above,
+  // for expired reservations — closes the previously-open gap where a
+  // reservation past its expiresAt never released its unit back onto the
+  // market unless something else happened to touch that unit.
+  const sweepExpiredReservationsAndEmit = async (): Promise<number> => {
+    const expired = await inventory.sweepExpiredReservationsDetailed();
+    for (const reservation of expired) {
+      await emitEvent({
+        companyId: reservation.companyId,
+        type: 'reservation.expired',
+        payload: { ...reservation },
+        dedupeKey: `reservation.expired:${reservation.id}`,
+      });
+    }
+    return expired.length;
   };
 
   const employeeScopeKeys = async (ownerUserId: string | undefined): Promise<ScopeOwnerKeys> => {
@@ -1448,6 +1474,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: paginate(reservations, ctx.query) };
   });
 
+  // Manual trigger for the same sweep main.ts's 60s tick runs — mirrors
+  // POST /api/finance/sweep-overdue's shape for expired reservations.
+  httpServer.post('/api/inventory/sweep-expired-reservations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {
+      throw new ForbiddenError('missing edit:unit permission');
+    }
+    const count = await sweepExpiredReservationsAndEmit();
+    return { status: 200, body: { swept: count } };
+  });
+
   // ---- CRM ----
   httpServer.post('/api/crm/leads', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -2141,6 +2178,60 @@ export async function buildApplication(options: AppOptions): Promise<Application
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'approval', resourceId: approval.id, metadata: { actionType: 'contract_amendment', contractId } });
     await emitEvent({ companyId: actor.companyId, type: 'action_approval.requested', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.requested:${approval.id}` });
     return { status: 202, body: approval };
+  });
+
+  // ---- E-Signature ----
+  // Additive to the existing contract flow — Contract.status itself, and
+  // everything that depends on it, is unchanged; this only tracks whether a
+  // customer has actually digitally signed the document.
+  httpServer.post('/api/sales/contracts/:contractId/signature-envelopes', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'signature_envelope'))) {
+      throw new ForbiddenError('missing create:signature_envelope permission');
+    }
+    const body = parseJsonBody<{ signerEmail: string; documentUrl: string }>(ctx.body);
+    const envelope = await signatures.sendForSignature({
+      companyId: actor.companyId,
+      contractId: ctx.params.contractId!,
+      signerEmail: body.signerEmail,
+      documentUrl: body.documentUrl,
+      requestedByUserId: actor.userId,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'signature_envelope', resourceId: envelope.id, metadata: { contractId: envelope.contractId } });
+    await emitEvent({ companyId: actor.companyId, type: 'contract.signature_sent', payload: { ...envelope }, actorUserId: actor.userId, dedupeKey: `contract.signature_sent:${envelope.id}` });
+    return { status: 201, body: envelope };
+  });
+
+  httpServer.get('/api/sales/contracts/:contractId/signature-envelopes', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'signature_envelope'))) {
+      throw new ForbiddenError('missing view:signature_envelope permission');
+    }
+    const list = await signatures.listForContract(ctx.params.contractId!, actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  // Inbound e-signature provider callback. Intentionally unauthenticated —
+  // same companyId + unguessable-id-in-the-URL model as the Automation
+  // Engine's webhook receiver above — but additionally requires a valid
+  // HMAC-SHA256 signature (computed over this connection's own
+  // webhook_secret) before any envelope state changes: an unsigned or
+  // mis-signed callback is refused outright, never treated as a real
+  // "customer signed" event. The signature is verified over this server's
+  // JSON re-serialization of the body (the HTTP layer only ever hands route
+  // handlers already-parsed JSON, not the original raw bytes) — a real
+  // provider integration wanting byte-exact verification against its own
+  // raw payload would need the shared body-reader extended to preserve it.
+  httpServer.post('/api/integrations/e-signature/webhooks/:companyId/:envelopeId', async (ctx) => {
+    const rawBody = ctx.body === undefined ? '' : JSON.stringify(ctx.body);
+    const signatureHeader = ctx.headers['x-signature-hmac'];
+    const envelope = await signatures.handleWebhook(
+      ctx.params.envelopeId!,
+      ctx.params.companyId!,
+      rawBody,
+      typeof signatureHeader === 'string' ? signatureHeader : undefined,
+    );
+    return { status: 200, body: { id: envelope.id, status: envelope.status } };
   });
 
   // ---- Finance ----
@@ -3801,7 +3892,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, aiAgent, aiWorkflow, integrations,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiWorkflow, integrations, signatures,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,

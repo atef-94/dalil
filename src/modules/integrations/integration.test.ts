@@ -132,11 +132,11 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   };
 }
 
-test('listConnectors returns metadata for all 6 providers', () => {
+test('listConnectors returns metadata for all 7 providers', () => {
   const h = freshHarness();
   const connectors = h.integrations.listConnectors();
   const providers = connectors.map((c) => c.provider).sort();
-  assert.deepEqual(providers, ['custom_api', 'email', 'google_calendar', 'meta_ads', 'payment_stripe', 'whatsapp']);
+  assert.deepEqual(providers, ['custom_api', 'e_signature', 'email', 'google_calendar', 'meta_ads', 'payment_stripe', 'whatsapp']);
 });
 
 test('connect rejects a request missing a required credential field', async () => {
@@ -282,6 +282,25 @@ test('custom_api connector builds the URL from baseUrl + path and forwards the a
   const call = h.fetchCalls[0]!;
   assert.equal(call.url, 'https://api.example.com/v1/things');
   assert.equal((call.init?.headers as Record<string, string>).Authorization, 'Bearer key-xyz');
+});
+
+test('e_signature connector sends a DocuSign-shaped envelope request and returns the envelope id', async () => {
+  const h = freshHarness();
+  await h.integrations.connect({
+    companyId: 'c1', provider: 'e_signature', displayName: 'My E-Signature', config: { accountId: 'acct-1' },
+    credentials: { api_key: 'key-sig', webhook_secret: 'whsec-1' }, createdByUserId: 'u1',
+  });
+  h.setFetchImpl((async (url, init) => {
+    h.fetchCalls.push({ url: String(url), init: init as RequestInit | undefined });
+    return new Response(JSON.stringify({ envelopeId: 'env-123' }), { status: 201 });
+  }) as typeof fetch);
+  const result = await h.integrations.send('c1', 'e_signature', 'send_envelope', { to: 'buyer@example.com', documentUrl: 'https://docs.example.com/c1.pdf', contractId: 'contract-1' }, 'u1');
+  assert.equal((result as { envelopeId: string }).envelopeId, 'env-123');
+  const call = h.fetchCalls[0]!;
+  assert.match(call.url, /demo\.docusign\.net\/restapi\/v2\.1\/accounts\/acct-1\/envelopes/);
+  assert.equal((call.init?.headers as Record<string, string>).Authorization, 'Bearer key-sig');
+  const body = JSON.parse(call.init?.body as string);
+  assert.equal(body.recipients.signers[0].email, 'buyer@example.com');
 });
 
 test('the delivery log never records raw message content, only a safe field summary', async () => {

@@ -218,4 +218,30 @@ export class InventoryService {
     if (!reservation) throw new NotFoundError('reservation not found');
     return this.reservations.save({ ...reservation, status: 'cancelled' });
   }
+
+  /** Never touches a reservation that already converted or was cancelled.
+   * Safe to call repeatedly — same shape as FinanceService.sweepOverdue. */
+  async sweepExpiredReservations(now = new Date()): Promise<number> {
+    const swept = await this.sweepExpiredReservationsDetailed(now);
+    return swept.length;
+  }
+
+  /** Same sweep as sweepExpiredReservations(), but returns the reservations
+   * it actually expired — used by app.ts/main.ts to emit one
+   * `reservation.expired` domain event per reservation so the Automation
+   * Engine can react (e.g. notify the assigned agent). Releases the unit
+   * back to 'available' only when it's still 'reserved' — a unit that has
+   * since been contracted (or otherwise moved on) is never downgraded. */
+  async sweepExpiredReservationsDetailed(now = new Date()): Promise<Reservation[]> {
+    const candidates = await this.reservations.findAll((r) => r.status === 'active' && Date.parse(r.expiresAt) < now.getTime());
+    const swept: Reservation[] = [];
+    for (const reservation of candidates) {
+      swept.push(await this.reservations.save({ ...reservation, status: 'cancelled' }));
+      const unit = await this.units.findById(reservation.unitId);
+      if (unit && unit.status === 'reserved') {
+        await this.units.save({ ...unit, status: 'available' });
+      }
+    }
+    return swept;
+  }
 }

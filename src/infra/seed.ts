@@ -74,6 +74,7 @@ const ALL_RESOURCES: ResourceName[] = [
   'integration_connection',
   'sales_commission',
   'forecast',
+  'signature_envelope',
 ];
 
 /**

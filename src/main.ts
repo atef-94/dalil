@@ -75,6 +75,14 @@ async function main(): Promise<void> {
   }, 60_000);
   aiWorkflowSweepInterval.unref();
 
+  // Inventory: releases any Reservation left past its expiresAt (never
+  // converted to a contract) back onto the market, same 60s cadence as the
+  // other ticks above. See InventoryService.sweepExpiredReservationsDetailed.
+  const reservationSweepInterval = setInterval(() => {
+    void services.sweepExpiredReservationsAndEmit();
+  }, 60_000);
+  reservationSweepInterval.unref();
+
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
@@ -83,6 +91,8 @@ async function main(): Promise<void> {
     clearInterval(sweepInterval);
     clearInterval(slaSweepInterval);
     clearInterval(scheduledWorkflowInterval);
+    clearInterval(aiWorkflowSweepInterval);
+    clearInterval(reservationSweepInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');
       process.exit(1);

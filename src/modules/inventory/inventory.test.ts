@@ -196,6 +196,65 @@ test('concurrency: 8 concurrent reserve calls on the same unit produce exactly 1
   assert.equal(refreshed!.status, 'reserved');
 });
 
+test('sweepExpiredReservationsDetailed releases the unit and cancels the reservation once expiresAt has passed', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const reservation = await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  const future = new Date(Date.parse(reservation.expiresAt) + 1000);
+
+  const swept = await svc.sweepExpiredReservationsDetailed(future);
+  assert.equal(swept.length, 1);
+  assert.equal(swept[0]!.id, reservation.id);
+  assert.equal(swept[0]!.status, 'cancelled');
+
+  const refreshedUnit = await svc.getUnit(unit.id);
+  assert.equal(refreshedUnit!.status, 'available');
+});
+
+test('sweepExpiredReservationsDetailed never touches a reservation that has not expired yet', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+
+  const swept = await svc.sweepExpiredReservationsDetailed(new Date());
+  assert.equal(swept.length, 0);
+  const refreshedUnit = await svc.getUnit(unit.id);
+  assert.equal(refreshedUnit!.status, 'reserved');
+});
+
+test('sweepExpiredReservationsDetailed never downgrades a unit that has since been contracted', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const reservation = await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  await svc.markContracted(unit.id);
+  const future = new Date(Date.parse(reservation.expiresAt) + 1000);
+
+  const swept = await svc.sweepExpiredReservationsDetailed(future);
+  assert.equal(swept.length, 1, 'the reservation itself still expires (it never converted)');
+  const refreshedUnit = await svc.getUnit(unit.id);
+  assert.equal(refreshedUnit!.status, 'contracted', 'a contracted unit is never downgraded back to available');
+});
+
+test('sweepExpiredReservationsDetailed never touches an already-converted or already-cancelled reservation', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const reservation = await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  await svc.markReservationConverted(reservation.id);
+  const future = new Date(Date.parse(reservation.expiresAt) + 1000);
+
+  const swept = await svc.sweepExpiredReservationsDetailed(future);
+  assert.equal(swept.length, 0);
+});
+
+test('sweepExpiredReservations returns just the count', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const reservation = await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  const future = new Date(Date.parse(reservation.expiresAt) + 1000);
+  const count = await svc.sweepExpiredReservations(future);
+  assert.equal(count, 1);
+});
+
 test('concurrency: 8 concurrent hold calls on the same unit produce exactly 1 winner', async () => {
   const svc = freshService();
   const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });

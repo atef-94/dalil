@@ -67,6 +67,14 @@ const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     actions: ['charge'],
   },
   {
+    provider: 'e_signature',
+    name: 'E-Signature (DocuSign-compatible)',
+    description: 'Send a contract document for e-signature via a DocuSign-shaped REST API and receive a webhook-verified signed/declined callback.',
+    configFields: ['accountId'],
+    credentialFields: ['api_key', 'webhook_secret'],
+    actions: ['send_envelope'],
+  },
+  {
     provider: 'custom_api',
     name: 'Custom API',
     description: 'Generic authenticated REST passthrough for other approved third-party services.',
@@ -320,6 +328,8 @@ export class IntegrationService {
         return this.createCalendarEvent(connection, credentials, params);
       case 'payment_stripe':
         return this.chargeStripe(credentials, params);
+      case 'e_signature':
+        return this.sendSignatureEnvelope(connection, credentials, params);
       case 'custom_api':
         return this.callCustomApi(connection, credentials, params);
       default:
@@ -410,6 +420,37 @@ export class IntegrationService {
     });
     if (!res.ok) throw new Error(`Stripe API returned ${res.status}`);
     return { status: res.status };
+  }
+
+  // ---- E-Signature ----
+  // Generic envelope-creation request shape (subject, one document
+  // referenced by URL, one signer) — not certified against a specific
+  // vendor's exact field contract, same honest scope as every other
+  // connector here (a thin, real REST wrapper an admin points at their own
+  // account, not a vendor-verified integration).
+  private async sendSignatureEnvelope(connection: IntegrationConnection, credentials: Record<string, string>, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const to = this.requireString(params.to, 'to');
+    const documentUrl = this.requireString(params.documentUrl, 'documentUrl');
+    const contractId = this.requireString(params.contractId, 'contractId');
+    const accountId = this.requireString(connection.config.accountId, 'accountId');
+    const apiKey = this.requireString(credentials.api_key, 'api_key');
+    // baseUri is per-account with a real e-signature provider (issued at
+    // OAuth time) — config.baseUri lets an admin point at their own,
+    // defaulting to the provider's public developer sandbox host.
+    const baseUri = typeof connection.config.baseUri === 'string' && connection.config.baseUri ? connection.config.baseUri : 'demo.docusign.net';
+    const res = await this.fetchImpl(`https://${baseUri}/restapi/v2.1/accounts/${encodeURIComponent(accountId)}/envelopes`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        emailSubject: `Please sign contract ${contractId}`,
+        documents: [{ documentUrl }],
+        recipients: { signers: [{ email: to, recipientId: '1' }] },
+        status: 'sent',
+      }),
+    });
+    if (!res.ok) throw new Error(`e-signature API returned ${res.status}`);
+    const body = (await res.json().catch(() => ({}))) as { envelopeId?: string };
+    return { status: res.status, envelopeId: body.envelopeId };
   }
 
   // ---- Generic custom API (other approved third-party services) ----

@@ -36,6 +36,7 @@ export const RESOURCES: ResourceName[] = [
   'integration_connection',
   'sales_commission',
   'forecast',
+  'signature_envelope',
 ];
 
 export interface PermissionManifestEntry {

@@ -863,6 +863,7 @@ test('broker agent flags a quarantined lead pending review too long, but never a
   await h.brokerLeads.save({
     id: 'bl-1', companyId: 'c1', brokerCompanyId: 'bc-1', submittedByUserId: 'broker-user-1',
     fullName: 'Broker Lead', phone: '0100', approvalStatus: 'pending_approval',
+    protectionExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(),
     createdAt: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
   });
   const decision = await h.ai.decide('broker', 'c1', 'bl-1', 'human-1');
@@ -881,7 +882,9 @@ test('broker agent reports no_action for a lead already decided', async () => {
   await h.brokerCompanies.save({ id: 'bc-2', companyId: 'c1', name: 'Acme Brokers', status: 'approved', createdAt: new Date().toISOString() });
   await h.brokerLeads.save({
     id: 'bl-2', companyId: 'c1', brokerCompanyId: 'bc-2', submittedByUserId: 'broker-user-1',
-    fullName: 'Broker Lead 2', phone: '0101', approvalStatus: 'approved', leadId: 'lead-x', createdAt: new Date().toISOString(),
+    fullName: 'Broker Lead 2', phone: '0101', approvalStatus: 'approved', leadId: 'lead-x',
+    protectionExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(),
+    createdAt: new Date().toISOString(),
   });
   const decision = await h.ai.decide('broker', 'c1', 'bl-2', 'human-1');
   assert.equal(decision.status, 'no_action');

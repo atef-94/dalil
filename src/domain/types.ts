@@ -103,7 +103,8 @@ export type ResourceName =
   | 'sales_commission'
   | 'forecast'
   | 'crm_stage'
-  | 'quotation';
+  | 'quotation'
+  | 'signature_envelope';
 
 export type ActionName =
   | 'view'
@@ -532,6 +533,15 @@ export interface BrokerLead {
   nationalId?: string;
   approvalStatus: BrokerLeadApprovalStatus;
   leadId?: string; // nullable until approved
+  /** The broker-deal-registration protection window: while a BrokerLead is
+   * still `pending_approval` and this hasn't passed, no other broker
+   * company may submit the same prospect (matched by phone/email/
+   * nationalId) — see BrokersService.submitBrokerLead. Always set at
+   * submission (60 days out, matching CRM's own lead-ownership protection
+   * convention). Expiry only lifts the exclusivity; it never invalidates
+   * the submission itself, so an internal user can still approve or reject
+   * it after the window closes. */
+  protectionExpiresAt: string;
   createdAt: string;
 }
 
@@ -841,7 +851,10 @@ export type DomainEventType =
   | 'action_approval.requested'
   | 'action_approval.decided'
   | 'contract.amended'
-  | 'payment.refunded';
+  | 'payment.refunded'
+  | 'reservation.expired'
+  | 'contract.signature_sent'
+  | 'contract.signature_completed';
 
 export type ConditionOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'exists';
 
@@ -1120,6 +1133,7 @@ export type IntegrationProvider =
   | 'meta_ads'
   | 'google_calendar'
   | 'payment_stripe'
+  | 'e_signature'
   | 'custom_api';
 
 export type IntegrationConnectionStatus = 'connected' | 'disconnected' | 'error';
@@ -1163,6 +1177,37 @@ export interface IntegrationEvent {
   attempts: number;
   error?: string;
   createdAt: string;
+}
+
+// ---- E-Signature (contract lifecycle) ----
+// A Contract's internal `status: 'signed'` (SalesService.signContract) means
+// the deal's commercial terms are locked in — that stays exactly as it is,
+// unchanged by this. A SignatureEnvelope is the separate, additional record
+// of whether the *customer actually digitally signed the document*, tracked
+// independently so the two "signed" concepts (commercial agreement vs. a
+// real signature event) are never conflated — the same "never treat a
+// message/webhook as proof of a different kind of truth" principle Finance's
+// Payment/Receipt split already follows. Never gates the existing contract
+// flow: sending one is an additive, optional step a signed contract can go
+// through, not a new required stage in Contract's own state machine.
+
+export type SignatureEnvelopeStatus = 'sent' | 'signed' | 'declined' | 'expired';
+
+export interface SignatureEnvelope {
+  id: string;
+  companyId: string;
+  contractId: string;
+  connectionId: string;
+  provider: IntegrationProvider; // always 'e_signature' today; kept generic like IntegrationEvent
+  externalEnvelopeId: string;
+  signerEmail: string;
+  status: SignatureEnvelopeStatus;
+  requestedByUserId: string;
+  sentAt: string;
+  /** Set only once a webhook callback verified with this envelope's own
+   * signing secret confirms the outcome — never set from an unverified
+   * request, and never inferred from the outbound send() call succeeding. */
+  decidedAt?: string;
 }
 
 // ---- AI Workflow / Agentic Orchestration Engine ----

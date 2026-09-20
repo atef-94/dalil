@@ -19,6 +19,10 @@ export interface SubmitBrokerLeadInput {
   nationalId?: string;
 }
 
+/** Broker deal-registration protection window — same 60-day convention
+ * CRM's own lead-ownership law already uses. */
+const PROTECTION_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
+
 export class BrokersService {
   constructor(
     private readonly brokerCompanies: Repository<BrokerCompany>,
@@ -63,7 +67,13 @@ export class BrokersService {
   }
 
   /** Quarantine gate: a broker-submitted lead does not exist in the shared
-   * Lead table until an internal user approves it. */
+   * Lead table until an internal user approves it. Also enforces the
+   * broker-deal-registration protection window: while another broker
+   * company's submission for the same prospect (matched by phone, or
+   * email/nationalId when given) is still pending approval and its
+   * protectionExpiresAt hasn't passed, a second broker company cannot
+   * register the same prospect — first submission wins exclusivity for the
+   * window, exactly the research's "60-day protection" requirement. */
   async submitBrokerLead(input: SubmitBrokerLeadInput): Promise<BrokerLead> {
     if (!input.fullName?.trim()) throw new ValidationError('fullName is required');
     if (!input.phone?.trim()) throw new ValidationError('phone is required');
@@ -73,16 +83,33 @@ export class BrokersService {
       throw new BrokerError('broker company is not approved to submit leads');
     }
 
+    const phone = input.phone.trim();
+    const email = input.email?.trim();
+    const nationalId = input.nationalId?.trim();
+    const now = Date.now();
+    const existing = await this.brokerLeads.findAll(
+      (bl) =>
+        bl.companyId === input.companyId &&
+        bl.brokerCompanyId !== input.brokerCompanyId &&
+        bl.approvalStatus === 'pending_approval' &&
+        Date.parse(bl.protectionExpiresAt) > now &&
+        (bl.phone === phone || (!!email && bl.email === email) || (!!nationalId && bl.nationalId === nationalId)),
+    );
+    if (existing.length > 0) {
+      throw new ConflictError('this prospect is already protected under another broker company\'s pending registration');
+    }
+
     const brokerLead: BrokerLead = {
       id: randomUUID(),
       companyId: input.companyId,
       brokerCompanyId: input.brokerCompanyId,
       submittedByUserId: input.submittedByUserId,
       fullName: input.fullName.trim(),
-      phone: input.phone.trim(),
-      email: input.email?.trim(),
-      nationalId: input.nationalId?.trim() || undefined,
+      phone,
+      email,
+      nationalId: nationalId || undefined,
       approvalStatus: 'pending_approval',
+      protectionExpiresAt: new Date(now + PROTECTION_WINDOW_MS).toISOString(),
       createdAt: new Date().toISOString(),
     };
     return this.brokerLeads.save(brokerLead);

@@ -10,14 +10,15 @@ async function freshService() {
   const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
   await crmStages.seedDefaultStages('c1');
   const crm = new CrmService(new InMemoryRepository<Lead>(), crmStages);
+  const brokerLeads = new InMemoryRepository<BrokerLead>();
   const svc = new BrokersService(
     new InMemoryRepository<BrokerCompany>(),
-    new InMemoryRepository<BrokerLead>(),
+    brokerLeads,
     new InMemoryRepository<CommissionRule>(),
     new InMemoryRepository<Commission>(),
     crm,
   );
-  return { svc, crm };
+  return { svc, crm, brokerLeads };
 }
 
 test('registering a broker company starts in pending status', async () => {
@@ -90,6 +91,70 @@ test('quarantine gate: a submitted broker lead does not exist in the shared Lead
 
   const after = await crm.listForScope({ kind: 'company', companyId: 'c1' }, async () => ({}));
   assert.equal(after.length, 1);
+});
+
+test('submitBrokerLead sets a 60-day protection window', async () => {
+  const { svc } = await freshService();
+  const company = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Acme Brokers' });
+  await svc.approveBrokerCompany(company.id, 'c1');
+  const before = Date.now();
+  const brokerLead = await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: company.id, submittedByUserId: 'broker-user-1', fullName: 'Client A', phone: '0100' });
+  const days = (Date.parse(brokerLead.protectionExpiresAt) - before) / (24 * 60 * 60 * 1000);
+  assert.ok(days > 59.9 && days < 60.1, `expected ~60 days, got ${days}`);
+});
+
+test('a second broker company cannot register the same prospect (by phone) while the first submission is still protected', async () => {
+  const { svc } = await freshService();
+  const companyA = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Broker A' });
+  const companyB = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Broker B' });
+  await svc.approveBrokerCompany(companyA.id, 'c1');
+  await svc.approveBrokerCompany(companyB.id, 'c1');
+
+  await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: companyA.id, submittedByUserId: 'broker-user-a', fullName: 'Shared Prospect', phone: '0100' });
+  await assert.rejects(
+    () => svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: companyB.id, submittedByUserId: 'broker-user-b', fullName: 'Same Prospect Different Name', phone: '0100' }),
+    /protected/i,
+  );
+});
+
+test('the same broker company can re-submit the same prospect (protection blocks other brokers, not itself)', async () => {
+  const { svc } = await freshService();
+  const company = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Broker A' });
+  await svc.approveBrokerCompany(company.id, 'c1');
+  await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: company.id, submittedByUserId: 'broker-user-a', fullName: 'Prospect', phone: '0100' });
+  const second = await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: company.id, submittedByUserId: 'broker-user-a', fullName: 'Prospect', phone: '0100' });
+  assert.ok(second.id);
+});
+
+test('a second broker company CAN register the same prospect once the first submission was rejected', async () => {
+  const { svc, crm } = await freshService();
+  const companyA = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Broker A' });
+  const companyB = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Broker B' });
+  await svc.approveBrokerCompany(companyA.id, 'c1');
+  await svc.approveBrokerCompany(companyB.id, 'c1');
+  await crm.createLead({ companyId: 'c1', fullName: 'Existing Client', phone: '0100' });
+
+  const first = await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: companyA.id, submittedByUserId: 'broker-user-a', fullName: 'Prospect', phone: '0100' });
+  // Rejected because the phone already matches a real Lead (quarantine dedup) — this also frees the protection.
+  await assert.rejects(() => svc.approveBrokerLead(first.id, 'c1', 'internal-user-1'));
+
+  const second = await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: companyB.id, submittedByUserId: 'broker-user-b', fullName: 'Prospect', phone: '0100' });
+  assert.ok(second.id);
+});
+
+test('a second broker company CAN register the same prospect once the first submission\'s protection window has expired', async () => {
+  const { svc, brokerLeads } = await freshService();
+  const companyA = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Broker A' });
+  const companyB = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Broker B' });
+  await svc.approveBrokerCompany(companyA.id, 'c1');
+  await svc.approveBrokerCompany(companyB.id, 'c1');
+
+  const first = await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: companyA.id, submittedByUserId: 'broker-user-a', fullName: 'Prospect', phone: '0100' });
+  // Simulate the window having already elapsed, without waiting 60 real days.
+  await brokerLeads.save({ ...first, protectionExpiresAt: new Date(Date.now() - 1000).toISOString() });
+
+  const second = await svc.submitBrokerLead({ companyId: 'c1', brokerCompanyId: companyB.id, submittedByUserId: 'broker-user-b', fullName: 'Prospect', phone: '0100' });
+  assert.ok(second.id);
 });
 
 test('approveBrokerLead rejects a broker lead belonging to a different company', async () => {
