@@ -407,3 +407,128 @@ test('a real Arabic-header file maps and imports correctly end-to-end through IN
   const developer = await inventory.getDeveloper(updatedProject!.developerId!);
   assert.equal(developer!.name, 'طلعت مصطفى');
 });
+
+// ---- autoGenerateUnitCode / autoCreateMissingProjects (default preset
+// fallback rules for the seamless auto-import flow) ----
+
+test('without autoGenerateUnitCode, a row with no Unit Code is invalid', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Marina Towers' });
+  const preview = await svc.buildPreview('c1', [{ projectName: project.name, unitCode: '', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' }]);
+  assert.equal(preview.invalidCount, 1);
+  assert.match(preview.rows[0]!.issues.join(), /Unit Code.*required/);
+});
+
+test('autoGenerateUnitCode generates a unique code per row so the import can proceed without a Unit Code column', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Marina Towers' });
+  const preview = await svc.buildPreview(
+    'c1',
+    [
+      { projectName: project.name, unitCode: '', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' },
+      { projectName: project.name, unitCode: '', unitType: 'apartment', areaSqm: '130', listPrice: '1600000' },
+    ],
+    { autoGenerateUnitCode: true },
+  );
+  assert.equal(preview.validCount, 2);
+  const codes = preview.rows.map((r) => r.resolved!.unitCode);
+  assert.notEqual(codes[0], codes[1], 'generated codes must be unique within the same file');
+  assert.match(preview.rows[0]!.issues.join(), /unit code auto-generated/);
+
+  let written: Unit | undefined;
+  const result = await svc.importRows('c1', [
+    { projectName: project.name, unitCode: '', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' },
+  ], async (unit) => { written = unit; }, { autoGenerateUnitCode: true });
+  assert.equal(result.succeeded, 1);
+  assert.ok(written!.code.length > 0);
+});
+
+test('without autoCreateMissingProjects, a row targeting an unknown project is invalid, never silently creating one', async () => {
+  const { svc } = setup();
+  const preview = await svc.buildPreview('c1', [{ projectName: 'Nonexistent Project', unitCode: 'A-1', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' }]);
+  assert.equal(preview.invalidCount, 1);
+  assert.match(preview.rows[0]!.issues.join(), /not found/);
+});
+
+test('autoCreateMissingProjects marks the row as a create and importRows actually creates the new Project', async () => {
+  const { inventory, svc } = setup();
+  const projectName = `Brand New Project ${Date.now()}`;
+  const preview = await svc.buildPreview('c1', [{ projectName, unitCode: 'A-1', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' }], { autoCreateMissingProjects: true });
+  assert.equal(preview.validCount, 1);
+  assert.match(preview.rows[0]!.issues.join(), /will create new project/);
+
+  let written: Unit | undefined;
+  const result = await svc.importRows(
+    'c1',
+    [{ projectName, unitCode: 'A-1', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' }],
+    async (unit) => { written = unit; },
+    { autoCreateMissingProjects: true },
+  );
+  assert.equal(result.succeeded, 1);
+  const projects = await inventory.listProjects('c1');
+  const created = projects.find((p) => p.name === projectName);
+  assert.ok(created, 'the missing project was created automatically');
+  assert.equal(written!.projectId, created!.id);
+});
+
+test('autoCreateMissingProjects creates the project only once even when many rows in the same file target it', async () => {
+  const { inventory, svc } = setup();
+  const projectName = `Shared New Project ${Date.now()}`;
+  const result = await svc.importRows(
+    'c1',
+    [
+      { projectName, unitCode: 'A-1', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' },
+      { projectName, unitCode: 'A-2', unitType: 'apartment', areaSqm: '130', listPrice: '1600000' },
+    ],
+    async () => {},
+    { autoCreateMissingProjects: true },
+  );
+  assert.equal(result.succeeded, 2);
+  const projects = await inventory.listProjects('c1');
+  assert.equal(projects.filter((p) => p.name === projectName).length, 1, 'the same project name is created once, not once per row');
+});
+
+test('autoGenerateUnitCode and autoCreateMissingProjects can combine: a file with neither a Unit Code column nor a pre-existing project still imports end-to-end', async () => {
+  const { inventory, svc } = setup();
+  const projectName = `Combined Fallback Project ${Date.now()}`;
+  const result = await svc.importRows(
+    'c1',
+    [{ projectName, unitCode: '', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' }],
+    async () => {},
+    { autoGenerateUnitCode: true, autoCreateMissingProjects: true },
+  );
+  assert.equal(result.succeeded, 1);
+  const units = await inventory.listUnits('c1');
+  assert.equal(units.length, 1);
+  assert.ok(units[0]!.code.length > 0);
+});
+
+// ---- Widened required-field alias coverage: locks in that every new
+// alias resolves to the right field, and that broadening these lists
+// introduced no new cross-field ambiguity against the real production
+// dictionary (INVENTORY_IMPORT_FIELDS) — this is what actually fixes the
+// reported "defaults to Do not import for most columns" bug for common
+// real-estate export header spellings. ----
+
+test('a representative batch of common English/Arabic real-estate export headers each resolve to the correct field, unambiguously', () => {
+  const cases: [string, string][] = [
+    ['Project', 'projectName'], ['Compound', 'projectName'], ['Compound Name', 'projectName'], ['Development Name', 'projectName'],
+    ['Unit ID', 'unitCode'], ['Unit Ref', 'unitCode'], ['Apt No', 'unitCode'], ['Unit#', 'unitCode'],
+    ['Property Type', 'unitType'], ['Unit Category', 'unitType'],
+    ['Area M2', 'areaSqm'], ['Total Area', 'areaSqm'], ['SQM', 'areaSqm'], ['Sq.M', 'areaSqm'],
+    ['Selling Price', 'listPrice'], ['Unit Value', 'listPrice'], ['Price EGP', 'listPrice'],
+    ['الكمبوند', 'projectName'], ['اسم الكمبوند', 'projectName'],
+    ['رقم العقار', 'unitCode'], ['رقم الشقة', 'unitCode'],
+    ['نوع العقار', 'unitType'],
+    ['المساحة', 'areaSqm'], ['مساحة الوحده', 'areaSqm'],
+    ['السعر الإجمالي', 'listPrice'], ['قيمة الوحدة', 'listPrice'],
+    // Project-level "Price From/To" must never be swallowed by the
+    // unit-level listPriceFrom/listPriceTo fields, and vice versa.
+    ['Price From', 'listPriceFrom'], ['Price To', 'listPriceTo'],
+    ['Project Price From', 'projectPriceFrom'], ['Project Price To', 'projectPriceTo'],
+  ];
+  for (const [header, expectedKey] of cases) {
+    const mapping = suggestMapping([header], INVENTORY_IMPORT_FIELDS);
+    assert.equal(mapping[header], expectedKey, `expected "${header}" to map to ${expectedKey}, got ${mapping[header]}`);
+  }
+});

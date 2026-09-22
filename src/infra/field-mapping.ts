@@ -15,6 +15,15 @@ export interface ImportFieldDef {
    * ['mobile', 'tel', 'cell'] for a phone field. */
   aliases?: string[];
   required?: boolean;
+  /** When this required field has no column mapped, an importer-specific
+   * option (a key in that wizard's mappingOptions, e.g.
+   * 'autoGenerateUnitCode') that — when enabled — recovers a real value
+   * for it anyway, instead of the row simply failing. The frontend's
+   * automatic-mapping check treats this field as satisfied whenever that
+   * option is on, so a file missing this one column can still skip the
+   * manual mapping screen. Never set for a field with no real fallback
+   * (e.g. Project — there's no value to invent from nothing). */
+  autoFallbackOptionKey?: string;
 }
 
 // Arabic combining diacritics (tashkeel) — stripped before matching so

@@ -18,12 +18,52 @@ import type { InventoryService, UpdateProjectDetailsInput, UpdateUnitDetailsInpu
  * duplicate a semantically equivalent field" instruction.
  */
 export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
-  // Unit identity (existing)
-  { key: 'projectName', label: 'Project', aliases: ['project name', 'اسم المشروع', 'المشروع'], required: true },
-  { key: 'unitCode', label: 'Unit Code', aliases: ['unit', 'unit number', 'unit no', 'رقم الوحدة', 'كود الوحدة'], required: true },
-  { key: 'unitType', label: 'Unit Type', aliases: ['type', 'نوع الوحدة'], required: true },
-  { key: 'areaSqm', label: 'Area (sqm)', aliases: ['area', 'size', 'area sqm', 'bua', 'built up area', 'built-up area', 'unit gross area', 'gross area', 'مساحة الوحدة', 'مساحة المباني'], required: true },
-  { key: 'listPrice', label: 'List Price', aliases: ['price', 'total price', 'total unit price', 'unit price', 'السعر', 'إجمالي السعر'], required: true },
+  // Unit identity (existing) — alias lists deliberately wide: the single
+  // biggest cause of an import falling back to manual mapping is a
+  // required column's header just not being in this list yet. Every
+  // addition here was checked with scripts/check-import-aliases.mjs
+  // against a battery of realistic headers to confirm it introduces no
+  // new ambiguity (two fields both claiming the same header, which
+  // suggestMapping correctly refuses to guess and leaves unmapped).
+  {
+    key: 'projectName',
+    label: 'Project',
+    aliases: ['project name', 'project id', 'compound', 'compound name', 'development', 'development name', 'اسم المشروع', 'المشروع', 'الكمبوند', 'اسم الكمبوند', 'كمبوند'],
+    required: true,
+  },
+  {
+    key: 'unitCode',
+    label: 'Unit Code',
+    aliases: ['unit', 'unit number', 'unit no', 'unit id', 'unit ref', 'reference no', 'apartment number', 'apt no', 'رقم الوحدة', 'كود الوحدة', 'رقم العقار', 'رقم الشقة'],
+    required: true,
+    // A missing Unit Code column is still auto-importable when
+    // autoGenerateUnitCode is on (evaluateRows() generates one) — the only
+    // required field with a real fallback, so it's the only one allowed
+    // to waive the "every required field must be mapped" gate on the
+    // Import Wizard's auto-skip-mapping check.
+    autoFallbackOptionKey: 'autoGenerateUnitCode',
+  },
+  {
+    key: 'unitType',
+    label: 'Unit Type',
+    aliases: ['type', 'property type', 'unit category', 'نوع الوحدة', 'نوع العقار'],
+    required: true,
+  },
+  {
+    key: 'areaSqm',
+    label: 'Area (sqm)',
+    aliases: [
+      'area', 'size', 'area sqm', 'area m2', 'total area', 'sqm', 'sq m', 'sq.m', 'bua', 'built up area', 'built-up area', 'unit gross area', 'gross area',
+      'مساحة الوحدة', 'مساحة المباني', 'المساحة', 'مساحة الوحده',
+    ],
+    required: true,
+  },
+  {
+    key: 'listPrice',
+    label: 'List Price',
+    aliases: ['price', 'total price', 'total unit price', 'unit price', 'selling price', 'unit value', 'price egp', 'السعر', 'إجمالي السعر', 'السعر الإجمالي', 'قيمة الوحدة'],
+    required: true,
+  },
   { key: 'areaSqmFrom', label: 'Area (sqm) — From', aliases: ['area from', 'bua from', 'size from'] },
   { key: 'areaSqmTo', label: 'Area (sqm) — To', aliases: ['area to', 'bua to', 'size to'] },
   { key: 'listPriceFrom', label: 'List Price — From', aliases: ['price from', 'total price from'] },
@@ -53,8 +93,12 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
   { key: 'projectBuaTo', label: 'Project BUA To', aliases: ['bua range to', 'مساحة مبنية إلى'] },
   { key: 'projectGardenFrom', label: 'Project Garden Area From', aliases: ['garden range from'] },
   { key: 'projectGardenTo', label: 'Project Garden Area To', aliases: ['garden range to'] },
-  { key: 'projectPriceFrom', label: 'Price From', aliases: ['project price from', 'السعر من'] },
-  { key: 'projectPriceTo', label: 'Price To', aliases: ['project price to', 'السعر إلى'] },
+  // Labels are "Project Price From/To" (not the shorter "Price From/To")
+  // deliberately — that shorter form collides with listPriceFrom/To's own
+  // "price from"/"price to" alias, which would otherwise silently steal a
+  // project-level price-range column into the unit-level field.
+  { key: 'projectPriceFrom', label: 'Project Price From', aliases: ['project price from', 'السعر من'] },
+  { key: 'projectPriceTo', label: 'Project Price To', aliases: ['project price to', 'السعر إلى'] },
   { key: 'projectFinishingType', label: 'Project Finishing Type', aliases: ['default finishing'] },
   { key: 'projectAreaSqm', label: 'Project Area', aliases: ['project total area', 'مساحة المشروع'] },
   { key: 'typeOfUnits', label: 'Type of Units', aliases: ['unit types', 'أنواع الوحدات'] },

@@ -33,6 +33,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
 
   let session = null;
   let mapping = {};
+  let wasAutoMapped = false;
   const uploadOptionValues = {};
   uploadOptions.forEach((opt) => { uploadOptionValues[opt.key] = opt.default ?? false; });
   const mappingOptionValues = {};
@@ -43,6 +44,25 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     checkbox.checked = !!values[opt.key];
     checkbox.addEventListener('change', () => { values[opt.key] = checkbox.checked; });
     return el('label', { style: 'display:flex;align-items:center;gap:8px;font-weight:normal;margin-top:8px' }, [checkbox, opt.label]);
+  }
+
+  /**
+   * True when every required field either already has a column mapped to
+   * it in the suggested mapping, or is missing one but has an
+   * `autoFallbackOptionKey` that's currently enabled (e.g. Unit Code with
+   * "Auto-generate a unit code" checked) — meaning the row can still be
+   * imported without a human picking that column by hand. A required
+   * field with no fallback (Project, Unit Type, Area, List Price) always
+   * needs a real mapped column.
+   */
+  function isFullyAutoMappable() {
+    if (!session || !session.suggestedMapping) return false;
+    const mappedKeys = new Set(Object.values(session.suggestedMapping).filter(Boolean));
+    return (session.fields || []).every((f) => {
+      if (!f.required) return true;
+      if (mappedKeys.has(f.key)) return true;
+      return !!(f.autoFallbackOptionKey && mappingOptionValues[f.autoFallbackOptionKey]);
+    });
   }
 
   function renderUploadStep() {
@@ -66,6 +86,18 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
         for (const opt of uploadOptions) form.set(opt.key, String(!!uploadOptionValues[opt.key]));
         session = await api.upload(uploadPath, form);
         mapping = { ...session.suggestedMapping };
+        if (isFullyAutoMappable()) {
+          wasAutoMapped = true;
+          try {
+            const preview = await api.post(`${basePath}/${session.sessionId}/preview`, { mapping, options: mappingOptionValues });
+            renderPreviewStep(preview);
+            return;
+          } catch (err) {
+            // Unexpected — fall back to the manual screen rather than
+            // stranding the user on a broken auto-import attempt.
+            wasAutoMapped = false;
+          }
+        }
         renderMappingStep();
       } catch (err) {
         errSlot.appendChild(errorBanner(err.message));
@@ -75,7 +107,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     });
 
     body.appendChild(el('div', {}, [
-      el('p', { class: 'page-subtitle' }, 'Upload a .csv, .xlsx/.xls, or .pdf file. You will review and correct the column mapping and see exactly what would be imported before anything happens.'),
+      el('p', { class: 'page-subtitle' }, 'Upload a .csv, .xlsx/.xls, or .pdf file. When every required column is recognized automatically, you\'ll go straight to a preview — otherwise you\'ll be asked to confirm the column mapping first. Either way, nothing is imported until you confirm.'),
       field('File', fileInput),
       ...optionControls,
       errSlot,
@@ -150,12 +182,15 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     const validRows = rows.filter((r) => r.status === 'valid');
     const problemRows = rows.filter((r) => r.status !== 'valid');
 
-    const backBtn = el('button', {}, 'Back to mapping');
+    const backBtn = el('button', {}, wasAutoMapped ? 'Edit column mapping' : 'Back to mapping');
     const confirmBtn = el('button', { class: 'primary' }, `Import ${validRows.length} row(s)`);
     confirmBtn.disabled = validRows.length === 0;
     const errSlot = el('div');
 
-    backBtn.addEventListener('click', renderMappingStep);
+    backBtn.addEventListener('click', () => {
+      wasAutoMapped = false;
+      renderMappingStep();
+    });
     confirmBtn.addEventListener('click', async () => {
       clear(errSlot);
       confirmBtn.disabled = true;
@@ -169,6 +204,9 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     });
 
     body.appendChild(el('div', {}, [
+      wasAutoMapped
+        ? el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}". Every required column was recognized automatically — review the results below, or edit the column mapping if something looks wrong.`)
+        : el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}".`),
       el('div', { class: 'stat-grid' }, [
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(preview.totalRows)), el('div', { class: 'label' }, 'Total rows')]),
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(validRows.length)), el('div', { class: 'label' }, 'Ready to import')]),

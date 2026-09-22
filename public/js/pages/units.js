@@ -36,8 +36,8 @@ export async function renderUnits(container) {
             ],
             default: 'avg',
           },
-          { key: 'autoGenerateUnitCode', type: 'checkbox', label: "Auto-generate a unit code for rows that don't have one", default: false },
-          { key: 'autoCreateMissingProjects', type: 'checkbox', label: "Automatically create any project named in the file that doesn't exist yet", default: false },
+          { key: 'autoGenerateUnitCode', type: 'checkbox', label: "Auto-generate a unit code for rows that don't have one", default: true },
+          { key: 'autoCreateMissingProjects', type: 'checkbox', label: "Automatically create any project named in the file that doesn't exist yet", default: true },
         ],
       });
     });
