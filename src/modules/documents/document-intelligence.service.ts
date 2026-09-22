@@ -9,10 +9,26 @@ const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'webp']);
 
 /** Fields that map onto InventoryImportService's own field dictionary
  * (INVENTORY_IMPORT_FIELDS) — the only ones confirmExtraction() can ever
- * actually import, since the Unit domain model has no columns for the
- * others. Everything else extracted below is still captured and shown to
- * a reviewer (never silently dropped), just never auto-mapped into a Unit. */
-const IMPORTABLE_KEYS = ['projectName', 'unitCode', 'unitType', 'areaSqm', 'listPrice'] as const;
+ * actually import, since these are the ones the Unit domain model has real
+ * columns for. Required: the import fails outright if any is missing/
+ * uncorrected. Optional: included in the row when present and not
+ * low-confidence-uncorrected, silently left out otherwise — their absence
+ * never blocks the import. Everything else extracted below (customer/
+ * broker/contract info, payment plan summary) is still captured and shown
+ * to a reviewer, just never auto-mapped into a Unit at all. */
+const REQUIRED_IMPORTABLE_KEYS = ['projectName', 'unitCode', 'unitType', 'areaSqm', 'listPrice'] as const;
+const OPTIONAL_IMPORTABLE_KEYS = [
+  'buildingLabel',
+  'floorLabel',
+  'finishingType',
+  'deliveryDate',
+  'bedrooms',
+  'designType',
+  'view',
+  'unitGardenAreaSqm',
+  'pricePerMeter',
+  'phaseName',
+] as const;
 
 interface FieldSpec {
   key: string;
@@ -26,10 +42,16 @@ const FIELD_SPECS: FieldSpec[] = [
   { key: 'unitType', labels: ['unit type', 'type'], kind: 'text' },
   { key: 'buildingLabel', labels: ['building', 'block'], kind: 'text' },
   { key: 'floorLabel', labels: ['floor'], kind: 'text' },
-  { key: 'areaSqm', labels: ['area (sqm)', 'area sqm', 'bua', 'area', 'size'], kind: 'number' },
+  { key: 'areaSqm', labels: ['area (sqm)', 'area sqm', 'bua', 'area', 'size', 'unit gross area'], kind: 'number' },
   { key: 'listPrice', labels: ['total price', 'unit price', 'price'], kind: 'number' },
   { key: 'deliveryDate', labels: ['delivery date', 'handover date'], kind: 'text' },
-  { key: 'finishing', labels: ['finishing', 'finish'], kind: 'text' },
+  { key: 'finishingType', labels: ['finishing', 'finish', 'finishing type'], kind: 'text' },
+  { key: 'bedrooms', labels: ['no of bedrooms', 'bedrooms', 'beds', 'br'], kind: 'number' },
+  { key: 'designType', labels: ['design type', 'design', 'model type'], kind: 'text' },
+  { key: 'view', labels: ['view', 'unit view'], kind: 'text' },
+  { key: 'unitGardenAreaSqm', labels: ['garden area', 'garden'], kind: 'number' },
+  { key: 'pricePerMeter', labels: ['price per meter', 'price/m2', 'price per sqm'], kind: 'number' },
+  { key: 'phaseName', labels: ['phase', 'project phase'], kind: 'text' },
   { key: 'paymentPlanSummary', labels: ['payment plan', 'installments'], kind: 'text' },
   { key: 'customerName', labels: ['customer name', 'client name', 'buyer'], kind: 'text' },
   { key: 'customerPhone', labels: ['customer phone', 'phone', 'mobile'], kind: 'text' },
@@ -231,16 +253,24 @@ export class DocumentIntelligenceService {
     const fields = await this.fields.findAll((f) => f.extractionRunId === runId && f.companyId === companyId);
     const byKey = new Map(fields.map((f) => [f.fieldKey, f]));
 
+    const resolveField = (key: string): string | undefined => {
+      const field = byKey.get(key);
+      return field?.correctedValue ?? (field && field.confidence !== 'low' ? field.rawValue : undefined);
+    };
+
     const missing: string[] = [];
     const row: Record<string, string> = {};
-    for (const key of IMPORTABLE_KEYS) {
-      const field = byKey.get(key);
-      const value = field?.correctedValue ?? (field && field.confidence !== 'low' ? field.rawValue : undefined);
+    for (const key of REQUIRED_IMPORTABLE_KEYS) {
+      const value = resolveField(key);
       if (!value) {
         missing.push(key);
         continue;
       }
       row[key] = value;
+    }
+    for (const key of OPTIONAL_IMPORTABLE_KEYS) {
+      const value = resolveField(key);
+      if (value) row[key] = value;
     }
     if (missing.length > 0) {
       throw new ValidationError(

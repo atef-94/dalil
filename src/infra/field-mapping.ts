@@ -17,8 +17,26 @@ export interface ImportFieldDef {
   required?: boolean;
 }
 
+// Arabic combining diacritics (tashkeel) — stripped before matching so
+// "المشروع" and "المُشْرُوع" normalize identically.
+const ARABIC_DIACRITICS = /[ً-ٰٟۖ-ۭ]/g;
+
+/** Lowercases, strips diacritics, folds common Arabic letter-shape
+ * variants (alef forms -> ا, alef maksura -> ي, taa marbuta -> ه) so
+ * spelling variants match, then keeps only ASCII alphanumerics AND Arabic
+ * script characters (؀-ۿ) — everything else (spaces, punctuation,
+ * parentheses) is dropped. Previously this stripped to `[a-z0-9]` only,
+ * which silently collapsed every Arabic header to an empty string and left
+ * it permanently unmapped; Arabic headers now normalize and match exactly
+ * like English ones. */
 function normalizeHeader(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const folded = value
+    .replace(ARABIC_DIACRITICS, '')
+    .replace(/[آأإٱ]/g, 'ا') // آ أ إ ٱ -> ا
+    .replace(/ى/g, 'ي') // ى -> ي
+    .replace(/ة/g, 'ه') // ة -> ه
+    .toLowerCase();
+  return folded.replace(/[^a-z0-9؀-ۿ]+/g, '');
 }
 
 /**

@@ -41,6 +41,12 @@ import type {
   PaymentScheduleLine,
   PermissionGrant,
   Project,
+  Developer,
+  ProjectPhase,
+  Launch,
+  Facility,
+  Consultant,
+  SalesPhoneNumber,
   ActionApproval,
   ApprovableActionType,
   DiscountApprovalPolicy,
@@ -238,6 +244,12 @@ function buildRepos(db?: DatabaseSync) {
     branches: repo<Branch>('branches'),
     departments: repo<Department>('departments'),
     projects: repo<Project>('projects'),
+    developers: repo<Developer>('developers'),
+    projectPhases: repo<ProjectPhase>('project_phases'),
+    launches: repo<Launch>('launches'),
+    facilities: repo<Facility>('facilities'),
+    consultants: repo<Consultant>('consultants'),
+    salesPhoneNumbers: repo<SalesPhoneNumber>('sales_phone_numbers'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
@@ -377,7 +389,18 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const leadImport = new LeadImportService(repos.leads, repos.users, crm);
   const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
   const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
-  const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
+  const inventory = new InventoryService(
+    repos.units,
+    repos.unitHolds,
+    repos.reservations,
+    repos.projects,
+    repos.developers,
+    repos.projectPhases,
+    repos.launches,
+    repos.facilities,
+    repos.consultants,
+    repos.salesPhoneNumbers,
+  );
   const inventoryImport = new InventoryImportService(inventory);
   const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
@@ -1319,18 +1342,164 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'project'))) {
       throw new ForbiddenError('missing create:project permission');
     }
-    const body = parseJsonBody<{ name: string; location?: string }>(ctx.body);
-    const project = await inventory.createProject({ companyId: actor.companyId, ...body });
+    const body = parseJsonBody<Parameters<typeof inventory.createProject>[0]>(ctx.body);
+    const project = await inventory.createProject({ ...body, companyId: actor.companyId });
     return { status: 201, body: project };
   });
 
+  // Real, server-side project search (destination/developer/price-range/
+  // unit-type) — the same InventoryService.searchProjects the AI's
+  // search_projects tool calls, so results never diverge. Falls back to
+  // the plain list (no filters) when no query params are given, matching
+  // the previous behavior exactly.
   httpServer.get('/api/inventory/projects', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'view', 'project'))) {
       throw new ForbiddenError('missing view:project permission');
     }
-    const projects = await inventory.listProjects(actor.companyId);
+    const destination = ctx.query.get('destination') ?? undefined;
+    const developerId = ctx.query.get('developerId') ?? undefined;
+    const unitType = ctx.query.get('unitType') ?? undefined;
+    const q = ctx.query.get('q') ?? undefined;
+    const minPriceFromRaw = ctx.query.get('minPriceFrom');
+    const maxPriceToRaw = ctx.query.get('maxPriceTo');
+    const projects =
+      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw
+        ? await inventory.searchProjects(actor.companyId, {
+            destination,
+            developerId,
+            unitType,
+            q,
+            minPriceFrom: minPriceFromRaw ? Number(minPriceFromRaw) : undefined,
+            maxPriceTo: maxPriceToRaw ? Number(maxPriceToRaw) : undefined,
+            limit: 200,
+          })
+        : await inventory.listProjects(actor.companyId);
     return { status: 200, body: paginate(projects, ctx.query) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) {
+      throw new ForbiddenError('missing view:project permission');
+    }
+    return { status: 200, body: await inventory.getProjectFullDetails(ctx.params.projectId!, actor.companyId) };
+  });
+
+  httpServer.patch('/api/inventory/projects/:projectId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'project'))) {
+      throw new ForbiddenError('missing edit:project permission');
+    }
+    const body = parseJsonBody<Parameters<typeof inventory.updateProjectDetails>[2]>(ctx.body);
+    const project = await inventory.updateProjectDetails(ctx.params.projectId!, actor.companyId, body);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'project', resourceId: project.id, metadata: { fields: Object.keys(body) } });
+    return { status: 200, body: project };
+  });
+
+  // ---- Project master data: Developer / Phase / Launch / Facility /
+  // Consultant / Sales Phone Number — all gated on the existing 'project'
+  // RBAC resource (create/edit/view) rather than six new near-identical
+  // resources, since these are project master data, not a separate
+  // permission surface. ----
+  httpServer.post('/api/inventory/developers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; description?: string; website?: string; logoUrl?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createDeveloper({ ...body, companyId: actor.companyId }) };
+  });
+
+  httpServer.get('/api/inventory/developers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: paginate(await inventory.listDevelopers(actor.companyId), ctx.query) };
+  });
+
+  httpServer.get('/api/inventory/developers/:developerId/portfolio', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    const developer = await inventory.getDeveloper(ctx.params.developerId!);
+    if (!developer || developer.companyId !== actor.companyId) throw new NotFoundError('developer not found');
+    const projects = await inventory.getDeveloperPortfolio(ctx.params.developerId!, actor.companyId);
+    return { status: 200, body: { developer, projects } };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/phases', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; order?: number }>(ctx.body);
+    return { status: 201, body: await inventory.createProjectPhase({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/phases', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listProjectPhases(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/launches', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<Omit<Parameters<typeof inventory.createLaunch>[0], 'companyId' | 'projectId'>>(ctx.body);
+    return { status: 201, body: await inventory.createLaunch({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/launches', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listLaunches(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.post('/api/inventory/facilities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; category?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createFacility({ ...body, companyId: actor.companyId }) };
+  });
+
+  httpServer.get('/api/inventory/facilities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: paginate(await inventory.listFacilities(actor.companyId), ctx.query) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/facilities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.getProjectFacilities(ctx.params.projectId!, actor.companyId) };
+  });
+
+  httpServer.post('/api/inventory/consultants', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; role: Consultant['role']; contactInfo?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createConsultant({ ...body, companyId: actor.companyId }) };
+  });
+
+  httpServer.get('/api/inventory/consultants', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    const role = (ctx.query.get('role') as Consultant['role'] | null) ?? undefined;
+    return { status: 200, body: paginate(await inventory.listConsultants(actor.companyId, role), ctx.query) };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/sales-phone-numbers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ phoneNumber: string; countryCode?: string; type?: string; source?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createSalesPhoneNumber({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/sales-phone-numbers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listSalesPhoneNumbers(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.post('/api/inventory/sales-phone-numbers/:phoneId/deactivate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'project'))) throw new ForbiddenError('missing edit:project permission');
+    return { status: 200, body: await inventory.deactivateSalesPhoneNumber(ctx.params.phoneId!, actor.companyId) };
   });
 
   httpServer.post('/api/inventory/units', async (ctx) => {
@@ -1338,8 +1507,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
       throw new ForbiddenError('missing create:unit permission');
     }
-    const body = parseJsonBody<{ projectId: string; code: string; unitType: string; areaSqm: number; listPrice: number }>(ctx.body);
-    const unit = await inventory.createUnit({ companyId: actor.companyId, ...body });
+    const body = parseJsonBody<Omit<Parameters<typeof inventory.createUnit>[0], 'companyId'>>(ctx.body);
+    const unit = await inventory.createUnit({ ...body, companyId: actor.companyId });
     return { status: 201, body: unit };
   });
 
@@ -1584,12 +1753,38 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: result };
   });
 
+  // Real, server-side advanced search — the same InventoryService.searchUnits
+  // the AI's search_units tool calls, so a human's filter results and the
+  // AI's never quietly diverge. `status` defaults to 'any' here (unlike the
+  // AI tool's 'available' default) to preserve this route's previous
+  // behavior of listing every unit regardless of status when unfiltered.
   httpServer.get('/api/inventory/units', async (ctx) => {
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'unit');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:unit permission' } };
-    const projectId = ctx.query.get('projectId') ?? undefined;
-    const units = await inventory.listUnits(actor.companyId, projectId);
+    const numOrUndef = (v: string | null) => (v ? Number(v) : undefined);
+    const units = await inventory.searchUnits(actor.companyId, {
+      projectId: ctx.query.get('projectId') ?? undefined,
+      phaseId: ctx.query.get('phaseId') ?? undefined,
+      unitType: ctx.query.get('unitType') ?? undefined,
+      status: (ctx.query.get('status') as 'available' | 'held' | 'reserved' | 'contracted' | 'cancelled' | 'any' | null) ?? 'any',
+      minPrice: numOrUndef(ctx.query.get('minPrice')),
+      maxPrice: numOrUndef(ctx.query.get('maxPrice')),
+      minAreaSqm: numOrUndef(ctx.query.get('minAreaSqm')),
+      maxAreaSqm: numOrUndef(ctx.query.get('maxAreaSqm')),
+      minGardenAreaSqm: numOrUndef(ctx.query.get('minGardenAreaSqm')),
+      maxGardenAreaSqm: numOrUndef(ctx.query.get('maxGardenAreaSqm')),
+      bedrooms: numOrUndef(ctx.query.get('bedrooms')),
+      minBedrooms: numOrUndef(ctx.query.get('minBedrooms')),
+      maxBedrooms: numOrUndef(ctx.query.get('maxBedrooms')),
+      finishingType: ctx.query.get('finishingType') ?? undefined,
+      view: ctx.query.get('view') ?? undefined,
+      floorLabel: ctx.query.get('floorLabel') ?? undefined,
+      designType: ctx.query.get('designType') ?? undefined,
+      destination: ctx.query.get('destination') ?? undefined,
+      developerId: ctx.query.get('developerId') ?? undefined,
+      limit: 500,
+    });
     const filtered = searchFilter(units, ['code', 'unitType'], ctx.query.get('q'));
     return { status: 200, body: paginate(filtered, ctx.query) };
   });

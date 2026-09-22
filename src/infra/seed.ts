@@ -109,6 +109,7 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
     // touching any grant a real tenant may have since customized.
     await ensureCrmPhase1GrantsExist(repos, companyId);
     await ensureQuotationGrantsExist(repos, companyId);
+    await ensureInventoryExpansionGrantsExist(repos, companyId);
     const demoUsers = await repos.users.findAll((u) => u.companyId === companyId);
     return {
       companyId,
@@ -256,6 +257,11 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesManagerRole.id, 'view', 'employee', 'department');
   await addGrant(salesManagerRole.id, 'view', 'unit', 'company');
   await addGrant(salesManagerRole.id, 'edit', 'unit', 'company');
+  // Project master data (destination/developer/facilities/consultants/
+  // phases/launches/sales phone numbers) is read-only for Sales Manager —
+  // they browse it when working units/quotations, but only CEO configures
+  // it (create/edit stay CEO-only via the ALL_RESOURCES loop above).
+  await addGrant(salesManagerRole.id, 'view', 'project', 'company');
   await addGrant(salesManagerRole.id, 'view', 'payment_plan_template', 'company');
   // Quotation Generator: department-wide, matching lead/opportunity scope.
   await addGrant(salesManagerRole.id, 'view', 'quotation', 'department');
@@ -307,6 +313,8 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   await addGrant(salesAgentRole.id, 'view', 'opportunity', 'own');
   await addGrant(salesAgentRole.id, 'view', 'unit', 'company');
   await addGrant(salesAgentRole.id, 'edit', 'unit', 'company');
+  // Same read-only project master data visibility as Sales Manager above.
+  await addGrant(salesAgentRole.id, 'view', 'project', 'company');
   await addGrant(salesAgentRole.id, 'view', 'payment_plan_template', 'company');
   // Quotation Generator: own-scoped, matching lead/opportunity scope.
   await addGrant(salesAgentRole.id, 'view', 'quotation', 'own');
@@ -454,4 +462,29 @@ async function ensureQuotationGrantsExist(repos: SeedRepos, companyId: string): 
     await ensureGrant(salesAgentRole.id, 'create', 'quotation', 'own');
     await ensureGrant(salesAgentRole.id, 'edit', 'quotation', 'own');
   }
+}
+
+/**
+ * Same reconciliation pattern, for the real-estate Inventory expansion
+ * (Developer/ProjectPhase/Launch/Facility/Consultant/SalesPhoneNumber, all
+ * gated on the existing 'project' resource rather than new ones) — grants
+ * Sales Manager/Agent read-only project visibility so they can browse this
+ * master data while working units/quotations; create/edit stays CEO-only,
+ * matching the existing unit-creation posture (CEO already has full CRUD
+ * via the ALL_RESOURCES loop, so nothing is needed there).
+ */
+async function ensureInventoryExpansionGrantsExist(repos: SeedRepos, companyId: string): Promise<void> {
+  const roles = await repos.roles.findAll((r) => r.companyId === companyId);
+  const salesManagerRole = roles.find((r) => r.name === 'Sales Manager');
+  const salesAgentRole = roles.find((r) => r.name === 'Sales Agent');
+
+  const ensureGrant = async (roleId: string, action: ActionName, resource: ResourceName, scope: ScopeName) => {
+    const matches = await repos.grants.findAll((g) => g.roleId === roleId && g.action === action && g.resource === resource);
+    if (matches.length === 0) {
+      await repos.grants.save({ id: randomUUID(), roleId, action, resource, scope, sensitivity: 'standard' });
+    }
+  };
+
+  if (salesManagerRole) await ensureGrant(salesManagerRole.id, 'view', 'project', 'company');
+  if (salesAgentRole) await ensureGrant(salesAgentRole.id, 'view', 'project', 'company');
 }

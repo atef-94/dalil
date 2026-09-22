@@ -231,6 +231,12 @@ export const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   compare_payment_plans: 'quotation',
   get_delivery_status: 'integration_connection',
   recall_memory: 'ai_memory',
+  search_projects: 'project',
+  get_project_details: 'project',
+  get_project_payment_plans: 'payment_plan_template',
+  get_developer_portfolio: 'project',
+  get_project_facilities: 'project',
+  get_project_location: 'project',
 };
 
 export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
@@ -251,6 +257,12 @@ export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   compare_payment_plans: 'create',
   get_delivery_status: 'view',
   recall_memory: 'view',
+  search_projects: 'view',
+  get_project_details: 'view',
+  get_project_payment_plans: 'view',
+  get_developer_portfolio: 'view',
+  get_project_facilities: 'view',
+  get_project_location: 'view',
 };
 
 /**
@@ -997,24 +1009,88 @@ export class AutomationService {
       }
       case 'search_units': {
         await this.requirePermission(actorUserId, action, companyId);
-        const projectId = this.optionalString(params.projectId);
-        const unitTypeFilter = this.optionalString(params.unitType)?.toLowerCase();
-        const status = this.optionalString(params.status) ?? 'available';
-        const minPrice = typeof params.minPrice === 'number' ? params.minPrice : undefined;
-        const maxPrice = typeof params.maxPrice === 'number' ? params.maxPrice : undefined;
-        const minAreaSqm = typeof params.minAreaSqm === 'number' ? params.minAreaSqm : undefined;
-        const maxAreaSqm = typeof params.maxAreaSqm === 'number' ? params.maxAreaSqm : undefined;
-        const limit = Math.min(50, Math.max(1, typeof params.limit === 'number' ? params.limit : 20));
-        const units = (await this.inventory.listUnits(companyId, projectId))
-          .filter((u) => (status === 'any' ? true : u.status === status))
-          .filter((u) => (unitTypeFilter ? u.unitType.toLowerCase().includes(unitTypeFilter) : true))
-          .filter((u) => (minPrice === undefined ? true : u.listPrice >= minPrice))
-          .filter((u) => (maxPrice === undefined ? true : u.listPrice <= maxPrice))
-          .filter((u) => (minAreaSqm === undefined ? true : u.areaSqm >= minAreaSqm))
-          .filter((u) => (maxAreaSqm === undefined ? true : u.areaSqm <= maxAreaSqm))
-          .sort((a, b) => a.listPrice - b.listPrice)
-          .slice(0, limit);
+        // Delegates to InventoryService.searchUnits — the same real,
+        // server-side filter chain the /api/inventory/units route now
+        // uses, so a human's search and the AI's search can never quietly
+        // diverge into two different result sets for the same query.
+        const units = await this.inventory.searchUnits(companyId, {
+          projectId: this.optionalString(params.projectId),
+          phaseId: this.optionalString(params.phaseId),
+          unitType: this.optionalString(params.unitType),
+          status: (this.optionalString(params.status) as 'available' | 'held' | 'reserved' | 'contracted' | 'cancelled' | 'any' | undefined) ?? 'available',
+          minPrice: typeof params.minPrice === 'number' ? params.minPrice : undefined,
+          maxPrice: typeof params.maxPrice === 'number' ? params.maxPrice : undefined,
+          minAreaSqm: typeof params.minAreaSqm === 'number' ? params.minAreaSqm : undefined,
+          maxAreaSqm: typeof params.maxAreaSqm === 'number' ? params.maxAreaSqm : undefined,
+          minGardenAreaSqm: typeof params.minGardenAreaSqm === 'number' ? params.minGardenAreaSqm : undefined,
+          maxGardenAreaSqm: typeof params.maxGardenAreaSqm === 'number' ? params.maxGardenAreaSqm : undefined,
+          bedrooms: typeof params.bedrooms === 'number' ? params.bedrooms : undefined,
+          minBedrooms: typeof params.minBedrooms === 'number' ? params.minBedrooms : undefined,
+          maxBedrooms: typeof params.maxBedrooms === 'number' ? params.maxBedrooms : undefined,
+          finishingType: this.optionalString(params.finishingType),
+          view: this.optionalString(params.view),
+          floorLabel: this.optionalString(params.floorLabel),
+          designType: this.optionalString(params.designType),
+          destination: this.optionalString(params.destination),
+          developerId: this.optionalString(params.developerId),
+          q: this.optionalString(params.q),
+          limit: typeof params.limit === 'number' ? params.limit : 20,
+        });
         return { units, matchCount: units.length };
+      }
+      case 'search_projects': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projects = await this.inventory.searchProjects(companyId, {
+          destination: this.optionalString(params.destination),
+          developerId: this.optionalString(params.developerId),
+          minPriceFrom: typeof params.minPriceFrom === 'number' ? params.minPriceFrom : undefined,
+          maxPriceTo: typeof params.maxPriceTo === 'number' ? params.maxPriceTo : undefined,
+          unitType: this.optionalString(params.unitType),
+          q: this.optionalString(params.q),
+          limit: typeof params.limit === 'number' ? params.limit : 20,
+        });
+        return { projects, matchCount: projects.length };
+      }
+      case 'get_project_details': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        return { ...(await this.inventory.getProjectFullDetails(projectId, companyId)) };
+      }
+      case 'get_project_payment_plans': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        const project = await this.inventory.getProject(projectId);
+        if (!project || project.companyId !== companyId) throw new AutomationError('project not found for this company', 404);
+        const templates = (await this.paymentPlans.listTemplates(companyId)).filter((t) => !t.projectId || t.projectId === projectId);
+        return { projectId, templates };
+      }
+      case 'get_developer_portfolio': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const developerId = this.requireString(params.developerId, 'developerId');
+        const developer = await this.inventory.getDeveloper(developerId);
+        if (!developer || developer.companyId !== companyId) throw new AutomationError('developer not found for this company', 404);
+        const projects = await this.inventory.getDeveloperPortfolio(developerId, companyId);
+        return { developer, projects };
+      }
+      case 'get_project_facilities': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        return { projectId, facilities: await this.inventory.getProjectFacilities(projectId, companyId) };
+      }
+      case 'get_project_location': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        const project = await this.inventory.getProject(projectId);
+        if (!project || project.companyId !== companyId) throw new AutomationError('project not found for this company', 404);
+        return {
+          projectId,
+          location: project.location,
+          address: project.address,
+          locationLat: project.locationLat,
+          locationLng: project.locationLng,
+          locationMapUrl: project.locationMapUrl,
+          destination: project.destination,
+        };
       }
       case 'score_lead': {
         const leadId = this.requireString(params.leadId, 'leadId');

@@ -188,6 +188,24 @@ export interface PaymentPlanTemplate {
   customMonthInterval?: number;
   termMonths: number;
   fees: PaymentPlanFeeLine[];
+  /** Interest/payment-free period before the first installment is due —
+   * distinct from termMonths (the installment schedule's own length). */
+  gracePeriodMonths?: number;
+  /** % of total price due at handover, on top of the regular installment
+   * schedule — schedule-generator.ts adds this as its own schedule line
+   * when set. */
+  deliveryPaymentPercent?: number;
+  /** How many months of installments continue after delivery (a "payment
+   * after delivery" plan) — 0/undefined means the plan fully settles
+   * before or at delivery. */
+  paymentAfterDeliveryMonths?: number;
+  /** The cash-discount percentage that applied when this template version
+   * was created — a snapshot, not a live value: updateTemplate() bumps
+   * `version` rather than mutating in place, so an old quotation/contract
+   * that cites `sourceTemplateVersion` keeps the discount that was real at
+   * the time, never a silently-changed one. */
+  cashDiscountPercent?: number;
+  maintenanceFeePercent?: number;
   createdAt: string;
   archived: boolean;
 }
@@ -250,12 +268,151 @@ export interface Quotation {
 }
 
 // ---- Inventory ----
+// A real-estate Inventory Intelligence layer, not a single flat Unit table:
+// Developer -> Project -> ProjectPhase -> Launch -> Unit, with Facility/
+// Consultant/SalesPhoneNumber as their own company-scoped entities a
+// Project references by id (never duplicated per-unit). Every new entity
+// here is gated on the existing 'project' RBAC resource (create/edit/view)
+// rather than adding six near-identical new resources — they're all
+// project master data, and CEO already has full CRUD on 'project' via the
+// existing ALL_RESOURCES grant loop in seed.ts.
+
+export interface Developer {
+  id: string;
+  companyId: string;
+  name: string;
+  description?: string;
+  website?: string;
+  logoUrl?: string;
+  createdAt: string;
+}
+
+export interface ProjectPhase {
+  id: string;
+  companyId: string;
+  projectId: string;
+  name: string;
+  /** Pipeline/display position — phases are shown and imported in this
+   * order, not creation order. */
+  order: number;
+  createdAt: string;
+}
+
+export interface Launch {
+  id: string;
+  companyId: string;
+  projectId: string;
+  phaseId?: string;
+  name: string;
+  launchDate?: string;
+  /** Number of units released in this launch — informational, never used
+   * to derive real unit counts (those come from real Unit rows). */
+  inventoryReleased?: number;
+  pricingNotes?: string;
+  paymentPlanTemplateIds?: string[];
+  source?: string;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface Facility {
+  id: string;
+  companyId: string;
+  name: string;
+  category?: string;
+  createdAt: string;
+}
+
+export type ConsultantRole = 'engineering' | 'project_management' | 'other';
+
+export interface Consultant {
+  id: string;
+  companyId: string;
+  name: string;
+  role: ConsultantRole;
+  contactInfo?: string;
+  createdAt: string;
+}
+
+export interface SalesPhoneNumber {
+  id: string;
+  companyId: string;
+  projectId: string;
+  phoneNumber: string;
+  countryCode?: string;
+  type?: string;
+  source?: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+/** Structured delivery info shared by Project (a default) and Unit (an
+ * optional override) — every part is optional so a caller shows exactly
+ * the granularity a developer actually supplied (a quarter, a year, a
+ * phase label) rather than forcing an approximate estimate into a false-
+ * precision exact date. */
+export interface DeliveryInfo {
+  exactDate?: string;
+  quarter?: 1 | 2 | 3 | 4;
+  year?: number;
+  phaseLabel?: string;
+}
 
 export interface Project {
   id: string;
   companyId: string;
   name: string;
   location?: string;
+  /** Geographic market/destination (e.g. "New Cairo", "North Coast") — a
+   * free string, deliberately not a hard-coded enum of Egyptian
+   * destinations, so any company/market can use it. */
+  destination?: string;
+  developerId?: string;
+  locationLat?: number;
+  locationLng?: number;
+  locationMapUrl?: string;
+  address?: string;
+  landAreaFromSqm?: number;
+  landAreaToSqm?: number;
+  buaFromSqm?: number;
+  buaToSqm?: number;
+  gardenAreaFromSqm?: number;
+  gardenAreaToSqm?: number;
+  priceFrom?: number;
+  priceTo?: number;
+  /** ISO 4217 code, e.g. "EGP"/"USD" — never assumed to always be EGP. */
+  currency?: string;
+  pricePerMeter?: number;
+  /** Whether pricePerMeter was explicitly supplied by the developer or
+   * derived here from priceFrom/buaFrom — a computed value never silently
+   * overwrites an explicitly-supplied one (see InventoryService). */
+  pricePerMeterSource?: 'developer' | 'computed';
+  /** Project-level default finishing — a free/configurable string, not a
+   * hard-coded enum; a Unit may override it with its own finishingType. */
+  finishingType?: string;
+  delivery?: DeliveryInfo;
+  projectAreaSqm?: number;
+  projectAreaUnit?: string;
+  /** The unit categories marketed within this project (e.g. ["Apartment",
+   * "Twin House"]) — informational/marketing, not a hard FK; a Unit's own
+   * `unitType` stays the source of truth for what's actually in inventory. */
+  typeOfUnits?: string[];
+  facilityIds?: string[];
+  engineeringConsultantId?: string;
+  projectManagementId?: string;
+  /** قرار وزاري (Ministerial Decision) — English field names internally,
+   * with Arabic/English UI labels applied at the presentation layer. */
+  ministerialDecisionNumber?: string;
+  ministerialDecisionDate?: string;
+  ministerialDecisionAuthority?: string;
+  ministerialDecisionDocumentUrl?: string;
+  cashDiscountPercent?: number;
+  cashDiscountAmount?: number;
+  cashDiscountValidUntil?: string;
+  cashDiscountSource?: string;
+  cashDiscountEffectiveDate?: string;
+  maintenanceFeePercent?: number;
+  maintenanceFeeAmount?: number;
   createdAt: string;
 }
 
@@ -265,11 +422,32 @@ export interface Unit {
   id: string;
   companyId: string;
   projectId: string;
+  phaseId?: string;
   code: string;
+  /** The unit's category (Apartment/Villa/Chalet/...) — a free/configurable
+   * string, never a hard-coded enum, so a company can add its own types
+   * without a code change. */
   unitType: string;
   areaSqm: number;
   listPrice: number;
   status: UnitStatus;
+  floorLabel?: string;
+  bedrooms?: number;
+  /** Layout/model type (e.g. "Type A", "Garden", "Corner") — configurable
+   * free string. */
+  designType?: string;
+  /** Multiple views are allowed (e.g. ["Garden", "Pool"]). */
+  view?: string[];
+  gardenAreaSqm?: number;
+  buildingLabel?: string;
+  /** Overrides Project.finishingType when this specific unit differs. */
+  finishingType?: string;
+  /** Overrides Project.delivery when this specific unit differs. */
+  delivery?: DeliveryInfo;
+  /** An explicit, developer-supplied price-per-meter — otherwise this is
+   * computed on read as listPrice/areaSqm, never stored (and so never
+   * goes stale relative to listPrice/areaSqm edits). */
+  pricePerMeterOverride?: number;
   createdAt: string;
 }
 
@@ -883,7 +1061,13 @@ export type AutomationActionType =
   | 'score_lead'
   | 'compare_payment_plans'
   | 'get_delivery_status'
-  | 'recall_memory';
+  | 'recall_memory'
+  | 'search_projects'
+  | 'get_project_details'
+  | 'get_project_payment_plans'
+  | 'get_developer_portfolio'
+  | 'get_project_facilities'
+  | 'get_project_location';
 
 export interface WorkflowActionConfig {
   type: AutomationActionType;

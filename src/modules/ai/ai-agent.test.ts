@@ -586,7 +586,10 @@ test('listTools returns the full tool registry, or a per-agent boundary-filtered
   const allTools = h.ai.listTools();
   assert.ok(allTools.length >= 7);
   const salesTools = h.ai.listTools('sales');
-  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call', 'score_lead', 'compare_payment_plans', 'get_delivery_status', 'recall_memory'].includes(t.actionType)));
+  assert.ok(salesTools.every((t) => [
+    'update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call', 'score_lead', 'compare_payment_plans', 'get_delivery_status', 'recall_memory',
+    'search_units', 'search_projects', 'get_project_details', 'get_project_payment_plans', 'get_project_facilities', 'get_project_location',
+  ].includes(t.actionType)));
   assert.ok(!salesTools.some((t) => t.actionType === 'webhook_call'));
 });
 
