@@ -12,6 +12,8 @@ import { FinanceService } from '../finance/finance.service.js';
 import { SalesService } from '../sales/sales.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
+import { LeadScoringService } from '../ai/lead-scoring.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from './integration.service.js';
 import type {
@@ -32,6 +34,7 @@ import type {
   PermissionGrant,
   PermissionOverride,
   Project,
+  Quotation,
   Receipt,
   Refund,
   Reservation,
@@ -87,6 +90,8 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const leadScoring = new LeadScoringService(leads, crmStages);
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
@@ -100,6 +105,10 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
     marketing,
     finance,
     sales,
+    inventory,
+    leadScoring,
+    quotations,
+    paymentPlans,
     auditLog,
     'test-encryption-secret-not-for-production',
   );

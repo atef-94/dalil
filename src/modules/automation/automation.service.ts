@@ -37,6 +37,10 @@ import type { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
 import { FinanceService } from '../finance/finance.service.js';
 import { SalesService } from '../sales/sales.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { LeadScoringService } from '../ai/lead-scoring.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
+import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 
 export interface AutomationRepos {
   workflows: Repository<WorkflowDefinition>;
@@ -220,6 +224,9 @@ export const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   require_approval: 'approval',
   record_payment: 'payment_schedule',
   cancel_contract: 'contract',
+  search_units: 'unit',
+  score_lead: 'lead',
+  compare_payment_plans: 'quotation',
 };
 
 export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
@@ -235,6 +242,9 @@ export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   require_approval: 'approve',
   record_payment: 'edit',
   cancel_contract: 'edit',
+  search_units: 'view',
+  score_lead: 'view',
+  compare_payment_plans: 'create',
 };
 
 /**
@@ -288,6 +298,10 @@ export class AutomationService {
     private readonly marketing: MarketingService,
     private readonly finance: FinanceService,
     private readonly sales: SalesService,
+    private readonly inventory: InventoryService,
+    private readonly leadScoring: LeadScoringService,
+    private readonly quotations: QuotationService,
+    private readonly paymentPlans: PaymentPlansService,
     private readonly auditLog: AuditLog,
     private readonly encryptionSecret: string,
     private readonly fetchImpl: typeof fetch = fetch,
@@ -922,6 +936,67 @@ export class AutomationService {
         await this.requirePermission(actorUserId, action, companyId, contract.creditedEmployeeUserId);
         const cancelled = await this.sales.cancelContract(contractId, companyId);
         return { contractId: cancelled.id, status: cancelled.status };
+      }
+      case 'search_units': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.optionalString(params.projectId);
+        const unitTypeFilter = this.optionalString(params.unitType)?.toLowerCase();
+        const status = this.optionalString(params.status) ?? 'available';
+        const minPrice = typeof params.minPrice === 'number' ? params.minPrice : undefined;
+        const maxPrice = typeof params.maxPrice === 'number' ? params.maxPrice : undefined;
+        const minAreaSqm = typeof params.minAreaSqm === 'number' ? params.minAreaSqm : undefined;
+        const maxAreaSqm = typeof params.maxAreaSqm === 'number' ? params.maxAreaSqm : undefined;
+        const limit = Math.min(50, Math.max(1, typeof params.limit === 'number' ? params.limit : 20));
+        const units = (await this.inventory.listUnits(companyId, projectId))
+          .filter((u) => (status === 'any' ? true : u.status === status))
+          .filter((u) => (unitTypeFilter ? u.unitType.toLowerCase().includes(unitTypeFilter) : true))
+          .filter((u) => (minPrice === undefined ? true : u.listPrice >= minPrice))
+          .filter((u) => (maxPrice === undefined ? true : u.listPrice <= maxPrice))
+          .filter((u) => (minAreaSqm === undefined ? true : u.areaSqm >= minAreaSqm))
+          .filter((u) => (maxAreaSqm === undefined ? true : u.areaSqm <= maxAreaSqm))
+          .sort((a, b) => a.listPrice - b.listPrice)
+          .slice(0, limit);
+        return { units, matchCount: units.length };
+      }
+      case 'score_lead': {
+        const leadId = this.requireString(params.leadId, 'leadId');
+        const lead = await this.crm.getLead(leadId);
+        if (!lead || lead.companyId !== companyId) throw new AutomationError('lead not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, lead.ownerEmployeeUserId);
+        return { ...(await this.leadScoring.scoreLead(leadId, companyId)) };
+      }
+      case 'compare_payment_plans': {
+        await this.requirePermission(actorUserId, action, companyId, actorUserId);
+        const unitId = this.requireString(params.unitId, 'unitId');
+        const unit = await this.inventory.getUnit(unitId);
+        if (!unit || unit.companyId !== companyId) throw new AutomationError('unit not found for this company', 404);
+        const discountPercent = typeof params.discountPercent === 'number' ? params.discountPercent : undefined;
+        const escalationPercentPerYear = typeof params.escalationPercentPerYear === 'number' ? params.escalationPercentPerYear : undefined;
+        const requestedTemplateIds = Array.isArray(params.templateIds) ? (params.templateIds as unknown[]).filter((v): v is string => typeof v === 'string') : undefined;
+        const allTemplates = await this.paymentPlans.listTemplates(companyId);
+        const candidateTemplates = (requestedTemplateIds?.length
+          ? allTemplates.filter((t) => requestedTemplateIds.includes(t.id))
+          : allTemplates.filter((t) => !t.projectId || t.projectId === unit.projectId)
+        ).slice(0, 10);
+        if (candidateTemplates.length === 0) throw new AutomationError('no payment plan templates available to compare for this unit', 404);
+        const comparisons: Record<string, unknown>[] = [];
+        for (const template of candidateTemplates) {
+          try {
+            const calc = await this.quotations.calculate(companyId, { unitId, paymentPlanTemplateId: template.id, discountPercent, escalationPercentPerYear });
+            comparisons.push({
+              templateId: template.id,
+              templateName: template.name,
+              termMonths: template.termMonths,
+              frequency: template.frequency,
+              downPayment: calc.downPayment,
+              netValue: calc.netValue,
+              installmentCount: calc.schedule.length,
+            });
+          } catch (err) {
+            comparisons.push({ templateId: template.id, templateName: template.name, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        return { unitId, comparisons };
       }
       case 'webhook_call': {
         await this.requirePermission(actorUserId, action, companyId);

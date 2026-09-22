@@ -6,6 +6,7 @@ import type {
   AgentDecisionStatus,
   AiActionRequest,
   AiActionStatus,
+  AiActionVerificationStatus,
   AiAutonomyLevel,
   AiPolicy,
   ApprovalRequest,
@@ -30,6 +31,8 @@ import { LegalService } from '../legal/legal.service.js';
 import { BrokersService } from '../brokers/brokers.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { AnalyticsService } from '../analytics/analytics.service.js';
+import { TaskService } from '../tasks/task.service.js';
+import { CommunicationService } from '../communication/communication.service.js';
 
 export interface AiRepos {
   actionRequests: Repository<AiActionRequest>;
@@ -67,6 +70,15 @@ export interface ToolDefinition {
   riskLevel: 'low' | 'medium' | 'high';
   approvalRequired: boolean;
   auditRequired: true;
+  /** A read-only tool never mutates anything — it only re-reads data the
+   * requester's RBAC grant already lets them see through the ordinary UI
+   * (search inventory, score a lead, compare payment plan math). Gating
+   * that behind the same human-approval pipeline as a stage move or a
+   * payment record would make the tool useless in practice (nobody clicks
+   * "Approve" so the AI can look something up) without adding any real
+   * safety — the RBAC permission check still applies in full. See
+   * requestAction()'s early return for readOnly tools. */
+  readOnly?: boolean;
 }
 
 interface ToolSpec {
@@ -76,6 +88,7 @@ interface ToolSpec {
   requiredParams: string[];
   department: string;
   riskLevel: 'low' | 'medium' | 'high';
+  readOnly?: boolean;
 }
 
 const TOOL_SPECS: ToolSpec[] = [
@@ -91,6 +104,9 @@ const TOOL_SPECS: ToolSpec[] = [
   { actionType: 'require_approval', name: 'Require Approval', description: 'Pauses for human approval (workflow steps only).', requiredParams: [], department: 'Cross-department', riskLevel: 'low' },
   { actionType: 'record_payment', name: 'Record Payment', description: 'Records a payment against a contract schedule line.', requiredParams: ['contractId', 'paymentScheduleLineId', 'amount', 'method'], department: 'Finance', riskLevel: 'high' },
   { actionType: 'cancel_contract', name: 'Cancel Contract', description: 'Cancels a signed contract and releases its reserved unit.', requiredParams: ['contractId'], department: 'Sales / Finance / Legal', riskLevel: 'high' },
+  { actionType: 'search_units', name: 'Search Units', description: 'Searches available inventory by project/type/price/area — read-only.', requiredParams: [], department: 'Projects & Inventory', riskLevel: 'low', readOnly: true },
+  { actionType: 'score_lead', name: 'Score Lead', description: "Computes a lead's current priority score and the factors behind it — read-only.", requiredParams: ['leadId'], department: 'CRM / Sales', riskLevel: 'low', readOnly: true },
+  { actionType: 'compare_payment_plans', name: 'Compare Payment Plans', description: 'Calculates and compares payment-plan options for a unit (down payment, term, net value) — read-only, no quotation is saved.', requiredParams: ['unitId'], department: 'Sales / Finance', riskLevel: 'low', readOnly: true },
 ];
 
 const TOOL_REGISTRY: ToolDefinition[] = TOOL_SPECS.map((spec) => ({
@@ -100,7 +116,10 @@ const TOOL_REGISTRY: ToolDefinition[] = TOOL_SPECS.map((spec) => ({
   // AiPolicy 'require_approval' until a company explicitly opts it into
   // auto_execute (see autonomyFor) — so "approval required" is the
   // correct default classification for every tool, not a per-tool guess.
-  approvalRequired: true,
+  // Read-only tools are the one exception: they never reach the autonomy
+  // gate at all (see requestAction()), so approvalRequired is always
+  // false for them regardless of company policy.
+  approvalRequired: !spec.readOnly,
   auditRequired: true,
 }));
 
@@ -205,6 +224,8 @@ export class AiAgentService {
     private readonly brokers: BrokersService,
     private readonly inventory: InventoryService,
     private readonly analytics: AnalyticsService,
+    private readonly tasks: TaskService,
+    private readonly communication: CommunicationService,
   ) {
     this.agents = {
       sales: {
@@ -213,7 +234,7 @@ export class AiAgentService {
         businessFunction: 'Sales',
         goal: 'Advance qualified leads through the funnel and keep unqualified ones from going cold.',
         subjectType: 'lead',
-        allowedActionTypes: ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call'],
+        allowedActionTypes: ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call', 'score_lead', 'compare_payment_plans'],
         escalateBelowConfidence: 20,
       },
       marketing: {
@@ -276,7 +297,7 @@ export class AiAgentService {
         businessFunction: 'Projects & Inventory',
         goal: 'Surface units that have sat available with no reservation activity for an unusually long time.',
         subjectType: 'unit',
-        allowedActionTypes: ['create_task'],
+        allowedActionTypes: ['create_task', 'search_units'],
         escalateBelowConfidence: 20,
       },
       management: {
@@ -313,6 +334,16 @@ export class AiAgentService {
       return this.persist(input, 'denied_permission');
     }
 
+    // A read-only tool (search/score/compare — see TOOL_REGISTRY) never
+    // reaches the autonomy/approval gate below: it can't mutate anything,
+    // so requiring a human to click "Approve" before the AI is allowed to
+    // look something up the requester's own RBAC grant already lets them
+    // see would make the tool unusable without adding real safety.
+    const tool = TOOL_REGISTRY.find((t) => t.actionType === input.actionType);
+    if (tool?.readOnly) {
+      return this.executeAndRecord(input);
+    }
+
     const autonomy = await this.autonomyFor(input.companyId, input.actionType);
 
     if (autonomy === 'suggest_only') {
@@ -335,24 +366,122 @@ export class AiAgentService {
     }
 
     // autonomy === 'auto_execute'
+    return this.executeAndRecord(input);
+  }
+
+  /** Executes a tool call and — unlike simply trusting that
+   * executeActionDirect() didn't throw — re-reads the entity the action
+   * targeted to confirm the claimed state change actually happened before
+   * recording 'executed'. Shared by the read-only bypass above and the
+   * auto_execute path below, since both need identical execute -> verify
+   * -> persist -> audit handling. */
+  private async executeAndRecord(input: RequestAiActionInput): Promise<AiActionRequest> {
     try {
       const output = await this.automation.executeActionDirect(input.companyId, input.requestedByUserId, {
         type: input.actionType,
         params: input.params,
       });
-      const executed = await this.persist(input, 'executed');
+      const verification = await this.verifyExecution(input.companyId, input.actionType, input.params, output);
+      const executed = await this.persist(input, 'executed', undefined, verification);
       await this.auditLog.record({
         companyId: input.companyId,
         actorUserId: input.requestedByUserId,
         action: 'execute',
         resource: 'ai_action',
         resourceId: executed.id,
-        metadata: { actionType: input.actionType, executedByAI: true, autoExecuted: true, output },
+        metadata: { actionType: input.actionType, executedByAI: true, autoExecuted: true, output, verificationStatus: verification.status },
       });
       return executed;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       return this.persist(input, 'denied_policy', reason);
+    }
+  }
+
+  /** Real post-execution verification (never assumes success just because
+   * executeActionDirect() returned without throwing): for the tool types
+   * where the target entity is re-readable through a service already
+   * injected here, re-reads it and confirms the claimed state change is
+   * actually reflected. A tool with no defined check here (e.g.
+   * webhook_call, cancel_contract, ai_decide/require_approval — no
+   * single-entity outcome to re-read, or no service dependency wired) is
+   * honestly reported 'not_applicable', never silently marked 'verified'. */
+  private async verifyExecution(
+    companyId: string,
+    actionType: AutomationActionType,
+    params: Record<string, unknown>,
+    output: Record<string, unknown>,
+  ): Promise<{ status: AiActionVerificationStatus; detail: string }> {
+    try {
+      switch (actionType) {
+        case 'create_lead': {
+          const leadId = String(output.leadId ?? '');
+          const lead = await this.crm.getLead(leadId);
+          return lead && lead.companyId === companyId
+            ? { status: 'verified', detail: `Confirmed lead ${leadId} exists.` }
+            : { status: 'failed', detail: `Lead ${leadId} could not be re-read after creation.` };
+        }
+        case 'update_lead_status': {
+          const leadId = String(params.leadId ?? output.leadId ?? '');
+          const expectedStageId = String(params.stageId ?? output.stageId ?? '');
+          const lead = await this.crm.getLead(leadId);
+          return lead && lead.stageId === expectedStageId
+            ? { status: 'verified', detail: `Confirmed lead ${leadId} is now in stage ${expectedStageId}.` }
+            : { status: 'failed', detail: `Expected lead ${leadId} to be in stage ${expectedStageId}, but it is in ${lead?.stageId ?? 'unknown'}.` };
+        }
+        case 'assign_lead_owner': {
+          const leadId = String(params.leadId ?? output.leadId ?? '');
+          const expectedOwner = String(params.ownerEmployeeUserId ?? output.ownerEmployeeUserId ?? '');
+          const lead = await this.crm.getLead(leadId);
+          return lead && lead.ownerEmployeeUserId === expectedOwner
+            ? { status: 'verified', detail: `Confirmed lead ${leadId} is now owned by ${expectedOwner}.` }
+            : { status: 'failed', detail: `Expected lead ${leadId} owner to be ${expectedOwner}, but it is ${lead?.ownerEmployeeUserId ?? 'unknown'}.` };
+        }
+        case 'update_campaign_status': {
+          const campaignId = String(params.campaignId ?? output.campaignId ?? '');
+          const expectedStatus = String(params.status ?? output.status ?? '');
+          const campaign = await this.marketing.getCampaign(campaignId);
+          return campaign && campaign.companyId === companyId && campaign.status === expectedStatus
+            ? { status: 'verified', detail: `Confirmed campaign ${campaignId} status is ${expectedStatus}.` }
+            : { status: 'failed', detail: `Expected campaign ${campaignId} status ${expectedStatus}, but it is ${campaign?.status ?? 'unknown'}.` };
+        }
+        case 'record_payment': {
+          const lineId = String(output.lineId ?? '');
+          const expectedAmount = typeof params.amount === 'number' ? params.amount : 0;
+          const line = await this.finance.getScheduleLine(lineId, companyId);
+          return line && line.amountPaid >= expectedAmount
+            ? { status: 'verified', detail: `Confirmed payment schedule line ${lineId} shows amountPaid ${line.amountPaid} (>= recorded amount ${expectedAmount}).` }
+            : { status: 'failed', detail: `Payment schedule line ${lineId} does not reflect the recorded amount.` };
+        }
+        case 'create_task': {
+          const taskId = String(output.taskId ?? '');
+          const task = await this.tasks.getTask(taskId);
+          return task && task.companyId === companyId
+            ? { status: 'verified', detail: `Confirmed task ${taskId} exists.` }
+            : { status: 'failed', detail: `Task ${taskId} could not be re-read after creation.` };
+        }
+        case 'send_message': {
+          const messageId = String(output.messageId ?? '');
+          const message = await this.communication.getMessage(messageId, companyId);
+          return message
+            ? { status: 'verified', detail: `Confirmed message ${messageId} was logged.` }
+            : { status: 'failed', detail: `Message ${messageId} could not be re-read after sending.` };
+        }
+        case 'integration_call': {
+          const provider = String(params.provider ?? '');
+          const events = await this.integrations.listEvents(companyId);
+          const matching = events
+            .filter((e) => e.provider === provider && (!params.leadId || e.requestSummary?.leadId === params.leadId))
+            .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+          return matching[0]?.status === 'success'
+            ? { status: 'verified', detail: `Confirmed a "success" delivery log entry for ${provider}.` }
+            : { status: 'failed', detail: `No successful delivery log entry found for ${provider} after execution.` };
+        }
+        default:
+          return { status: 'not_applicable', detail: 'No automated post-execution check is defined for this tool.' };
+      }
+    } catch (err) {
+      return { status: 'failed', detail: `Verification check itself failed: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 
@@ -371,14 +500,20 @@ export class AiAgentService {
         type: request.actionType,
         params: request.params,
       });
-      const executed = await this.repos.actionRequests.save({ ...request, status: 'executed' });
+      const verification = await this.verifyExecution(companyId, request.actionType, request.params, output);
+      const executed = await this.repos.actionRequests.save({
+        ...request,
+        status: 'executed',
+        verificationStatus: verification.status,
+        verificationDetail: verification.detail,
+      });
       await this.auditLog.record({
         companyId,
         actorUserId: approverUserId,
         action: 'approve',
         resource: 'ai_action',
         resourceId: executed.id,
-        metadata: { actionType: request.actionType, executedByAI: true, approvedBy: approverUserId, output },
+        metadata: { actionType: request.actionType, executedByAI: true, approvedBy: approverUserId, output, verificationStatus: verification.status },
       });
       return executed;
     } catch (err) {
@@ -1014,7 +1149,12 @@ export class AiAgentService {
     return matches[0];
   }
 
-  private async persist(input: RequestAiActionInput, status: AiActionStatus, extraReasoning?: string): Promise<AiActionRequest> {
+  private async persist(
+    input: RequestAiActionInput,
+    status: AiActionStatus,
+    extraReasoning?: string,
+    verification?: { status: AiActionVerificationStatus; detail: string },
+  ): Promise<AiActionRequest> {
     const reasoning = extraReasoning
       ? `${input.reasoning ?? ''}${input.reasoning ? ' — ' : ''}${extraReasoning}`.trim()
       : input.reasoning;
@@ -1027,6 +1167,8 @@ export class AiAgentService {
       reasoning,
       status,
       createdAt: new Date().toISOString(),
+      verificationStatus: verification?.status,
+      verificationDetail: verification?.detail,
     };
     const saved = await this.repos.actionRequests.save(request);
     await this.auditLog.record({
@@ -1035,7 +1177,7 @@ export class AiAgentService {
       action: 'create',
       resource: 'ai_action',
       resourceId: saved.id,
-      metadata: { actionType: input.actionType, status, executedByAI: true },
+      metadata: { actionType: input.actionType, status, executedByAI: true, verificationStatus: verification?.status },
     });
     return saved;
   }

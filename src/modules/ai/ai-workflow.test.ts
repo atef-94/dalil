@@ -18,6 +18,7 @@ import { LegalService } from '../legal/legal.service.js';
 import { BrokersService } from '../brokers/brokers.service.js';
 import { AnalyticsService } from '../analytics/analytics.service.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from '../integrations/integration.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
@@ -58,6 +59,7 @@ import type {
   PermissionGrant,
   PermissionOverride,
   Project,
+  Quotation,
   Receipt,
   Refund,
   Reservation,
@@ -131,6 +133,7 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
   const legal = new LegalService(legalDocuments, contracts);
   const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm);
@@ -146,6 +149,10 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     marketing,
     finance,
     sales,
+    inventory,
+    leadScoring,
+    quotations,
+    paymentPlans,
     auditLog,
     'test-encryption-secret-not-for-production',
   );
@@ -184,6 +191,8 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     brokers,
     inventory,
     analytics,
+    tasks,
+    communication,
   );
 
   const aiWorkflowRuns = new InMemoryRepository<AiWorkflowRun>();

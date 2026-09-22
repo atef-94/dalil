@@ -393,6 +393,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
     marketing,
     finance,
     sales,
+    inventory,
+    leadScoring,
+    quotations,
+    paymentPlans,
     auditLog,
     options.secretStoreKey ?? options.tokenSecret,
     undefined,
@@ -437,6 +441,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     brokers,
     inventory,
     analytics,
+    tasks,
+    communication,
   );
   // Wires the `ai_decide` action type — a workflow step (or a manual
   // trigger) can hand a subject off to a specialized agent and let it

@@ -13,6 +13,8 @@ import { FinanceService } from '../finance/finance.service.js';
 import { SalesService } from '../sales/sales.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
+import { LeadScoringService } from '../ai/lead-scoring.service.js';
 import { AutomationService } from './automation.service.js';
 import type {
   ActionName,
@@ -31,6 +33,7 @@ import type {
   PermissionGrant,
   PermissionOverride,
   Project,
+  Quotation,
   Receipt,
   Refund,
   ResourceName,
@@ -91,6 +94,8 @@ async function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10, compan
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const leadScoring = new LeadScoringService(leads, crmStages);
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
@@ -110,6 +115,10 @@ async function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10, compan
     marketing,
     finance,
     sales,
+    inventory,
+    leadScoring,
+    quotations,
+    paymentPlans,
     auditLog,
     'test-encryption-secret-not-for-production',
     ((url: Parameters<typeof fetch>[0], init?: RequestInit) => fetchImpl(url, init)) as typeof fetch,
@@ -136,6 +145,7 @@ async function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10, compan
     scheduleLines,
     units,
     projects,
+    templates,
     reservations,
     runs,
     stepRuns,
@@ -610,6 +620,109 @@ test('cancel_contract action fails when the workflow creator lacks edit:contract
   const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
   assert.equal(run!.status, 'failed');
   assert.match(run!.error ?? '', /lacks edit:contract permission/);
+});
+
+test('search_units action returns real matching units, filtered and RBAC-gated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'unit' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Test Project', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: '2BR', areaSqm: 120, listPrice: 900_000, status: 'available', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-2', companyId: 'c1', projectId: 'proj-1', code: 'A-102', unitType: '3BR', areaSqm: 160, listPrice: 1_400_000, status: 'available', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-3', companyId: 'c1', projectId: 'proj-1', code: 'A-103', unitType: '2BR', areaSqm: 118, listPrice: 850_000, status: 'reserved', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search units', action: { type: 'search_units', params: { projectId: 'proj-1', maxPrice: 1_000_000 } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { units: { id: string }[]; matchCount: number };
+  // unit-2 is above maxPrice, unit-3 is reserved (not 'available') — only unit-1 matches.
+  assert.equal(output.matchCount, 1);
+  assert.equal(output.units[0]!.id, 'unit-1');
+});
+
+test('search_units action fails when the workflow creator lacks view:unit permission', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', []);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search units', action: { type: 'search_units', params: {} } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lacks view:unit permission/);
+});
+
+test('score_lead action returns the real LeadScoringService result for the lead, RBAC-gated and tenant-isolated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'lead' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'owner-1' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Score',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Score lead', action: { type: 'score_lead', params: { leadId: lead.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { leadId: string; score: number };
+  assert.equal(output.leadId, lead.id);
+  assert.ok(output.score >= 0 && output.score <= 100);
+});
+
+test('score_lead action rejects a lead belonging to a different company (cross-tenant)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'lead' }]);
+  const otherLead = await h.crm.createLead({ companyId: 'c2', fullName: 'Other', phone: '0200', ownerEmployeeUserId: 'owner-2' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Score',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Score lead', action: { type: 'score_lead', params: { leadId: otherLead.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lead not found/);
+});
+
+test('compare_payment_plans action computes real comparisons through QuotationService for the unit', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'quotation' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Test Project', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: '2BR', areaSqm: 120, listPrice: 1_000_000, status: 'available', createdAt: new Date().toISOString() });
+  await h.templates.save({
+    id: 'tpl-1', companyId: 'c1', projectId: 'proj-1', name: 'Standard Plan', version: 1,
+    downPaymentType: 'percentage', downPaymentValue: 10, frequency: 'monthly', termMonths: 24, fees: [], createdAt: new Date().toISOString(), archived: false,
+  });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Compare',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Compare plans', action: { type: 'compare_payment_plans', params: { unitId: 'unit-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { unitId: string; comparisons: { templateId: string; downPayment: number }[] };
+  assert.equal(output.unitId, 'unit-1');
+  assert.equal(output.comparisons.length, 1);
+  assert.equal(output.comparisons[0]!.templateId, 'tpl-1');
+  assert.equal(output.comparisons[0]!.downPayment, 100_000);
 });
 
 test('webhook_call sends a bearer token resolved from the encrypted secret store', async () => {

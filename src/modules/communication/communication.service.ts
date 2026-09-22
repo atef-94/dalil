@@ -48,6 +48,11 @@ export class CommunicationService {
     return this.messages.findAll((m) => m.companyId === companyId);
   }
 
+  async getMessage(id: string, companyId: string): Promise<Message | undefined> {
+    const message = await this.messages.findById(id);
+    return message && message.companyId === companyId ? message : undefined;
+  }
+
   async listForUser(userId: string, companyId: string): Promise<Message[]> {
     return this.messages.findAll((m) => m.companyId === companyId && (m.toUserId === userId || m.fromUserId === userId));
   }

@@ -18,6 +18,7 @@ import { LegalService } from '../legal/legal.service.js';
 import { BrokersService } from '../brokers/brokers.service.js';
 import { AnalyticsService } from '../analytics/analytics.service.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from '../integrations/integration.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
@@ -51,6 +52,7 @@ import type {
   PermissionGrant,
   PermissionOverride,
   Project,
+  Quotation,
   Receipt,
   Refund,
   Reservation,
@@ -121,6 +123,7 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
   const legal = new LegalService(legalDocuments, contracts);
   const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm);
@@ -136,6 +139,10 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     marketing,
     finance,
     sales,
+    inventory,
+    leadScoring,
+    quotations,
+    paymentPlans,
     auditLog,
     'test-encryption-secret-not-for-production',
   );
@@ -179,6 +186,8 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     brokers,
     inventory,
     analytics,
+    tasks,
+    communication,
   );
 
   return {
@@ -209,6 +218,11 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     finance,
     employees,
     units,
+    projects,
+    inventory,
+    templates,
+    paymentPlans,
+    campaigns,
     policies,
     auditLogRepo,
     scheduleLines,
@@ -554,7 +568,7 @@ test('listTools returns the full tool registry, or a per-agent boundary-filtered
   const allTools = h.ai.listTools();
   assert.ok(allTools.length >= 7);
   const salesTools = h.ai.listTools('sales');
-  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call'].includes(t.actionType)));
+  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call', 'score_lead', 'compare_payment_plans'].includes(t.actionType)));
   assert.ok(!salesTools.some((t) => t.actionType === 'webhook_call'));
 });
 
@@ -581,6 +595,147 @@ test('the Tool Registry exposes real, non-fabricated risk/department/permission 
   // spot-check one entry against what the executor actually enforces.
   const updateLeadStatusTool = tools.find((t) => t.actionType === 'update_lead_status')!;
   assert.deepEqual(updateLeadStatusTool.requiredPermission, { action: 'edit', resource: 'lead' });
+});
+
+// ---- Read-only tools (search_units/score_lead/compare_payment_plans) bypass
+// the autonomy/approval gate entirely, since they never mutate anything —
+// but RBAC is still fully enforced. ----
+
+const VIEW_UNIT_GRANT: { action: ActionName; resource: ResourceName } = { action: 'view', resource: 'unit' };
+const VIEW_LEAD_GRANT2: { action: ActionName; resource: ResourceName } = { action: 'view', resource: 'lead' };
+const CREATE_QUOTATION_GRANT: { action: ActionName; resource: ResourceName } = { action: 'create', resource: 'quotation' };
+const CREATE_LEAD_GRANT: { action: ActionName; resource: ResourceName } = { action: 'create', resource: 'lead' };
+const EDIT_CAMPAIGN_GRANT: { action: ActionName; resource: ResourceName } = { action: 'edit', resource: 'campaign' };
+
+test('a read-only tool (search_units) executes immediately with no AiPolicy set — approval would make it unusable', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [VIEW_UNIT_GRANT]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Test Project', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: '2BR', areaSqm: 120, listPrice: 1_000_000, status: 'available', createdAt: new Date().toISOString() });
+  // Deliberately no h.ai.setPolicy call for 'search_units' — if this tool
+  // went through the ordinary autonomy gate it would default to
+  // require_approval and never execute.
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'search_units',
+    params: { projectId: 'proj-1' },
+  });
+  assert.equal(request.status, 'executed');
+  assert.equal(request.approvalRequestId, undefined);
+});
+
+test('a read-only tool (score_lead) still enforces the RBAC permission check', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', []); // no grants at all
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'human-1' });
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'score_lead',
+    params: { leadId: lead.id },
+  });
+  assert.equal(request.status, 'denied_permission');
+});
+
+test('score_lead (read-only) returns the same real LeadScoringService result the analytics page uses', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [VIEW_LEAD_GRANT2]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'human-1' });
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'score_lead',
+    params: { leadId: lead.id },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'executed');
+});
+
+test('compare_payment_plans (read-only) computes real comparisons via QuotationService, with no AiPolicy set', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_QUOTATION_GRANT]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Test Project', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: '2BR', areaSqm: 120, listPrice: 1_000_000, status: 'available', createdAt: new Date().toISOString() });
+  await h.templates.save({
+    id: 'tpl-1', companyId: 'c1', projectId: 'proj-1', name: 'Standard Plan', version: 1,
+    downPaymentType: 'percentage', downPaymentValue: 10, frequency: 'monthly', termMonths: 24, fees: [], createdAt: new Date().toISOString(), archived: false,
+  });
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'compare_payment_plans',
+    params: { unitId: 'unit-1' },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'executed');
+});
+
+// ---- Real post-execution verification (never assumes success just because
+// executeActionDirect() didn't throw) ----
+
+test('executing update_lead_status re-reads the lead and records verificationStatus "verified"', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'human-1' });
+  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'update_lead_status',
+    params: { leadId: lead.id, stageId: contacted.id },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'executed');
+  assert.equal(request.verificationStatus, 'verified');
+  assert.match(request.verificationDetail ?? '', new RegExp(contacted.id));
+});
+
+test('executing create_lead re-reads the new lead and records verificationStatus "verified"', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_LEAD_GRANT]);
+  await h.ai.setPolicy('c1', 'create_lead', 'auto_execute', 'human-1');
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'create_lead',
+    params: { fullName: 'New Lead', phone: '0101' },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'executed');
+  assert.equal(request.verificationStatus, 'verified');
+});
+
+test('executing update_campaign_status re-reads the campaign and records verificationStatus "verified"', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_CAMPAIGN_GRANT]);
+  await h.ai.setPolicy('c1', 'update_campaign_status', 'auto_execute', 'human-1');
+  await h.campaigns.save({ id: 'camp-1', companyId: 'c1', name: 'Test Campaign', channel: 'digital', budget: 1000, startDate: new Date().toISOString(), status: 'active', createdAt: new Date().toISOString() });
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'update_campaign_status',
+    params: { campaignId: 'camp-1', status: 'cancelled' },
+  });
+  assert.equal(request.status, 'executed');
+  assert.equal(request.verificationStatus, 'verified');
+});
+
+test('verificationStatus is undefined for a suggested/pending action — verification only ever runs after real execution', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'human-1' });
+  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'update_lead_status',
+    params: { leadId: lead.id, stageId: contacted.id },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'pending_approval');
+  assert.equal(request.verificationStatus, undefined);
 });
 
 test('requestAction rejects a call missing a required tool parameter without throwing, recorded as denied_policy', async () => {

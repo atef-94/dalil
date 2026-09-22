@@ -13,13 +13,15 @@ import { FinanceService } from '../finance/finance.service.js';
 import { SalesService } from '../sales/sales.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
+import { LeadScoringService } from '../ai/lead-scoring.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from './integration.service.js';
 import { SignatureService } from './e-signature.service.js';
 import type {
   ApprovalRequest, AuditLogEntry, Campaign, Contract, CrmStage, Employee, IntegrationConnection, IntegrationEvent,
   Lead, Message, Opportunity, Payment, PaymentPlanTemplate, PaymentScheduleLine, PermissionGrant, PermissionOverride,
-  Project, Receipt, Refund, Reservation, Role, Secret, SignatureEnvelope, Task, Unit, UnitHold, User, UserRole,
+  Project, Quotation, Receipt, Refund, Reservation, Role, Secret, SignatureEnvelope, Task, Unit, UnitHold, User, UserRole,
   WorkflowDefinition, WorkflowRun, WorkflowStepRun,
 } from '../../domain/types.js';
 
@@ -63,12 +65,15 @@ function freshHarness() {
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const leadScoring = new LeadScoringService(leads, crmStages);
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
   const automation = new AutomationService(
     { workflows, runs, stepRuns, approvals, secrets },
-    rbac, tasks, communication, crm, crmStages, marketing, finance, sales, auditLog,
+    rbac, tasks, communication, crm, crmStages, marketing, finance, sales,
+    inventory, leadScoring, quotations, paymentPlans, auditLog,
     'test-encryption-secret-not-for-production',
   );
 

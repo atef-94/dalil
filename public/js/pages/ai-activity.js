@@ -81,6 +81,11 @@ export async function renderAiActivity(container) {
           { label: 'Requested by', key: 'requestedByUserId' },
           { label: 'Reasoning', render: (r) => el('span', { class: 'wrap' }, r.reasoning || '') },
           { label: 'Status', render: (r) => statusBadge(r.status) },
+          // Never assumes success just because the tool call didn't
+          // throw — this reflects a real re-read of the affected entity
+          // (see ai-agent.service.ts's verifyExecution). Blank until the
+          // request reaches 'executed' (nothing to verify before then).
+          { label: 'Verified', render: (r) => (r.status === 'executed' ? statusBadge(r.verificationStatus || 'not_applicable') : '') },
           { label: 'When', render: (r) => new Date(r.createdAt).toLocaleString() },
         ],
         page.items.slice().reverse(),

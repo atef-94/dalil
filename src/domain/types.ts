@@ -876,7 +876,10 @@ export type AutomationActionType =
   | 'ai_decide'
   | 'require_approval'
   | 'record_payment'
-  | 'cancel_contract';
+  | 'cancel_contract'
+  | 'search_units'
+  | 'score_lead'
+  | 'compare_payment_plans';
 
 export interface WorkflowActionConfig {
   type: AutomationActionType;
@@ -1048,6 +1051,16 @@ export interface AiPolicy {
 
 export type AiActionStatus = 'suggested' | 'pending_approval' | 'executed' | 'denied_permission' | 'denied_policy';
 
+/** Whether the actual resulting state was re-read and confirmed to match
+ * what the action claimed to do — not just that executeActionDirect()
+ * returned without throwing. 'verified': the target entity was re-read and
+ * matches the expected outcome. 'failed': it was re-read and does NOT
+ * match (executeActionDirect() succeeded, but the real state disagrees —
+ * a genuine PARTIAL_SUCCESS/FAILED signal, not a crash). 'not_applicable':
+ * this tool has no defined post-execution check (e.g. a webhook call with
+ * no fixed response schema) — never a silent stand-in for "verified". */
+export type AiActionVerificationStatus = 'verified' | 'failed' | 'not_applicable';
+
 /** The full audit trail of every action the AI Agent has proposed, for
  * every human it acted on behalf of, whatever the outcome. */
 export interface AiActionRequest {
@@ -1061,6 +1074,12 @@ export interface AiActionRequest {
   runId?: string;
   approvalRequestId?: string;
   createdAt: string;
+  /** Populated only once status reaches 'executed' — see
+   * AiActionVerificationStatus. Undefined for every other status (a
+   * suggested/pending/denied action was never executed, so there is
+   * nothing yet to verify). */
+  verificationStatus?: AiActionVerificationStatus;
+  verificationDetail?: string;
 }
 
 // ---- AI Agent Orchestration Layer ----
