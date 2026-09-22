@@ -59,19 +59,19 @@ export async function renderCrm(container) {
   let offset = 0;
   let q = '';
 
+  const toolbarSlot = el('div', { class: 'page-actions stacked' });
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, t(locale, 'crm_title')),
       el('p', { class: 'page-subtitle' }, t(locale, 'crm_subtitle')),
     ]),
+    toolbarSlot,
   ]));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
-  const toolbarSlot = el('div', { style: 'display:flex;gap:8px;justify-content:flex-end;margin-bottom:10px' });
   const tabsSlot = el('div');
   const bodySlot = el('div');
-  container.appendChild(toolbarSlot);
   container.appendChild(tabsSlot);
   container.appendChild(bodySlot);
 
@@ -120,19 +120,36 @@ export async function renderCrm(container) {
     { key: 'module:tasks', label: t(locale, 'nav_tasks'), resource: 'task', render: renderTasksTab },
   ].filter((m) => can(m.resource, 'view'));
 
+  // Only the reused-module tabs (Customers, Offers, Payment Plans, ...) live
+  // in the horizontal tab bar. Dashboard and per-stage entries used to sit
+  // here too, but they duplicated the real-time pipeline stage cards the
+  // Dashboard already renders — a stage card is now the way into that
+  // stage's lead list (see renderDashboard's statCard onClick below), and
+  // the Dashboard itself is the workspace's default/home view rather than a
+  // selectable tab.
   function renderTabsBar() {
     clear(tabsSlot);
-    const items = [
-      { key: 'dashboard', label: t(locale, 'crm_tab_dashboard') },
-      ...stages.map((s) => ({ key: s.id, label: s.isDefault ? `${s.name} (${t(locale, 'crm_fresh_suffix')})` : s.name })),
-      ...moduleTabs.map((m) => ({ key: m.key, label: m.label })),
-    ];
+    if (moduleTabs.length === 0) return;
+    const items = moduleTabs.map((m) => ({ key: m.key, label: m.label }));
     tabsSlot.appendChild(tabs(items, activeTab, (key) => {
       activeTab = key;
       offset = 0;
       q = '';
       renderBody();
     }));
+  }
+
+  /** Leaves whatever's currently shown (a module tab or a stage's lead
+   * list) and returns to the Dashboard's pipeline view — the tab bar has
+   * no "active" entry for this, by design (see renderTabsBar above), so
+   * this is reached via a stage-list's own "Back to Pipeline" link or by
+   * re-opening CRM from the sidebar. */
+  function goToDashboard() {
+    activeTab = 'dashboard';
+    offset = 0;
+    q = '';
+    renderTabsBar();
+    renderBody();
   }
 
   async function renderBody() {
@@ -164,8 +181,8 @@ export async function renderCrm(container) {
       api.get('/api/analytics/cost-per-qualified-lead'),
     ]);
     // A live snapshot — not stored counts — computed here from the same
-    // leads list the stage tabs use, so "new today"/"follow-ups" always
-    // reflect real current data rather than a cached number.
+    // leads list the per-stage view uses, so "new today"/"follow-ups"
+    // always reflect real current data rather than a cached number.
     const sample = await api.get('/api/crm/leads', { limit: 200 });
     const stageById = new Map(funnel.stages.map((s) => [s.stageId, s]));
     const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
@@ -186,7 +203,14 @@ export async function renderCrm(container) {
     clear(bodySlot);
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_pipeline_realtime')),
-      el('div', { class: 'stat-grid' }, funnel.stages.map((s) => statCard({ label: s.stageName, value: s.count }))),
+      el('div', { class: 'stat-grid' }, funnel.stages.map((s) => statCard({
+        label: s.stageName,
+        value: s.count,
+        // Each pipeline card IS the way into that stage's lead list now —
+        // the horizontal stage-tab row this used to require was removed
+        // because it only duplicated these same cards.
+        onClick: () => { activeTab = s.stageId; offset = 0; q = ''; renderBody(); },
+      }))),
     ]));
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_today_followups')),
@@ -218,6 +242,10 @@ export async function renderCrm(container) {
     const search = searchInput(t(locale, 'crm_search_leads_placeholder'), (value) => { q = value; offset = 0; loadList(); });
     const listSlot = el('div');
     clear(bodySlot);
+    const backLink = el('button', { class: 'ghost', style: 'padding:4px 0;margin-bottom:8px' }, `← ${t(locale, 'crm_back_to_pipeline')}`);
+    backLink.addEventListener('click', goToDashboard);
+    bodySlot.appendChild(backLink);
+    bodySlot.appendChild(el('h2', { style: 'margin:0 0 12px' }, stage?.name ?? ''));
     bodySlot.appendChild(el('div', { class: 'form-row', style: 'max-width:320px;margin-bottom:10px' }, [search]));
     bodySlot.appendChild(listSlot);
 
@@ -733,7 +761,7 @@ export async function renderCrm(container) {
         isLost: result.isLost === 'yes',
         allowAutomationMove: result.allowAutomationMove === 'yes',
       });
-      toast('CRM section added — it now appears in the tab bar, no code changes needed.', 'success');
+      toast('CRM section added — it now appears as a pipeline card, no code changes needed.', 'success');
       await refreshAll();
     } catch (err) {
       reportError(err);

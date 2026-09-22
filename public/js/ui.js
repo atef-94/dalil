@@ -150,15 +150,25 @@ export function tabs(items, activeKey, onSelect) {
   return wrap;
 }
 
-/** A KPI stat card with an optional icon and trend indicator. */
-export function statCard({ label, value, iconName, trend }) {
+/** A KPI stat card with an optional icon and trend indicator. Pass
+ * `onClick` to make the whole card an interactive entry point (e.g. a
+ * pipeline stage card that drills into that stage's list) — omit it for a
+ * plain, non-interactive stat. */
+export function statCard({ label, value, iconName, trend, onClick }) {
   const top = el('div', { class: 'stat-top' }, [
     el('div', { class: 'value' }, String(value)),
     iconName ? el('div', { class: 'icon-wrap' }, icon(iconName)) : null,
   ]);
   const children = [top, el('div', { class: 'label' }, label)];
   if (trend) children.push(el('div', { class: `trend ${trend.direction || ''}` }, trend.text));
-  return el('div', { class: 'stat-card' }, children);
+  const card = el('div', { class: `stat-card${onClick ? ' clickable' : ''}` }, children);
+  if (onClick) {
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.addEventListener('click', onClick);
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } });
+  }
+  return card;
 }
 
 /** A minimal, dependency-free bar chart. data: {label, value}[]. */

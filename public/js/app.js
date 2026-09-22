@@ -1,7 +1,7 @@
 import { el, clear, icon, errorBanner, emptyState, deniedState } from './ui.js';
 import { isAuthenticated, clearToken } from './api.js';
 import { loadSession, session, getLocale, setLocale, can } from './state.js';
-import { registerRoute, startRouter, navigate } from './router.js';
+import { registerRoute, startRouter, navigate, currentPath } from './router.js';
 import { t } from './i18n.js';
 import { renderLogin } from './pages/login.js';
 import { renderDashboard } from './pages/dashboard.js';
@@ -229,6 +229,19 @@ async function showApp() {
       }
     }
   }
+
+  // Clicking the already-active nav link doesn't change the hash, so it
+  // never fires 'hashchange' and the page would otherwise do nothing —
+  // re-render it directly so a page can offer "click me again to reset"
+  // (e.g. CRM's own sidebar-link path back to its dashboard).
+  Object.entries(navLinks).forEach(([path, a]) => {
+    a.addEventListener('click', (e) => {
+      if (currentPath() === path) {
+        e.preventDefault();
+        onRouteChange(path);
+      }
+    });
+  });
 
   startRouter(onRouteChange);
 }
