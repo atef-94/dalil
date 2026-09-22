@@ -1299,6 +1299,52 @@ export interface AiLlmUsage {
   createdAt: string;
 }
 
+// ---- Document Intelligence (bounded) ----
+// Field extraction from unstructured real-estate documents (a unit spec
+// sheet, reservation form, contract summary) — distinct from the existing
+// tabular CSV/Excel importers (Lead/Payment/Inventory Import), which stay
+// the right tool for grid-shaped exports. Scope is deliberately bounded:
+// real extraction only for PDFs with a genuine text layer; scanned PDFs
+// and images are honestly marked 'ocr_required' (no OCR engine is wired
+// into this deployment) rather than faked. See
+// DocumentIntelligenceService (modules/documents/document-intelligence.service.ts).
+
+export type DocumentKind = 'pdf_text' | 'pdf_scanned' | 'image' | 'unsupported';
+export type DocumentExtractionStatus = 'extracted' | 'blocked' | 'reviewed' | 'imported' | 'rejected';
+export type DocumentFieldConfidence = 'high' | 'medium' | 'low';
+
+export interface DocumentExtractionRun {
+  id: string;
+  companyId: string;
+  fileName: string;
+  documentKind: DocumentKind;
+  status: DocumentExtractionStatus;
+  /** Set whenever status is 'blocked' — always a real, specific reason
+   * (e.g. "no text layer — this looks like a scanned/image PDF; OCR is not
+   * available in this deployment"), never silently empty. */
+  blockedReason?: string;
+  createdByUserId: string;
+  createdAt: string;
+  reviewedByUserId?: string;
+  reviewedAt?: string;
+  importedUnitId?: string;
+}
+
+/** One row per candidate field a run extracted — never silently imported:
+ * low-confidence fields require explicit human review/correction before
+ * confirmExtraction() can use them (see the service's class doc comment). */
+export interface DocumentExtractedField {
+  id: string;
+  extractionRunId: string;
+  companyId: string;
+  fieldKey: string;
+  rawValue: string;
+  confidence: DocumentFieldConfidence;
+  /** A reviewer's correction — when set, this is what confirmExtraction()
+   * uses instead of rawValue; rawValue is kept for audit either way. */
+  correctedValue?: string;
+}
+
 // ---- Integration Layer ----
 
 export type IntegrationProvider =

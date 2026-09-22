@@ -47,6 +47,46 @@ async function extractTextItems(buffer: Buffer): Promise<RawTextItem[]> {
   return items;
 }
 
+export interface ParsedPdfText {
+  text: string;
+  /** False when pdf.js's text layer produced zero extractable items — the
+   * real, honest signal that this is a scanned/image-only PDF with no
+   * embedded text, meaning OCR (not implemented in this deployment) would
+   * be required to read it. Callers must never guess at content in that
+   * case. */
+  hasTextLayer: boolean;
+}
+
+/**
+ * Plain-text extraction for unstructured single-document real-estate
+ * paperwork (a unit spec sheet, reservation form, contract summary) — as
+ * opposed to parsePdfTable's grid reconstruction for tabular price-list
+ * exports. Reading order: page ascending, then top-to-bottom (PDF Y
+ * descending), left-to-right within a visual row, one line per row.
+ */
+export async function extractPdfPlainText(buffer: Buffer): Promise<ParsedPdfText> {
+  const items = await extractTextItems(buffer);
+  if (items.length === 0) return { text: '', hasTextLayer: false };
+
+  const rowGroups = new Map<string, RawTextItem[]>();
+  for (const item of items) {
+    const bucket = Math.round(item.y / Y_TOLERANCE);
+    const key = `${item.page}:${bucket}`;
+    const arr = rowGroups.get(key) ?? [];
+    arr.push(item);
+    rowGroups.set(key, arr);
+  }
+  const orderedRows = Array.from(rowGroups.entries())
+    .map(([key, arr]) => {
+      const [pageStr, bucketStr] = key.split(':');
+      return { page: Number(pageStr), bucket: Number(bucketStr), items: arr.sort((a, b) => a.x - b.x) };
+    })
+    .sort((a, b) => a.page - b.page || b.bucket - a.bucket);
+
+  const text = orderedRows.map((row) => row.items.map((i) => i.str).join(' ')).join('\n');
+  return { text, hasTextLayer: true };
+}
+
 /**
  * Best-effort text-based table reconstruction: clusters extracted text
  * items into visual rows by Y-coordinate (within Y_TOLERANCE, per page,

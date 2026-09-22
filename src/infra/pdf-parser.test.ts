@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePdfTable } from './pdf-parser.js';
+import { parsePdfTable, extractPdfPlainText } from './pdf-parser.js';
 
 /**
  * Hand-builds a minimal, valid, text-only PDF (one page, Helvetica, a grid
@@ -73,4 +73,25 @@ test('parsePdfTable returns unreliable/empty for a PDF with no extractable text'
 
 test('parsePdfTable throws a clear ValidationError for a non-PDF file', async () => {
   await assert.rejects(() => parsePdfTable(Buffer.from('not a pdf at all')), /could not read this file as a PDF/);
+});
+
+test('extractPdfPlainText joins a text-bearing PDF into reading-order lines', async () => {
+  const pdf = buildPdf([
+    { text: 'Project: Marassi Heights', x: 50, y: 700 },
+    { text: 'Unit No: A-104', x: 50, y: 680 },
+    { text: 'Price: 3,500,000', x: 50, y: 660 },
+  ]);
+  const result = await extractPdfPlainText(pdf);
+  assert.equal(result.hasTextLayer, true);
+  const lines = result.text.split('\n');
+  assert.equal(lines[0], 'Project: Marassi Heights');
+  assert.equal(lines[1], 'Unit No: A-104');
+  assert.equal(lines[2], 'Price: 3,500,000');
+});
+
+test('extractPdfPlainText reports no text layer for a PDF with zero extractable text', async () => {
+  const pdf = buildPdf([]);
+  const result = await extractPdfPlainText(pdf);
+  assert.equal(result.hasTextLayer, false);
+  assert.equal(result.text, '');
 });

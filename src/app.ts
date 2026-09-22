@@ -11,6 +11,8 @@ import type {
   AiWorkflowStepRun,
   ApprovalRequest,
   CommunicationDeliveryEvent,
+  DocumentExtractedField,
+  DocumentExtractionRun,
   IntegrationConnection,
   IntegrationEvent,
   AuditLogEntry,
@@ -125,6 +127,7 @@ import { ImportSessionService } from './modules/imports/import-session.service.j
 import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
 import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
 import { InventoryImportService, INVENTORY_IMPORT_FIELDS, type InventoryImportOptions } from './modules/inventory/inventory-import.service.js';
+import { DocumentIntelligenceService } from './modules/documents/document-intelligence.service.js';
 import { QuotationService } from './modules/quotations/quotation.service.js';
 import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
@@ -200,6 +203,7 @@ export interface Application {
     aiAgent: AiAgentService;
     aiMemory: AiMemoryService;
     llmOrchestrator: LlmOrchestratorService;
+    documentIntelligence: DocumentIntelligenceService;
     aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
     signatures: SignatureService;
@@ -275,6 +279,8 @@ function buildRepos(db?: DatabaseSync) {
     aiMemory: repo<AiMemory>('ai_memory'),
     aiModelConfigs: repo<AiModelConfig>('ai_model_configs'),
     aiLlmUsage: repo<AiLlmUsage>('ai_llm_usage'),
+    documentExtractionRuns: repo<DocumentExtractionRun>('document_extraction_runs'),
+    documentExtractedFields: repo<DocumentExtractedField>('document_extracted_fields'),
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
     communicationDeliveryEvents: repo<CommunicationDeliveryEvent>('communication_delivery_events'),
@@ -373,6 +379,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
   const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
   const inventoryImport = new InventoryImportService(inventory);
+  const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
   const quotations = new QuotationService(repos.quotations, repos.units, paymentPlans);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
@@ -1471,6 +1478,110 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const targetType = validTargetTypes.find((t) => t === targetTypeParam);
     const sessions = await importSessions.listForCompany(actor.companyId, targetType);
     return { status: 200, body: sessions };
+  });
+
+  // ---- Document Intelligence (bounded) ----
+  // Real field extraction from a text-bearing PDF (a unit spec sheet,
+  // reservation form) — distinct from the tabular CSV/Excel importers
+  // above. Gated on the same create/view:unit grants as inventory import
+  // since its only import target is a Unit. Never auto-imports: every run
+  // requires an explicit confirm step, and confirmExtraction() itself
+  // refuses when a required field is missing or unreviewed low-confidence
+  // (see DocumentIntelligenceService's class doc comment).
+  httpServer.post(
+    '/api/documents/extract/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+        throw new ForbiddenError('missing create:unit permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+      const { run, fields } = await documentIntelligence.extractFromPdf(actor.companyId, actor.userId, file.filename, file.data);
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'create',
+        resource: 'unit',
+        resourceId: run.id,
+        metadata: { documentExtraction: true, fileName: run.fileName, status: run.status },
+      });
+      return { status: 201, body: { run, fields } };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.get('/api/documents/extract', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'unit'))) {
+      throw new ForbiddenError('missing view:unit permission');
+    }
+    const runs = await documentIntelligence.listRuns(actor.companyId);
+    return { status: 200, body: paginate(runs, ctx.query) };
+  });
+
+  httpServer.get('/api/documents/extract/:runId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'unit'))) {
+      throw new ForbiddenError('missing view:unit permission');
+    }
+    const run = await documentIntelligence.getRun(ctx.params.runId!, actor.companyId);
+    const fields = await documentIntelligence.listFields(run.id, actor.companyId);
+    return { status: 200, body: { run, fields } };
+  });
+
+  httpServer.post('/api/documents/extract/fields/:fieldId/correct', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ correctedValue: string }>(ctx.body);
+    const field = await documentIntelligence.correctField(ctx.params.fieldId!, actor.companyId, body.correctedValue);
+    return { status: 200, body: field };
+  });
+
+  httpServer.post('/api/documents/extract/:runId/review', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const run = await documentIntelligence.markReviewed(ctx.params.runId!, actor.companyId, actor.userId);
+    return { status: 200, body: run };
+  });
+
+  httpServer.post('/api/documents/extract/:runId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const run = await documentIntelligence.rejectExtraction(ctx.params.runId!, actor.companyId, actor.userId);
+    return { status: 200, body: run };
+  });
+
+  httpServer.post('/api/documents/extract/:runId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ options?: InventoryImportOptions }>(ctx.body);
+    const result = await documentIntelligence.confirmExtraction(
+      ctx.params.runId!,
+      actor.companyId,
+      actor.userId,
+      async (unit, action) => {
+        await auditLog.record({
+          companyId: actor.companyId,
+          actorUserId: actor.userId,
+          action: action === 'create' ? 'create' : 'edit',
+          resource: 'unit',
+          resourceId: unit.id,
+          metadata: { importedViaDocumentExtraction: true, extractionRunId: ctx.params.runId },
+        });
+      },
+      body.options,
+    );
+    return { status: 200, body: result };
   });
 
   httpServer.get('/api/inventory/units', async (ctx) => {
@@ -4146,7 +4257,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, llmOrchestrator, aiWorkflow, integrations, signatures,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,
