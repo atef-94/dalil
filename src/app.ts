@@ -2,11 +2,13 @@ import type {
   ActionName,
   AgentDecision,
   AiActionRequest,
+  AiMemory,
   AiPolicy,
   AiWorkflowGoalType,
   AiWorkflowRun,
   AiWorkflowStepRun,
   ApprovalRequest,
+  CommunicationDeliveryEvent,
   IntegrationConnection,
   IntegrationEvent,
   AuditLogEntry,
@@ -109,9 +111,11 @@ import { PortalService } from './modules/portal/portal.service.js';
 import { TaskService } from './modules/tasks/task.service.js';
 import { AutomationService, type WorkflowStepInput } from './modules/automation/automation.service.js';
 import { AiAgentService } from './modules/ai/ai-agent.service.js';
+import { AiMemoryService } from './modules/ai/ai-memory.service.js';
 import { AiWorkflowService } from './modules/ai/ai-workflow.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
 import { SignatureService } from './modules/integrations/e-signature.service.js';
+import { CommunicationDeliveryService } from './modules/integrations/communication-delivery.service.js';
 import { ForecastingService } from './modules/forecasting/forecasting.service.js';
 import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
 import { ImportSessionService } from './modules/imports/import-session.service.js';
@@ -191,6 +195,7 @@ export interface Application {
     automation: AutomationService;
     eventBus: EventBus;
     aiAgent: AiAgentService;
+    aiMemory: AiMemoryService;
     aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
     signatures: SignatureService;
@@ -263,8 +268,10 @@ function buildRepos(db?: DatabaseSync) {
     aiActionRequests: repo<AiActionRequest>('ai_action_requests'),
     aiPolicies: repo<AiPolicy>('ai_policies'),
     agentDecisions: repo<AgentDecision>('agent_decisions'),
+    aiMemory: repo<AiMemory>('ai_memory'),
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
+    communicationDeliveryEvents: repo<CommunicationDeliveryEvent>('communication_delivery_events'),
     leadDistributionPools: repo<LeadDistributionPool>('lead_distribution_pools'),
     salesCommissionRules: repo<SalesCommissionRule>('sales_commission_rules'),
     salesCommissions: repo<SalesCommission>('sales_commissions'),
@@ -411,7 +418,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     await automation.handleEvent(event);
   });
   const integrations = new IntegrationService(
-    { connections: repos.integrationConnections, events: repos.integrationEvents },
+    { connections: repos.integrationConnections, events: repos.integrationEvents, deliveryEvents: repos.communicationDeliveryEvents },
     automation,
     auditLog,
   );
@@ -423,6 +430,23 @@ export async function buildApplication(options: AppOptions): Promise<Application
     integrations.send(companyId, provider as IntegrationConnection['provider'], action, params, userId),
   );
   const signatures = new SignatureService(repos.signatureEnvelopes, repos.contracts, integrations, automation);
+  const communicationDelivery = new CommunicationDeliveryService(repos.communicationDeliveryEvents, integrations, automation);
+  // Wires the real delivery-status lookup in as the executor for the
+  // `get_delivery_status` AI tool — see the deliveryStatusGetter field
+  // comment in automation.service.ts for why this is late-bound.
+  automation.setDeliveryStatusGetter((companyId, relatedResourceId) => integrations.getLatestDeliveryStatusForResource(companyId, relatedResourceId));
+
+  const aiMemory = new AiMemoryService(repos.aiMemory);
+  // Wires the `recall_memory` AI tool — see the memoryRecaller field
+  // comment in automation.service.ts.
+  automation.setMemoryRecaller((companyId, filter) =>
+    aiMemory.recall(companyId, {
+      category: filter.category as AiMemory['category'] | undefined,
+      subjectType: filter.subjectType as string | undefined,
+      subjectId: filter.subjectId as string | undefined,
+      query: filter.query as string | undefined,
+    }),
+  );
 
   const aiAgent = new AiAgentService(
     { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals, agentDecisions: repos.agentDecisions },
@@ -2240,6 +2264,36 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: { id: envelope.id, status: envelope.status } };
   });
 
+  // Real WhatsApp/email delivery-status callback — HMAC-verified against
+  // the connection's own webhook_secret exactly like the e-signature
+  // webhook above. Accepts a normalized {providerMessageId, status,
+  // failureReason?} body (see CommunicationDeliveryService's class doc
+  // for why: not certified against WhatsApp Cloud API's or SendGrid's own
+  // raw payload shape, same honest scope as every other connector here).
+  httpServer.post('/api/integrations/communication/webhooks/:companyId/:connectionId', async (ctx) => {
+    const rawBody = ctx.body === undefined ? '' : JSON.stringify(ctx.body);
+    const signatureHeader = ctx.headers['x-signature-hmac'];
+    const event = await communicationDelivery.handleWebhook(
+      ctx.params.companyId!,
+      ctx.params.connectionId!,
+      rawBody,
+      typeof signatureHeader === 'string' ? signatureHeader : undefined,
+    );
+    return { status: 200, body: { id: event.id, status: event.status } };
+  });
+
+  // The real delivery timeline for one sent message — every status
+  // transition a verified webhook has actually reported, not an assumed
+  // "sent = delivered". See CommunicationDeliveryService.
+  httpServer.get('/api/integrations/communication/delivery/:providerMessageId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'integration_connection'))) {
+      throw new ForbiddenError('missing view:integration_connection permission');
+    }
+    const timeline = await communicationDelivery.getTimeline(actor.companyId, ctx.params.providerMessageId!);
+    return { status: 200, body: timeline };
+  });
+
   // ---- Finance ----
   httpServer.post('/api/finance/payments', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -3405,6 +3459,24 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: automation.listTemplates() };
   });
 
+  // Event-to-AI activation control: instantiates a real WorkflowDefinition
+  // from a built-in template in one call — the company-level opt-in this
+  // deployment requires before any event can drive an AI action (see
+  // AutomationService.activateTemplate). Never automatic, never global:
+  // create:workflow permission gates it exactly like a hand-built workflow.
+  httpServer.post('/api/automation/templates/:templateKey/activate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'workflow'))) {
+      throw new ForbiddenError('missing create:workflow permission');
+    }
+    const workflow = await automation.activateTemplate(ctx.params.templateKey!, actor.companyId, actor.userId);
+    await auditLog.record({
+      companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'workflow', resourceId: workflow.id,
+      metadata: { templateKey: ctx.params.templateKey, name: workflow.name },
+    });
+    return { status: 201, body: workflow };
+  });
+
   // Company-wide execution monitoring — a dashboard summary of workflow and
   // run counts by status, plus pending approvals awaiting a decision.
   httpServer.get('/api/automation/stats', async (ctx) => {
@@ -3672,8 +3744,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'ai_action'))) {
       throw new ForbiddenError('missing edit:ai_action permission');
     }
-    const body = parseJsonBody<{ actionType: AiPolicy['actionType']; autonomyLevel: AiPolicy['autonomyLevel'] }>(ctx.body);
-    const policy = await aiAgent.setPolicy(actor.companyId, body.actionType, body.autonomyLevel, actor.userId);
+    const body = parseJsonBody<{
+      actionType: AiPolicy['actionType'];
+      autonomyLevel: AiPolicy['autonomyLevel'];
+      maxFinancialAmount?: number;
+      allowedChannels?: string[];
+      workingHoursStart?: string;
+      workingHoursEnd?: string;
+    }>(ctx.body);
+    const policy = await aiAgent.setPolicy(actor.companyId, body.actionType, body.autonomyLevel, actor.userId, {
+      maxFinancialAmount: body.maxFinancialAmount,
+      allowedChannels: body.allowedChannels,
+      workingHoursStart: body.workingHoursStart,
+      workingHoursEnd: body.workingHoursEnd,
+    });
     await auditLog.record({
       companyId: actor.companyId,
       actorUserId: actor.userId,
@@ -3752,6 +3836,89 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const stats = await aiAgent.getAgentStats(actor.companyId);
     return { status: 200, body: stats };
+  });
+
+  // ---- Persistent AI Memory Layer ----
+  // Only application code (deterministic agent logic, a human via this API)
+  // writes memories in this phase — see AiMemoryService's class doc comment
+  // for why no AI-callable "remember" tool exists yet. Recall is agent-
+  // callable (the `recall_memory` tool, read-only) and human-callable here.
+  httpServer.post('/api/ai/memory', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_memory'))) {
+      throw new ForbiddenError('missing create:ai_memory permission');
+    }
+    const body = parseJsonBody<{
+      category: AiMemory['category'];
+      content: string;
+      subjectType?: string;
+      subjectId?: string;
+      key?: string;
+      tags?: string[];
+      confidence?: number;
+      sensitivity?: AiMemory['sensitivity'];
+      expiresAt?: string;
+    }>(ctx.body);
+    const memory = await aiMemory.remember({
+      companyId: actor.companyId,
+      category: body.category,
+      content: body.content,
+      subjectType: body.subjectType,
+      subjectId: body.subjectId,
+      key: body.key,
+      tags: body.tags,
+      source: { type: 'user_note', id: actor.userId },
+      confidence: body.confidence,
+      sensitivity: body.sensitivity,
+      createdByUserId: actor.userId,
+      expiresAt: body.expiresAt,
+    });
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'create',
+      resource: 'ai_memory',
+      resourceId: memory.id,
+      metadata: { category: memory.category, subjectType: memory.subjectType, subjectId: memory.subjectId },
+    });
+    return { status: 201, body: memory };
+  });
+
+  httpServer.get('/api/ai/memory', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_memory'))) {
+      throw new ForbiddenError('missing view:ai_memory permission');
+    }
+    const limitParam = ctx.query.get('limit');
+    const list = await aiMemory.recall(
+      actor.companyId,
+      {
+        category: (ctx.query.get('category') ?? undefined) as AiMemory['category'] | undefined,
+        subjectType: ctx.query.get('subjectType') ?? undefined,
+        subjectId: ctx.query.get('subjectId') ?? undefined,
+        key: ctx.query.get('key') ?? undefined,
+        query: ctx.query.get('query') ?? undefined,
+      },
+      limitParam ? Number(limitParam) : undefined,
+    );
+    return { status: 200, body: list };
+  });
+
+  httpServer.post('/api/ai/memory/:memoryId/invalidate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'ai_memory'))) {
+      throw new ForbiddenError('missing edit:ai_memory permission');
+    }
+    const memory = await aiMemory.invalidate(ctx.params.memoryId!, actor.companyId, actor.userId);
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'ai_memory',
+      resourceId: memory.id,
+      metadata: { invalidated: true },
+    });
+    return { status: 200, body: memory };
   });
 
   // ---- Integration Layer (WhatsApp, Email, Meta Ads, Google Calendar,
@@ -3898,7 +4065,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiWorkflow, integrations, signatures,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, aiWorkflow, integrations, signatures,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,

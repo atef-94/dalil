@@ -6,6 +6,8 @@ import type {
   ApprovalStatus,
   AutomationActionType,
   CampaignStatus,
+  AiMemory,
+  CommunicationDeliveryEvent,
   MessageChannel,
   MessageRelatedResource,
   PaymentMethod,
@@ -227,6 +229,8 @@ export const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   search_units: 'unit',
   score_lead: 'lead',
   compare_payment_plans: 'quotation',
+  get_delivery_status: 'integration_connection',
+  recall_memory: 'ai_memory',
 };
 
 export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
@@ -245,6 +249,8 @@ export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   search_units: 'view',
   score_lead: 'view',
   compare_payment_plans: 'create',
+  get_delivery_status: 'view',
+  recall_memory: 'view',
 };
 
 /**
@@ -287,6 +293,17 @@ export class AutomationService {
   // the workflow continues (e.g. a guaranteed follow-up task) regardless of
   // what the agent chose.
   private aiDecider?: (companyId: string, agentKey: string, subjectId: string, requestedByUserId: string) => Promise<AgentDecision>;
+  // Same late-binding, same reason: CommunicationDeliveryService/
+  // IntegrationService are themselves built on top of AutomationService
+  // (encrypted secret storage), so a constructor-level dependency back
+  // onto them here would be circular.
+  private deliveryStatusGetter?: (companyId: string, relatedResourceId: string) => Promise<CommunicationDeliveryEvent | undefined>;
+  // Late-bound for consistency with the other AI-tool executors above, even
+  // though AiMemoryService has no reverse dependency on AutomationService —
+  // keeping every AI-callable capability wired the same way (a setter called
+  // once in app.ts) rather than mixing constructor- and setter-injected
+  // dependencies for the same class of thing.
+  private memoryRecaller?: (companyId: string, filter: Record<string, unknown>) => Promise<AiMemory[]>;
 
   constructor(
     private readonly repos: AutomationRepos,
@@ -328,6 +345,20 @@ export class AutomationService {
    * late-bound rather than a constructor dependency. */
   setAiDecider(decider: (companyId: string, agentKey: string, subjectId: string, requestedByUserId: string) => Promise<AgentDecision>): void {
     this.aiDecider = decider;
+  }
+
+  /** Wires IntegrationService's real delivery-status lookup in as the
+   * executor for the `get_delivery_status` tool — see the field comment
+   * above for why this is late-bound rather than a constructor
+   * dependency. */
+  setDeliveryStatusGetter(getter: (companyId: string, relatedResourceId: string) => Promise<CommunicationDeliveryEvent | undefined>): void {
+    this.deliveryStatusGetter = getter;
+  }
+
+  /** Wires AiMemoryService's recall() in as the executor for the
+   * `recall_memory` tool — read-only, see the field comment above. */
+  setMemoryRecaller(recaller: (companyId: string, filter: Record<string, unknown>) => Promise<AiMemory[]>): void {
+    this.memoryRecaller = recaller;
   }
 
   // ---- Workflow CRUD ----
@@ -393,6 +424,33 @@ export class AutomationService {
 
   listTemplates(): WorkflowTemplate[] {
     return WORKFLOW_TEMPLATES;
+  }
+
+  /**
+   * Event-to-AI activation control (company + workflow level — see the
+   * class-level rule this deployment follows: no template, however "safe",
+   * is ever auto-activated globally; a company always opts in explicitly,
+   * one template at a time). Instantiates a real, standard WorkflowDefinition
+   * from a built-in template — the exact same createWorkflow() a human
+   * manually reconstructing the template's trigger/steps would call, just
+   * without requiring them to copy every field by hand. The resulting
+   * workflow is ordinary in every way afterward: it can be paused/archived
+   * like any other, and any ai_decide step inside it still goes through
+   * the full permission/policy/approval pipeline for every action it
+   * proposes — activation only creates the workflow, it never grants any
+   * autonomy beyond what the company's own AiPolicy rows already allow.
+   */
+  async activateTemplate(templateKey: string, companyId: string, createdByUserId: string): Promise<WorkflowDefinition> {
+    const template = WORKFLOW_TEMPLATES.find((t) => t.key === templateKey);
+    if (!template) throw new NotFoundError(`no workflow template with key "${templateKey}"`);
+    return this.createWorkflow({
+      companyId,
+      name: template.name,
+      description: template.description,
+      trigger: template.trigger,
+      steps: template.steps,
+      createdByUserId,
+    });
   }
 
   private validateTrigger(trigger: WorkflowTriggerConfig): void {
@@ -997,6 +1055,25 @@ export class AutomationService {
           }
         }
         return { unitId, comparisons };
+      }
+      case 'get_delivery_status': {
+        await this.requirePermission(actorUserId, action, companyId);
+        if (!this.deliveryStatusGetter) throw new AutomationError('no delivery-status getter is configured for this deployment');
+        const relatedResourceId = this.requireString(params.relatedResourceId ?? params.leadId, 'relatedResourceId');
+        const latest = await this.deliveryStatusGetter(companyId, relatedResourceId);
+        return latest ? { ...latest } : { status: 'unknown', detail: 'no outbound message has been sent to this resource yet' };
+      }
+      case 'recall_memory': {
+        await this.requirePermission(actorUserId, action, companyId);
+        if (!this.memoryRecaller) throw new AutomationError('no memory recaller is configured for this deployment');
+        const filter = {
+          category: this.optionalString(params.category),
+          subjectType: this.optionalString(params.subjectType),
+          subjectId: this.optionalString(params.subjectId),
+          query: this.optionalString(params.query),
+        };
+        const memories = await this.memoryRecaller(companyId, filter);
+        return { memories };
       }
       case 'webhook_call': {
         await this.requirePermission(actorUserId, action, companyId);

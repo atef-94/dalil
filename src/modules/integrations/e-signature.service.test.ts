@@ -19,7 +19,7 @@ import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from './integration.service.js';
 import { SignatureService } from './e-signature.service.js';
 import type {
-  ApprovalRequest, AuditLogEntry, Campaign, Contract, CrmStage, Employee, IntegrationConnection, IntegrationEvent,
+  ApprovalRequest, AuditLogEntry, Campaign, CommunicationDeliveryEvent, Contract, CrmStage, Employee, IntegrationConnection, IntegrationEvent,
   Lead, Message, Opportunity, Payment, PaymentPlanTemplate, PaymentScheduleLine, PermissionGrant, PermissionOverride,
   Project, Quotation, Receipt, Refund, Reservation, Role, Secret, SignatureEnvelope, Task, Unit, UnitHold, User, UserRole,
   WorkflowDefinition, WorkflowRun, WorkflowStepRun,
@@ -79,9 +79,10 @@ function freshHarness() {
 
   const connections = new InMemoryRepository<IntegrationConnection>();
   const events = new InMemoryRepository<IntegrationEvent>();
+  const deliveryEvents = new InMemoryRepository<CommunicationDeliveryEvent>();
   let fetchImpl: typeof fetch = (async () => new Response(JSON.stringify({ envelopeId: 'env-abc' }), { status: 201 })) as typeof fetch;
   const integrations = new IntegrationService(
-    { connections, events }, automation, auditLog,
+    { connections, events, deliveryEvents }, automation, auditLog,
     ((url, init) => fetchImpl(url, init)) as typeof fetch, 0, 30,
   );
 

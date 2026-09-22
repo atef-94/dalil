@@ -71,6 +71,7 @@ const ALL_RESOURCES: ResourceName[] = [
   'secret',
   'task',
   'ai_action',
+  'ai_memory',
   'integration_connection',
   'sales_commission',
   'forecast',
@@ -278,6 +279,11 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   // to every sales manager but always 403s.
   await addGrant(salesManagerRole.id, 'view', 'ai_action', 'department');
   await addGrant(salesManagerRole.id, 'create', 'ai_action', 'department');
+  // AI Memory: a manager can inspect and correct (invalidate) what the AI
+  // layer has recorded about their department's leads/customers.
+  await addGrant(salesManagerRole.id, 'view', 'ai_memory', 'department');
+  await addGrant(salesManagerRole.id, 'create', 'ai_memory', 'department');
+  await addGrant(salesManagerRole.id, 'edit', 'ai_memory', 'department');
   // Scheduling a follow-up from a lead's CRM detail view creates a Task —
   // without these, that button is shown but always 403s.
   await addGrant(salesManagerRole.id, 'view', 'task', 'department');
@@ -316,6 +322,8 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   // one actually clicking it on their own leads day to day.
   await addGrant(salesAgentRole.id, 'view', 'ai_action', 'own');
   await addGrant(salesAgentRole.id, 'create', 'ai_action', 'own');
+  await addGrant(salesAgentRole.id, 'view', 'ai_memory', 'own');
+  await addGrant(salesAgentRole.id, 'create', 'ai_memory', 'own');
   // Scheduling a follow-up from a lead's CRM detail view creates a Task —
   // without these, that button is shown but always 403s.
   await addGrant(salesAgentRole.id, 'view', 'task', 'own');

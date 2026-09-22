@@ -104,7 +104,8 @@ export type ResourceName =
   | 'forecast'
   | 'crm_stage'
   | 'quotation'
-  | 'signature_envelope';
+  | 'signature_envelope'
+  | 'ai_memory';
 
 export type ActionName =
   | 'view'
@@ -879,7 +880,9 @@ export type AutomationActionType =
   | 'cancel_contract'
   | 'search_units'
   | 'score_lead'
-  | 'compare_payment_plans';
+  | 'compare_payment_plans'
+  | 'get_delivery_status'
+  | 'recall_memory';
 
 export interface WorkflowActionConfig {
   type: AutomationActionType;
@@ -1045,6 +1048,25 @@ export interface AiPolicy {
   companyId: string;
   actionType: AutomationActionType;
   autonomyLevel: AiAutonomyLevel;
+  /** Extra guardrails evaluated on top of autonomyLevel (see
+   * AiAgentService.evaluatePolicyLimits) — every one of these, when
+   * configured, can only ever push an action from auto_execute down to
+   * require_approval; none of them can loosen a stricter autonomyLevel.
+   * A limit that isn't set is simply not checked. */
+  /** For an action whose params carry a numeric `amount` (currently
+   * record_payment) — an amount over this always requires approval,
+   * regardless of autonomyLevel. */
+  maxFinancialAmount?: number;
+  /** For integration_call — restricts which provider the AI may use for
+   * this action type (e.g. ['email'] to block AI-initiated WhatsApp
+   * while still allowing email). A provider not in this list requires
+   * approval. Unset means no channel restriction. */
+  allowedChannels?: string[];
+  /** For integration_call — "HH:mm" company-local 24h clock. Outside this
+   * window (inclusive), the action requires approval. Both must be set
+   * together; either alone is ignored. */
+  workingHoursStart?: string;
+  workingHoursEnd?: string;
   updatedByUserId: string;
   updatedAt: string;
 }
@@ -1144,6 +1166,72 @@ export interface AgentDecision {
   createdAt: string;
 }
 
+// ---- AI Memory Layer ----
+
+/** Which "kind" of memory this is — not a storage mechanism distinction
+ * (they're all the same table), but what a caller/UI groups by. 'working'
+ * and 'short_term' are meant to be short-lived (set a near expiresAt);
+ * 'long_term'/'company'/'agent' are meant to persist; 'lead'/'customer'/
+ * 'workflow' are subject-scoped (set subjectType/subjectId). */
+export type AiMemoryCategory = 'working' | 'short_term' | 'long_term' | 'customer' | 'lead' | 'agent' | 'company' | 'workflow';
+
+export type AiMemorySourceType = 'agent_decision' | 'user_note' | 'workflow_run' | 'communication' | 'system';
+
+/**
+ * A single stored fact/observation the AI layer can recall later —
+ * distinct from the ad-hoc "re-read a recent AgentDecision"/"check
+ * IntegrationEvent log" cooldown checks already scattered through
+ * ai-agent.service.ts (findRecentDecision, hasAlreadyReachedOut): those
+ * are narrow, single-purpose lookups against other entities' own tables,
+ * not a general-purpose memory store. This is that general store —
+ * explicit content, explicit provenance, explicit confidence, explicit
+ * retention — not a place to dump every event automatically ("do not
+ * store everything" is a caller discipline this type's `source` and
+ * `confidence` fields exist to support, not something storage alone can
+ * enforce).
+ *
+ * `content` is always DATA, never an instruction — nothing in this
+ * codebase ever parses/evaluates a memory's content as a command, and
+ * that must remain true if/when an LLM layer is added (see
+ * AiMemoryService's class doc comment).
+ */
+export interface AiMemory {
+  id: string;
+  companyId: string;
+  category: AiMemoryCategory;
+  /** What real entity this memory is about, when it's about one specific
+   * thing (a lead, a customer, the company itself). Omitted for a
+   * category like 'agent' that isn't tied to a single subject. */
+  subjectType?: string;
+  subjectId?: string;
+  /** A short label for search/filtering — not required, but makes recall
+   * by topic possible without a full-text scan. */
+  key?: string;
+  content: string;
+  tags?: string[];
+  /** Where this memory came from — mandatory, never optional, because an
+   * un-sourced memory is unverifiable and a real trust/audit problem
+   * (see the "provenance" requirement this satisfies). */
+  source: { type: AiMemorySourceType; id?: string };
+  /** 0-100: how sure the source is of this fact — an agent decision might
+   * record 60, a directly-observed system fact (e.g. "this lead has no
+   * assigned owner") might record 100. Purely informational today (no
+   * caller currently filters on it), but real and stored so a future
+   * caller — or a future LLM layer weighing memories — can. */
+  confidence: number;
+  sensitivity: SensitivityTier;
+  createdByUserId?: string;
+  createdAt: string;
+  /** Retention: a memory past this timestamp is excluded from recall()
+   * and eligible for the sweep tick — real expiry, not just a UI filter. */
+  expiresAt?: string;
+  /** A human/system explicitly marked this memory wrong/stale — excluded
+   * from recall() but never physically deleted, so the correction itself
+   * stays auditable (who invalidated what, and when). */
+  invalidatedAt?: string;
+  invalidatedByUserId?: string;
+}
+
 // ---- Integration Layer ----
 
 export type IntegrationProvider =
@@ -1195,6 +1283,39 @@ export interface IntegrationEvent {
   requestSummary: Record<string, unknown>;
   attempts: number;
   error?: string;
+  createdAt: string;
+}
+
+/** Real provider-acknowledged delivery lifecycle for one outbound WhatsApp/
+ * email message — distinct from IntegrationEvent, which only logs "our
+ * send() call to the provider's API succeeded or failed", not what
+ * happened to the message afterward. An IntegrationEvent with status
+ * 'success' means the provider *accepted the request*; it never means
+ * the message was delivered or read. Append-only, one row per real
+ * status transition (never mutated in place), so the full lifecycle
+ * (queued -> sent -> delivered -> read, or -> failed/rejected) survives
+ * as an actual timeline, not just a "current status" field a later event
+ * could silently overwrite. */
+export type CommunicationDeliveryStatus = 'queued' | 'sent' | 'delivered' | 'read' | 'failed' | 'rejected' | 'unknown';
+
+export interface CommunicationDeliveryEvent {
+  id: string;
+  companyId: string;
+  connectionId: string;
+  provider: 'whatsapp' | 'email';
+  /** The id the provider itself assigned to this message when we sent it
+   * (WhatsApp's `wamid.*`, an email provider's message-id header) — the
+   * only reliable key a later delivery webhook can correlate against,
+   * since our own internal ids are never sent to the provider. */
+  providerMessageId: string;
+  relatedResource?: MessageRelatedResource;
+  relatedResourceId?: string;
+  status: CommunicationDeliveryStatus;
+  failureReason?: string;
+  /** The verified webhook payload that produced this row, kept for audit/
+   * debugging — never trusted for anything beyond that, and never re-run
+   * as an instruction (see CommunicationDeliveryService.handleWebhook). */
+  rawEvent?: Record<string, unknown>;
   createdAt: string;
 }
 

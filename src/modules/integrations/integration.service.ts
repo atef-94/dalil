@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { IntegrationConnection, IntegrationEventStatus, IntegrationProvider } from '../../domain/types.js';
+import type { CommunicationDeliveryEvent, IntegrationConnection, IntegrationEventStatus, IntegrationProvider } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { AutomationError, NotFoundError, ValidationError } from '../../infra/errors.js';
 import { SlidingWindowRateLimiter } from '../../infra/rate-limiter.js';
@@ -10,6 +10,7 @@ import type { IntegrationEvent } from '../../domain/types.js';
 export interface IntegrationRepos {
   connections: Repository<IntegrationConnection>;
   events: Repository<IntegrationEvent>;
+  deliveryEvents: Repository<CommunicationDeliveryEvent>;
 }
 
 export interface ConnectorDefinition {
@@ -29,7 +30,7 @@ const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     provider: 'whatsapp',
     name: 'WhatsApp Business',
-    description: 'Send WhatsApp messages via the Meta Cloud API.',
+    description: 'Send WhatsApp messages via the Meta Cloud API. Also accepts an optional "webhook_secret" credential (not required to connect) to HMAC-verify inbound delivery-status callbacks — see CommunicationDeliveryService.',
     configFields: ['phoneNumberId'],
     credentialFields: ['access_token'],
     actions: ['send_message'],
@@ -37,7 +38,7 @@ const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     provider: 'email',
     name: 'Email (SendGrid)',
-    description: 'Send transactional email via the SendGrid API.',
+    description: 'Send transactional email via the SendGrid API. Also accepts an optional "webhook_secret" credential (not required to connect) to HMAC-verify inbound delivery-status callbacks — see CommunicationDeliveryService.',
     configFields: ['fromAddress'],
     credentialFields: ['api_key'],
     actions: ['send_message'],
@@ -193,6 +194,24 @@ export class IntegrationService {
     return this.repos.events.findAll((e) => e.companyId === companyId && (!connectionId || e.connectionId === connectionId));
   }
 
+  /** The full, real delivery timeline for one message — every status
+   * transition a verified webhook has actually reported, oldest first.
+   * An empty array for a message that was just sent means exactly that:
+   * no delivery confirmation has arrived yet, not "assumed delivered". */
+  async getDeliveryTimeline(companyId: string, providerMessageId: string): Promise<CommunicationDeliveryEvent[]> {
+    const events = await this.repos.deliveryEvents.findAll((e) => e.companyId === companyId && e.providerMessageId === providerMessageId);
+    return events.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  }
+
+  /** The most recent delivery status ACTIVE has actually observed for a
+   * given related resource (typically a lead) — what the AI queries
+   * instead of assuming "API call succeeded" means "message delivered".
+   * Returns undefined when nothing has been sent to this resource yet. */
+  async getLatestDeliveryStatusForResource(companyId: string, relatedResourceId: string): Promise<CommunicationDeliveryEvent | undefined> {
+    const events = await this.repos.deliveryEvents.findAll((e) => e.companyId === companyId && e.relatedResourceId === relatedResourceId);
+    return events.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+  }
+
   /**
    * Sends one outbound call through a company's connected provider.
    * Pipeline: find the active connection -> rate limit -> resolve
@@ -242,6 +261,23 @@ export class IntegrationService {
         companyId, actorUserId: userId, action: 'execute', resource: 'integration_connection', resourceId: connection.id,
         metadata: { provider, integrationAction: action, attempts },
       });
+      if ((provider === 'whatsapp' || provider === 'email') && typeof result.providerMessageId === 'string') {
+        // 'sent' is the honest starting status: the provider accepted the
+        // request, nothing more — a real delivered/read/failed transition
+        // only ever comes from a verified webhook callback (see
+        // CommunicationDeliveryService.handleWebhook), never assumed here.
+        await this.repos.deliveryEvents.save({
+          id: randomUUID(),
+          companyId,
+          connectionId: connection.id,
+          provider,
+          providerMessageId: result.providerMessageId,
+          relatedResource: typeof params.leadId === 'string' ? 'lead' : undefined,
+          relatedResourceId: typeof params.leadId === 'string' ? params.leadId : undefined,
+          status: 'sent',
+          createdAt: new Date().toISOString(),
+        });
+      }
       return result;
     }
 
@@ -349,7 +385,11 @@ export class IntegrationService {
       body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body } }),
     });
     if (!res.ok) throw new Error(`WhatsApp API returned ${res.status}`);
-    return { status: res.status };
+    // Real shape: { messages: [{ id: "wamid.xxx" }] } — only trusted when
+    // actually present; never fabricated when the response doesn't carry it.
+    const responseBody = (await res.json().catch(() => ({}))) as { messages?: { id?: string }[] };
+    const providerMessageId = responseBody.messages?.[0]?.id;
+    return { status: res.status, ...(providerMessageId ? { providerMessageId } : {}) };
   }
 
   // ---- Email (SendGrid) ----
@@ -370,7 +410,11 @@ export class IntegrationService {
       }),
     });
     if (!res.ok) throw new Error(`SendGrid API returned ${res.status}`);
-    return { status: res.status };
+    // SendGrid returns its message id in the X-Message-Id response header,
+    // not the (empty, 202) body — only trusted when the header is actually
+    // present; never fabricated when it isn't.
+    const providerMessageId = res.headers.get('X-Message-Id') ?? undefined;
+    return { status: res.status, ...(providerMessageId ? { providerMessageId } : {}) };
   }
 
   // ---- Meta Ads ----

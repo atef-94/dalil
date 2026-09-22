@@ -83,6 +83,14 @@ async function main(): Promise<void> {
   }, 60_000);
   reservationSweepInterval.unref();
 
+  // AI Memory: marks expired-but-not-yet-invalidated memories invalidated
+  // (recall() already excludes them — this is retention hygiene, not a
+  // correctness requirement), same 60s cadence as the other ticks above.
+  const memorySweepInterval = setInterval(() => {
+    void services.aiMemory.sweepExpiredMemories();
+  }, 60_000);
+  memorySweepInterval.unref();
+
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
@@ -93,6 +101,7 @@ async function main(): Promise<void> {
     clearInterval(scheduledWorkflowInterval);
     clearInterval(aiWorkflowSweepInterval);
     clearInterval(reservationSweepInterval);
+    clearInterval(memorySweepInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');
       process.exit(1);

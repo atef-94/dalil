@@ -33,6 +33,7 @@ export const RESOURCES: ResourceName[] = [
   'secret',
   'task',
   'ai_action',
+  'ai_memory',
   'integration_connection',
   'sales_commission',
   'forecast',

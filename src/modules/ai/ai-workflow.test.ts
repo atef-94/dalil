@@ -41,6 +41,7 @@ import type {
   Campaign,
   Commission,
   CommissionRule,
+  CommunicationDeliveryEvent,
   Employee,
   IntegrationConnection,
   IntegrationEvent,
@@ -163,8 +164,9 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
 
   const integrationConnections = new InMemoryRepository<IntegrationConnection>();
   const integrationEvents = new InMemoryRepository<IntegrationEvent>();
+  const communicationDeliveryEvents = new InMemoryRepository<CommunicationDeliveryEvent>();
   const integrations = new IntegrationService(
-    { connections: integrationConnections, events: integrationEvents },
+    { connections: integrationConnections, events: integrationEvents, deliveryEvents: communicationDeliveryEvents },
     automation,
     auditLog,
     (async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch,

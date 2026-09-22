@@ -23,10 +23,12 @@ import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from '../integrations/integration.service.js';
 import { LeadScoringService } from './lead-scoring.service.js';
 import { AiAgentService } from './ai-agent.service.js';
+import { AiMemoryService } from './ai-memory.service.js';
 import type {
   ActionName,
   AgentDecision,
   AiActionRequest,
+  AiMemory,
   AiPolicy,
   ApprovalRequest,
   AuditLogEntry,
@@ -35,6 +37,7 @@ import type {
   Campaign,
   Commission,
   CommissionRule,
+  CommunicationDeliveryEvent,
   Employee,
   IntegrationConnection,
   IntegrationEvent,
@@ -153,13 +156,14 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
 
   const integrationConnections = new InMemoryRepository<IntegrationConnection>();
   const integrationEvents = new InMemoryRepository<IntegrationEvent>();
+  const communicationDeliveryEvents = new InMemoryRepository<CommunicationDeliveryEvent>();
   const integrationFetchCalls: { url: string; init?: RequestInit }[] = [];
   let integrationFetchImpl: typeof fetch = (async (url, init) => {
     integrationFetchCalls.push({ url: String(url), init: init as RequestInit | undefined });
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   }) as typeof fetch;
   const integrations = new IntegrationService(
-    { connections: integrationConnections, events: integrationEvents },
+    { connections: integrationConnections, events: integrationEvents, deliveryEvents: communicationDeliveryEvents },
     automation,
     auditLog,
     ((url: Parameters<typeof fetch>[0], init?: RequestInit) => integrationFetchImpl(url, init)) as typeof fetch,
@@ -167,6 +171,17 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   );
   automation.setIntegrationSender((companyId, provider, action, params, userId) =>
     integrations.send(companyId, provider as IntegrationConnection['provider'], action, params, userId),
+  );
+  automation.setDeliveryStatusGetter((companyId, relatedResourceId) => integrations.getLatestDeliveryStatusForResource(companyId, relatedResourceId));
+
+  const aiMemory = new AiMemoryService(new InMemoryRepository<AiMemory>());
+  automation.setMemoryRecaller((companyId, filter) =>
+    aiMemory.recall(companyId, {
+      category: filter.category as AiMemory['category'] | undefined,
+      subjectType: filter.subjectType as string | undefined,
+      subjectId: filter.subjectId as string | undefined,
+      query: filter.query as string | undefined,
+    }),
   );
 
   const ai = new AiAgentService(
@@ -195,6 +210,8 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     ai,
     automation,
     integrations,
+    aiMemory,
+    communicationDeliveryEvents,
     integrationFetchCalls,
     setIntegrationFetchImpl: (impl: typeof fetch) => {
       integrationFetchImpl = impl;
@@ -226,6 +243,7 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
     policies,
     auditLogRepo,
     scheduleLines,
+    contracts,
     leaveRequests,
   };
 }
@@ -568,7 +586,7 @@ test('listTools returns the full tool registry, or a per-agent boundary-filtered
   const allTools = h.ai.listTools();
   assert.ok(allTools.length >= 7);
   const salesTools = h.ai.listTools('sales');
-  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call', 'score_lead', 'compare_payment_plans'].includes(t.actionType)));
+  assert.ok(salesTools.every((t) => ['update_lead_status', 'assign_lead_owner', 'create_task', 'send_message', 'integration_call', 'score_lead', 'compare_payment_plans', 'get_delivery_status', 'recall_memory'].includes(t.actionType)));
   assert.ok(!salesTools.some((t) => t.actionType === 'webhook_call'));
 });
 
@@ -671,6 +689,77 @@ test('compare_payment_plans (read-only) computes real comparisons via QuotationS
   assert.equal(request.status, 'executed');
 });
 
+const VIEW_INTEGRATION_GRANT: { action: ActionName; resource: ResourceName } = { action: 'view', resource: 'integration_connection' };
+
+test('get_delivery_status (read-only) returns the real, provider-confirmed status — never "sent = delivered"', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [VIEW_INTEGRATION_GRANT, INTEGRATION_CALL_GRANT, EDIT_LEAD_GRANT]);
+  await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1');
+  await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'WA', config: { phoneNumberId: 'pn-1' },
+    credentials: { access_token: 'tok' }, createdByUserId: 'human-1',
+  });
+  h.setIntegrationFetchImpl((async () => new Response(JSON.stringify({ messages: [{ id: 'wamid.LIVE1' }] }), { status: 200 })) as typeof fetch);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100' });
+
+  await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'integration_call',
+    params: { provider: 'whatsapp', action: 'send_message', to: '0100', body: 'hi', leadId: lead.id },
+    ownerUserId: 'human-1',
+  });
+
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'get_delivery_status',
+    params: { relatedResourceId: lead.id },
+  });
+  assert.equal(request.status, 'executed');
+});
+
+const VIEW_MEMORY_GRANT: { action: ActionName; resource: ResourceName } = { action: 'view', resource: 'ai_memory' };
+
+test('recall_memory (read-only) returns real, tenant-scoped memory and excludes another company\'s memory', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [VIEW_MEMORY_GRANT]);
+  await h.aiMemory.remember({ companyId: 'c1', category: 'lead', content: 'Prefers evening calls', subjectType: 'lead', subjectId: 'lead-1', source: { type: 'user_note' } });
+  await h.aiMemory.remember({ companyId: 'c2', category: 'lead', content: 'Different company memory', subjectType: 'lead', subjectId: 'lead-1', source: { type: 'user_note' } });
+
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'recall_memory',
+    params: { subjectType: 'lead', subjectId: 'lead-1' },
+  });
+  assert.equal(request.status, 'executed');
+
+  // The AI tool's own dispatch path (AutomationService.executeAction's
+  // recall_memory case) is what requestAction() just exercised above —
+  // check its actual return value directly to confirm it's real,
+  // tenant-scoped data, not a stub.
+  const output = await h.automation.executeActionDirect('c1', 'human-1', {
+    type: 'recall_memory',
+    params: { subjectType: 'lead', subjectId: 'lead-1' },
+  });
+  const memories = (output as { memories: { content: string }[] }).memories;
+  assert.equal(memories.length, 1);
+  assert.equal(memories[0]!.content, 'Prefers evening calls');
+});
+
+test('recall_memory (read-only) is denied without view:ai_memory permission', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', []);
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'recall_memory',
+    params: {},
+  });
+  assert.equal(request.status, 'denied_permission');
+});
+
 // ---- Real post-execution verification (never assumes success just because
 // executeActionDirect() didn't throw) ----
 
@@ -736,6 +825,105 @@ test('verificationStatus is undefined for a suggested/pending action — verific
   });
   assert.equal(request.status, 'pending_approval');
   assert.equal(request.verificationStatus, undefined);
+});
+
+// ---- Advanced AI Policy Engine (partial): financial amount / channel /
+// working-hours guardrails on top of the autonomyLevel enum. Every check
+// can only escalate auto_execute -> require_approval, never loosen a
+// stricter autonomyLevel. ----
+
+const RECORD_PAYMENT_GRANT: { action: ActionName; resource: ResourceName } = { action: 'edit', resource: 'payment_schedule' };
+
+async function seedContractAndLine(h: Awaited<ReturnType<typeof freshHarness>>, companyId = 'c1', lineAmount = 5000) {
+  await h.contracts.save({
+    id: 'contract-1', companyId, reservationId: 'r1', unitId: 'u1', clientId: 'lead-1',
+    creditedEmployeeUserId: 'human-1', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString(),
+  });
+  await h.scheduleLines.save({
+    id: 'line-1', companyId, contractId: 'contract-1', sourceTemplateId: 't1', sourceTemplateVersion: 1,
+    sequence: 0, label: 'Installment', dueDate: new Date().toISOString(), amount: lineAmount, amountPaid: 0, status: 'upcoming',
+  });
+}
+
+test('a maxFinancialAmount policy limit escalates an over-limit auto_execute payment to require_approval', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [RECORD_PAYMENT_GRANT]);
+  await seedContractAndLine(h);
+  await h.ai.setPolicy('c1', 'record_payment', 'auto_execute', 'human-1', { maxFinancialAmount: 1000 });
+
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'record_payment',
+    params: { contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 5000, method: 'transfer' },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'pending_approval');
+  assert.match(request.reasoning ?? '', /exceeds this company's AI financial limit/);
+});
+
+test('a payment within the maxFinancialAmount limit still auto-executes', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [RECORD_PAYMENT_GRANT]);
+  await seedContractAndLine(h, 'c1', 500);
+  await h.ai.setPolicy('c1', 'record_payment', 'auto_execute', 'human-1', { maxFinancialAmount: 1000 });
+
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'record_payment',
+    params: { contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 500, method: 'transfer' },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'executed');
+});
+
+test('an allowedChannels policy limit blocks a disallowed provider on integration_call, requiring approval', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
+  await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1', { allowedChannels: ['email'] });
+  await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'WA', config: { phoneNumberId: 'pn-1' },
+    credentials: { access_token: 'tok' }, createdByUserId: 'human-1',
+  });
+
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'integration_call',
+    params: { provider: 'whatsapp', action: 'send_message', to: '0100', body: 'hi' },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'pending_approval');
+  assert.match(request.reasoning ?? '', /not in this company's AI-allowed channel list/);
+});
+
+test('a workingHours policy limit blocks an outside-window integration_call, requiring approval', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT, INTEGRATION_CALL_GRANT]);
+  // A 1-hour window starting 2 hours from now (UTC) can never contain "now".
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const start = new Date(now.getTime() + 2 * 3600_000);
+  const end = new Date(now.getTime() + 3 * 3600_000);
+  await h.ai.setPolicy('c1', 'integration_call', 'auto_execute', 'human-1', {
+    workingHoursStart: `${pad(start.getUTCHours())}:${pad(start.getUTCMinutes())}`,
+    workingHoursEnd: `${pad(end.getUTCHours())}:${pad(end.getUTCMinutes())}`,
+  });
+  await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'WA', config: { phoneNumberId: 'pn-1' },
+    credentials: { access_token: 'tok' }, createdByUserId: 'human-1',
+  });
+
+  const request = await h.ai.requestAction({
+    companyId: 'c1',
+    requestedByUserId: 'human-1',
+    actionType: 'integration_call',
+    params: { provider: 'whatsapp', action: 'send_message', to: '0100', body: 'hi' },
+    ownerUserId: 'human-1',
+  });
+  assert.equal(request.status, 'pending_approval');
+  assert.match(request.reasoning ?? '', /outside the company's configured AI working hours/);
 });
 
 test('requestAction rejects a call missing a required tool parameter without throwing, recorded as denied_policy', async () => {

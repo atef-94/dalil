@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
 import { AuditLog } from '../../infra/audit-log.js';
@@ -16,10 +17,12 @@ import { QuotationService } from '../quotations/quotation.service.js';
 import { LeadScoringService } from '../ai/lead-scoring.service.js';
 import { AutomationService } from '../automation/automation.service.js';
 import { IntegrationService } from './integration.service.js';
+import { CommunicationDeliveryService } from './communication-delivery.service.js';
 import type {
   ApprovalRequest,
   AuditLogEntry,
   Campaign,
+  CommunicationDeliveryEvent,
   Contract,
   CrmStage,
   Employee,
@@ -115,6 +118,7 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
 
   const connections = new InMemoryRepository<IntegrationConnection>();
   const events = new InMemoryRepository<IntegrationEvent>();
+  const deliveryEvents = new InMemoryRepository<CommunicationDeliveryEvent>();
 
   const fetchCalls: { url: string; init?: RequestInit }[] = [];
   let fetchImpl: typeof fetch = (async (url, init) => {
@@ -123,7 +127,7 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   }) as typeof fetch;
 
   const integrations = new IntegrationService(
-    { connections, events },
+    { connections, events, deliveryEvents },
     automation,
     auditLog,
     ((url: Parameters<typeof fetch>[0], init?: RequestInit) => fetchImpl(url, init)) as typeof fetch,
@@ -131,8 +135,14 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
     rateLimitPerMinute,
   );
 
+  const communicationDelivery = new CommunicationDeliveryService(deliveryEvents, integrations, automation);
+
   return {
     integrations,
+    automation,
+    connections,
+    deliveryEvents,
+    communicationDelivery,
     auditLogRepo,
     fetchCalls,
     setFetchImpl: (impl: typeof fetch) => {
@@ -321,4 +331,91 @@ test('the delivery log never records raw message content, only a safe field summ
   await h.integrations.send('c1', 'whatsapp', 'send_message', { to: '+15551234', body: 'a very private message' }, 'u1');
   const events = await h.integrations.listEvents('c1');
   assert.equal(JSON.stringify(events).includes('a very private message'), false);
+});
+
+// ---- Real communication delivery tracking: "API call succeeded" is never
+// treated as "message delivered" — see CommunicationDeliveryService. ----
+
+test('a successful WhatsApp send records an initial CommunicationDeliveryEvent with status "sent", using the real provider message id', async () => {
+  const h = freshHarness();
+  await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'My WhatsApp', config: { phoneNumberId: '123' },
+    credentials: { access_token: 'tok' }, createdByUserId: 'u1',
+  });
+  h.setFetchImpl((async () => new Response(JSON.stringify({ messages: [{ id: 'wamid.ABC123' }] }), { status: 200 })) as typeof fetch);
+
+  await h.integrations.send('c1', 'whatsapp', 'send_message', { to: '+15551234', body: 'hi', leadId: 'lead-1' }, 'u1');
+
+  const timeline = await h.integrations.getDeliveryTimeline('c1', 'wamid.ABC123');
+  assert.equal(timeline.length, 1);
+  assert.equal(timeline[0]!.status, 'sent');
+  assert.equal(timeline[0]!.relatedResourceId, 'lead-1');
+});
+
+test('a WhatsApp send with no message id in the response records no delivery event — never fabricated', async () => {
+  const h = freshHarness();
+  await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'My WhatsApp', config: { phoneNumberId: '123' },
+    credentials: { access_token: 'tok' }, createdByUserId: 'u1',
+  });
+  h.setFetchImpl((async () => new Response(JSON.stringify({}), { status: 200 })) as typeof fetch);
+
+  await h.integrations.send('c1', 'whatsapp', 'send_message', { to: '+15551234', body: 'hi' }, 'u1');
+
+  const timeline = await h.integrations.getDeliveryTimeline('c1', 'nonexistent');
+  assert.equal(timeline.length, 0);
+  const status = await h.integrations.getLatestDeliveryStatusForResource('c1', 'lead-1');
+  assert.equal(status, undefined);
+});
+
+test('a verified delivery webhook appends a real "delivered" transition to the message timeline', async () => {
+  const h = freshHarness();
+  const connection = await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'My WhatsApp', config: { phoneNumberId: '123' },
+    credentials: { access_token: 'tok', webhook_secret: 'whsec-comm-1' }, createdByUserId: 'u1',
+  });
+  h.setFetchImpl((async () => new Response(JSON.stringify({ messages: [{ id: 'wamid.XYZ' }] }), { status: 200 })) as typeof fetch);
+  await h.integrations.send('c1', 'whatsapp', 'send_message', { to: '+15551234', body: 'hi', leadId: 'lead-9' }, 'u1');
+
+  const body = JSON.stringify({ providerMessageId: 'wamid.XYZ', status: 'delivered' });
+  const signature = createHmac('sha256', 'whsec-comm-1').update(body).digest('hex');
+  const event = await h.communicationDelivery.handleWebhook('c1', connection.id, body, signature);
+  assert.equal(event.status, 'delivered');
+  assert.equal(event.relatedResourceId, 'lead-9'); // carried forward from the originating 'sent' event
+
+  const timeline = await h.integrations.getDeliveryTimeline('c1', 'wamid.XYZ');
+  assert.deepEqual(timeline.map((e) => e.status), ['sent', 'delivered']);
+});
+
+test('a delivery webhook with an invalid signature is rejected and never appends anything', async () => {
+  const h = freshHarness();
+  const connection = await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'My WhatsApp', config: { phoneNumberId: '123' },
+    credentials: { access_token: 'tok', webhook_secret: 'whsec-real' }, createdByUserId: 'u1',
+  });
+  const body = JSON.stringify({ providerMessageId: 'wamid.X', status: 'delivered' });
+  const forgedSignature = createHmac('sha256', 'wrong-secret').update(body).digest('hex');
+  await assert.rejects(() => h.communicationDelivery.handleWebhook('c1', connection.id, body, forgedSignature));
+});
+
+test('a delivery webhook for a connection with no webhook_secret configured is rejected', async () => {
+  const h = freshHarness();
+  const connection = await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'My WhatsApp', config: { phoneNumberId: '123' },
+    credentials: { access_token: 'tok' }, createdByUserId: 'u1', // no webhook_secret
+  });
+  const body = JSON.stringify({ providerMessageId: 'wamid.X', status: 'delivered' });
+  const signature = createHmac('sha256', 'anything').update(body).digest('hex');
+  await assert.rejects(() => h.communicationDelivery.handleWebhook('c1', connection.id, body, signature));
+});
+
+test('a delivery webhook for a connection belonging to a different company is rejected (cross-tenant)', async () => {
+  const h = freshHarness();
+  const connection = await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'My WhatsApp', config: { phoneNumberId: '123' },
+    credentials: { access_token: 'tok', webhook_secret: 'whsec-1' }, createdByUserId: 'u1',
+  });
+  const body = JSON.stringify({ providerMessageId: 'wamid.X', status: 'delivered' });
+  const signature = createHmac('sha256', 'whsec-1').update(body).digest('hex');
+  await assert.rejects(() => h.communicationDelivery.handleWebhook('c2', connection.id, body, signature));
 });

@@ -897,6 +897,33 @@ test('listTemplates includes the new HR/onboarding starting points', async () =>
   assert.ok(keys.includes('leave-request-notification'));
 });
 
+// ---- Event-to-AI activation control: instantiate a real workflow from a
+// built-in template in one call, company-scoped, never auto-activated. ----
+
+test('activateTemplate creates a real, active workflow matching the template — it actually fires on the real event', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'task' }]);
+  const workflow = await h.automation.activateTemplate('new-lead-welcome-task', 'c1', 'owner-1');
+  assert.equal(workflow.companyId, 'c1');
+  assert.equal(workflow.status, 'active');
+  assert.equal(workflow.name, 'New Lead Welcome Task');
+  assert.equal(workflow.trigger.eventType, 'lead.created');
+
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: { fullName: 'Ada', sourceId: 's1' } });
+  assert.equal(run!.status, 'completed');
+});
+
+test('activateTemplate rejects an unknown template key', async () => {
+  const h = await freshHarness();
+  await assert.rejects(() => h.automation.activateTemplate('not-a-real-template', 'c1', 'owner-1'));
+});
+
+test('activateTemplate never activates the same template twice with the same webhook slug (surfaces the real collision, same as manual creation)', async () => {
+  const h = await freshHarness();
+  await h.automation.activateTemplate('customer-response-ai-followup', 'c1', 'owner-1');
+  await assert.rejects(() => h.automation.activateTemplate('customer-response-ai-followup', 'c1', 'owner-1'));
+});
+
 // ---- Phase 1 hardening: idempotency race protection ----
 
 test('two concurrent duplicate event deliveries are serialized into exactly one run', async () => {
