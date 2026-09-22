@@ -21,9 +21,13 @@ import type {
   ApprovalRequest,
   AuditLogEntry,
   Campaign,
+  Consultant,
   Contract,
   CrmStage,
+  Developer,
   Employee,
+  Facility,
+  Launch,
   Lead,
   Message,
   Opportunity,
@@ -33,11 +37,13 @@ import type {
   PermissionGrant,
   PermissionOverride,
   Project,
+  ProjectPhase,
   Quotation,
   Receipt,
   Refund,
   ResourceName,
   Role,
+  SalesPhoneNumber,
   Secret,
   Task,
   Unit,
@@ -92,7 +98,13 @@ async function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10, compan
   const reservations = new InMemoryRepository<Reservation>();
   const projects = new InMemoryRepository<Project>();
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
-  const inventory = new InventoryService(units, holds, reservations, projects);
+  const developers = new InMemoryRepository<Developer>();
+  const phases = new InMemoryRepository<ProjectPhase>();
+  const launches = new InMemoryRepository<Launch>();
+  const facilities = new InMemoryRepository<Facility>();
+  const consultants = new InMemoryRepository<Consultant>();
+  const salesPhones = new InMemoryRepository<SalesPhoneNumber>();
+  const inventory = new InventoryService(units, holds, reservations, projects, developers, phases, launches, facilities, consultants, salesPhones);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
   const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
   const leadScoring = new LeadScoringService(leads, crmStages);
@@ -146,7 +158,11 @@ async function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10, compan
     units,
     projects,
     templates,
+    developers,
+    facilities,
+    consultants,
     reservations,
+    inventory,
     runs,
     stepRuns,
     auditLogRepo,
@@ -1157,4 +1173,221 @@ test('deleteSecret succeeds without force when no active workflow references it'
   await h.automation.deleteSecret(secret.id, 'c1');
   const remaining = await h.automation.listSecrets('c1');
   assert.equal(remaining.length, 0);
+});
+
+// ---- Inventory AI tools: search_projects, get_project_details, get_project_payment_plans,
+// get_developer_portfolio, get_project_facilities, get_project_location ----
+
+test('search_projects action returns real matching projects, filtered and RBAC-gated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Zed Towers', destination: 'New Zayed', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-2', companyId: 'c1', name: 'Marina Heights', destination: 'North Coast', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search projects',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search', action: { type: 'search_projects', params: { destination: 'New Zayed' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { projects: { id: string }[]; matchCount: number };
+  assert.equal(output.matchCount, 1);
+  assert.equal(output.projects[0]!.id, 'proj-1');
+});
+
+test('search_projects action fails when the workflow creator lacks view:project permission', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', []);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search projects',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search', action: { type: 'search_projects', params: {} } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lacks view:project permission/);
+});
+
+test('get_project_details action returns a real join of developer/phases/launches/facilities/consultants/sales numbers, tenant-isolated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  const developer = await h.developers.save({ id: 'dev-1', companyId: 'c1', name: 'Emaar', createdAt: new Date().toISOString() });
+  const pool = await h.facilities.save({ id: 'fac-1', companyId: 'c1', name: 'Pool', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Marassi', developerId: developer.id, facilityIds: [pool.id], createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-other', companyId: 'c2', name: 'Other Co Project', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Details',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Details', action: { type: 'get_project_details', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { project: { id: string }; developer?: { id: string }; facilities: { id: string }[] };
+  assert.equal(output.project.id, 'proj-1');
+  assert.equal(output.developer?.id, developer.id);
+  assert.equal(output.facilities.length, 1);
+});
+
+test('get_project_details action rejects a project belonging to a different company (cross-tenant IDOR)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.projects.save({ id: 'proj-other', companyId: 'c2', name: 'Other Co Project', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Details',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Details', action: { type: 'get_project_details', params: { projectId: 'proj-other' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+});
+
+test('get_project_payment_plans action returns real templates scoped to the project (or company-wide, projectId-less templates)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'payment_plan_template' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Marassi', createdAt: new Date().toISOString() });
+  const baseTemplate = { version: 1, downPaymentType: 'percentage' as const, downPaymentValue: 10, frequency: 'monthly' as const, termMonths: 60, fees: [], archived: false, createdAt: new Date().toISOString() };
+  await h.templates.save({ ...baseTemplate, id: 'tpl-1', companyId: 'c1', projectId: 'proj-1', name: 'Standard 5yr' });
+  await h.templates.save({ ...baseTemplate, id: 'tpl-2', companyId: 'c1', name: 'Company-wide plan' });
+  await h.templates.save({ ...baseTemplate, id: 'tpl-3', companyId: 'c1', projectId: 'proj-other', name: 'Different project plan' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Plans',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Plans', action: { type: 'get_project_payment_plans', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { templates: { id: string }[] };
+  assert.deepEqual(output.templates.map((t) => t.id).sort(), ['tpl-1', 'tpl-2']);
+});
+
+test('get_developer_portfolio action returns the developer and their real Projects, tenant-isolated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  const developer = await h.developers.save({ id: 'dev-1', companyId: 'c1', name: 'Sodic', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Villette', developerId: developer.id, createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-2', companyId: 'c1', name: 'Unrelated', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Portfolio',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Portfolio', action: { type: 'get_developer_portfolio', params: { developerId: developer.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { developer: { id: string }; projects: { id: string }[] };
+  assert.equal(output.developer.id, developer.id);
+  assert.equal(output.projects.length, 1);
+  assert.equal(output.projects[0]!.id, 'proj-1');
+});
+
+test('get_developer_portfolio action rejects a developer belonging to a different company', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.developers.save({ id: 'dev-other', companyId: 'c2', name: 'Other Co Developer', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Portfolio',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Portfolio', action: { type: 'get_developer_portfolio', params: { developerId: 'dev-other' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+});
+
+test('get_project_facilities action resolves Project.facilityIds to real Facility rows, RBAC-gated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  const pool = await h.facilities.save({ id: 'fac-1', companyId: 'c1', name: 'Pool', createdAt: new Date().toISOString() });
+  const gym = await h.facilities.save({ id: 'fac-2', companyId: 'c1', name: 'Gym', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Marassi', facilityIds: [pool.id, gym.id], createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Facilities',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Facilities', action: { type: 'get_project_facilities', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { facilities: { name: string }[] };
+  assert.deepEqual(output.facilities.map((f) => f.name).sort(), ['Gym', 'Pool']);
+});
+
+test('get_project_location action returns real location/address/coordinates from the Project, never fabricated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.projects.save({
+    id: 'proj-1',
+    companyId: 'c1',
+    name: 'Marassi',
+    destination: 'North Coast',
+    address: 'KM 124 Alexandria Desert Road',
+    locationLat: 30.9,
+    locationLng: 28.7,
+    locationMapUrl: 'https://maps.example.com/marassi',
+    createdAt: new Date().toISOString(),
+  });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Location',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Location', action: { type: 'get_project_location', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { destination?: string; address?: string; locationLat?: number; locationLng?: number; locationMapUrl?: string };
+  assert.equal(output.destination, 'North Coast');
+  assert.equal(output.address, 'KM 124 Alexandria Desert Road');
+  assert.equal(output.locationLat, 30.9);
+  assert.equal(output.locationLng, 28.7);
+  assert.equal(output.locationMapUrl, 'https://maps.example.com/marassi');
+});
+
+test('search_units action supports the new bedrooms/finishing/destination filters (single source of truth with InventoryService.searchUnits)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'unit' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Zed Towers', destination: 'New Zayed', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: 'apartment', areaSqm: 180, listPrice: 8_000_000, bedrooms: 3, finishingType: 'Fully Finished', status: 'available', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-2', companyId: 'c1', projectId: 'proj-1', code: 'A-102', unitType: 'apartment', areaSqm: 250, listPrice: 15_000_000, bedrooms: 4, finishingType: 'Core & Shell', status: 'available', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search units', action: { type: 'search_units', params: { destination: 'New Zayed', bedrooms: 3, finishingType: 'Fully Finished' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { units: { id: string }[]; matchCount: number };
+  assert.equal(output.matchCount, 1);
+  assert.equal(output.units[0]!.id, 'unit-1');
 });

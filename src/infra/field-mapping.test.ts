@@ -51,3 +51,44 @@ test('suggestMapping handles an empty/blank header without crashing', () => {
   const mapping = suggestMapping(['', '   '], LEAD_FIELDS);
   assert.equal(mapping[''], null);
 });
+
+const INVENTORY_FIELDS: ImportFieldDef[] = [
+  { key: 'projectName', label: 'Project', aliases: ['project name', 'اسم المشروع', 'المشروع'] },
+  { key: 'unitCode', label: 'Unit Code', aliases: ['unit', 'unit number', 'unit no', 'رقم الوحدة', 'كود الوحدة'] },
+  { key: 'unitType', label: 'Unit Type', aliases: ['type', 'نوع الوحدة'] },
+  { key: 'areaSqm', label: 'Area (sqm)', aliases: ['area', 'مساحة الوحدة'] },
+  { key: 'listPrice', label: 'List Price', aliases: ['price', 'السعر'] },
+];
+
+test('suggestMapping matches Arabic headers against Arabic aliases (previously always unmapped)', () => {
+  const mapping = suggestMapping(['المشروع', 'رقم الوحدة', 'نوع الوحدة', 'مساحة الوحدة', 'السعر'], INVENTORY_FIELDS);
+  assert.deepEqual(mapping, {
+    المشروع: 'projectName',
+    'رقم الوحدة': 'unitCode',
+    'نوع الوحدة': 'unitType',
+    'مساحة الوحدة': 'areaSqm',
+    السعر: 'listPrice',
+  });
+});
+
+test('suggestMapping folds Arabic diacritics and letter-shape variants before matching', () => {
+  // Tashkeel (diacritics) added, and alef-hamza (أ) used instead of plain alef.
+  const mapping = suggestMapping(['أَلْمَشْرُوع'], [{ key: 'projectName', label: 'Project', aliases: ['المشروع'] }]);
+  assert.equal(mapping['أَلْمَشْرُوع'], 'projectName');
+});
+
+test('suggestMapping handles a mixed Arabic/English header file, matching each independently', () => {
+  const mapping = suggestMapping(['Project', 'رقم الوحدة', 'Unit Type', 'مساحة الوحدة', 'Price'], INVENTORY_FIELDS);
+  assert.deepEqual(mapping, {
+    Project: 'projectName',
+    'رقم الوحدة': 'unitCode',
+    'Unit Type': 'unitType',
+    'مساحة الوحدة': 'areaSqm',
+    Price: 'listPrice',
+  });
+});
+
+test('suggestMapping leaves an unrecognized Arabic header unmapped rather than guessing', () => {
+  const mapping = suggestMapping(['لون مفضل'], INVENTORY_FIELDS);
+  assert.equal(mapping['لون مفضل'], null);
+});

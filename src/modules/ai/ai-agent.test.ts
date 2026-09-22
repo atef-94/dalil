@@ -1262,6 +1262,15 @@ test('inventory agent reports no_action for a recently-listed unit', async () =>
   assert.equal(decision.status, 'no_action');
 });
 
+test('inventory agent is allowed the new real-estate search/detail tools alongside its existing ones', async () => {
+  const h = await freshHarness();
+  const inventoryAgent = h.ai.listAgents().find((a) => a.key === 'inventory')!;
+  assert.deepEqual(
+    inventoryAgent.allowedActionTypes.sort(),
+    ['create_task', 'get_developer_portfolio', 'get_project_details', 'get_project_facilities', 'get_project_location', 'get_project_payment_plans', 'search_projects', 'search_units'].sort(),
+  );
+});
+
 // ---- Management Intelligence Agent ----
 
 test('management agent flags a company-wide collections risk when overdue share crosses the threshold', async () => {
