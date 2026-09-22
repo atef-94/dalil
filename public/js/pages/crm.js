@@ -507,11 +507,19 @@ export async function renderCrm(container) {
         return;
       }
       lead = fresh;
+      // The real, provider-confirmed delivery status of the most recent
+      // outbound WhatsApp/email message to this lead — never assumes an
+      // "API call succeeded" event means the message was actually
+      // delivered. Missing permission/no message sent yet both degrade to
+      // no badge rather than blocking the rest of the detail view.
+      const deliveryStatus = await api.get(`/api/integrations/communication/delivery/by-resource/${lead.id}`).catch(() => null);
 
       const stage = stages.find((s) => s.id === lead.stageId);
+      const DELIVERY_COLORS = { delivered: 'green', read: 'green', sent: 'blue', queued: 'amber', failed: 'red', rejected: 'red', unknown: '' };
       const header = el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:14px' }, [
         statusBadge(stage?.name || lead.stageId),
         lead.priority ? badge(lead.priority, lead.priority === 'urgent' || lead.priority === 'high' ? 'red' : '') : null,
+        deliveryStatus && deliveryStatus.status !== 'unknown' ? badge(`Delivery: ${deliveryStatus.status}`, DELIVERY_COLORS[deliveryStatus.status] || '') : null,
         score ? el('span', { class: 'muted' }, `Score: ${score.score}/100`) : null,
         el('span', { class: 'muted' }, lead.phone),
         lead.email ? el('span', { class: 'muted' }, lead.email) : null,

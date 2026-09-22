@@ -2413,6 +2413,21 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: timeline };
   });
 
+  // The latest delivery status for whatever a lead/customer/etc. was last
+  // messaged — the same real lookup the `get_delivery_status` AI tool uses
+  // (see automation.setDeliveryStatusGetter above), exposed directly so the
+  // frontend doesn't have to round-trip through the AI action pipeline just
+  // to show a status badge. Returns 'unknown' rather than 404 when nothing
+  // has been sent yet — a CRM view showing "no message sent" is not an error.
+  httpServer.get('/api/integrations/communication/delivery/by-resource/:resourceId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'integration_connection'))) {
+      throw new ForbiddenError('missing view:integration_connection permission');
+    }
+    const latest = await integrations.getLatestDeliveryStatusForResource(actor.companyId, ctx.params.resourceId!);
+    return { status: 200, body: latest ?? { status: 'unknown' } };
+  });
+
   // ---- Finance ----
   httpServer.post('/api/finance/payments', async (ctx) => {
     const actor = await actorOf(ctx);
