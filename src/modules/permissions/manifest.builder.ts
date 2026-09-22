@@ -34,6 +34,7 @@ export const RESOURCES: ResourceName[] = [
   'task',
   'ai_action',
   'ai_memory',
+  'ai_llm_config',
   'integration_connection',
   'sales_commission',
   'forecast',

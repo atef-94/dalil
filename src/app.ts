@@ -2,7 +2,9 @@ import type {
   ActionName,
   AgentDecision,
   AiActionRequest,
+  AiLlmUsage,
   AiMemory,
+  AiModelConfig,
   AiPolicy,
   AiWorkflowGoalType,
   AiWorkflowRun,
@@ -112,6 +114,7 @@ import { TaskService } from './modules/tasks/task.service.js';
 import { AutomationService, type WorkflowStepInput } from './modules/automation/automation.service.js';
 import { AiAgentService } from './modules/ai/ai-agent.service.js';
 import { AiMemoryService } from './modules/ai/ai-memory.service.js';
+import { LlmOrchestratorService } from './modules/ai/llm-orchestrator.service.js';
 import { AiWorkflowService } from './modules/ai/ai-workflow.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
 import { SignatureService } from './modules/integrations/e-signature.service.js';
@@ -196,6 +199,7 @@ export interface Application {
     eventBus: EventBus;
     aiAgent: AiAgentService;
     aiMemory: AiMemoryService;
+    llmOrchestrator: LlmOrchestratorService;
     aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
     signatures: SignatureService;
@@ -269,6 +273,8 @@ function buildRepos(db?: DatabaseSync) {
     aiPolicies: repo<AiPolicy>('ai_policies'),
     agentDecisions: repo<AgentDecision>('agent_decisions'),
     aiMemory: repo<AiMemory>('ai_memory'),
+    aiModelConfigs: repo<AiModelConfig>('ai_model_configs'),
+    aiLlmUsage: repo<AiLlmUsage>('ai_llm_usage'),
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
     communicationDeliveryEvents: repo<CommunicationDeliveryEvent>('communication_delivery_events'),
@@ -447,6 +453,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       query: filter.query as string | undefined,
     }),
   );
+
+  const llmOrchestrator = new LlmOrchestratorService(repos.aiModelConfigs, repos.aiLlmUsage, automation);
 
   const aiAgent = new AiAgentService(
     { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals, agentDecisions: repos.agentDecisions },
@@ -3921,6 +3929,79 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: memory };
   });
 
+  // ---- LLM Provider Abstraction ----
+  // No external AI API is configured for this deployment — these routes
+  // manage the real, testable provider config (see LlmOrchestratorService's
+  // class doc comment) rather than a stand-in for one. CEO-only by default
+  // seed, same posture as /api/automation/secrets: API keys are financial/
+  // security-sensitive and never returned by any route here.
+  httpServer.post('/api/ai/llm/config', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing create:ai_llm_config permission');
+    }
+    const body = parseJsonBody<{
+      provider: AiModelConfig['provider'];
+      displayName: string;
+      model: string;
+      baseUrl: string;
+      apiKey: string;
+      maxOutputTokens?: number;
+      temperature?: number;
+      timeoutMs?: number;
+      maxRetries?: number;
+      dailyTokenBudget?: number;
+      costPerInputTokenUsd?: number;
+      costPerOutputTokenUsd?: number;
+      isActive?: boolean;
+    }>(ctx.body);
+    const config = await llmOrchestrator.setModelConfig({ ...body, companyId: actor.companyId, createdByUserId: actor.userId });
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'create',
+      resource: 'ai_llm_config',
+      resourceId: config.id,
+      metadata: { provider: config.provider, model: config.model },
+    });
+    return { status: 201, body: config };
+  });
+
+  httpServer.get('/api/ai/llm/config', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing view:ai_llm_config permission');
+    }
+    const list = await llmOrchestrator.listModelConfigs(actor.companyId);
+    return { status: 200, body: list };
+  });
+
+  httpServer.post('/api/ai/llm/config/:configId/deactivate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing edit:ai_llm_config permission');
+    }
+    const config = await llmOrchestrator.deactivateModelConfig(ctx.params.configId!, actor.companyId);
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'ai_llm_config',
+      resourceId: config.id,
+      metadata: { deactivated: true },
+    });
+    return { status: 200, body: config };
+  });
+
+  httpServer.get('/api/ai/llm/usage', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing view:ai_llm_config permission');
+    }
+    const list = await llmOrchestrator.listUsage(actor.companyId, ctx.query.get('modelConfigId') ?? undefined);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
   // ---- Integration Layer (WhatsApp, Email, Meta Ads, Google Calendar,
   // Stripe, and a generic custom_api connector for other approved
   // third-party services) — secure credential storage (reused from the
@@ -4065,7 +4146,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, aiWorkflow, integrations, signatures,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, llmOrchestrator, aiWorkflow, integrations, signatures,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,

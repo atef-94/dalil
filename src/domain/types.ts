@@ -105,7 +105,8 @@ export type ResourceName =
   | 'crm_stage'
   | 'quotation'
   | 'signature_envelope'
-  | 'ai_memory';
+  | 'ai_memory'
+  | 'ai_llm_config';
 
 export type ActionName =
   | 'view'
@@ -1230,6 +1231,72 @@ export interface AiMemory {
    * stays auditable (who invalidated what, and when). */
   invalidatedAt?: string;
   invalidatedByUserId?: string;
+}
+
+// ---- LLM Provider Abstraction ----
+// A real, testable adapter boundary — no external AI API is configured for
+// this deployment (see lead-scoring.service.ts's own doc comment: every
+// existing "AI agent" decision is deterministic, rule-based logic reading
+// real service data). This section is the scaffolding a real provider
+// plugs into: config schema, an encrypted-secret-backed API key reference
+// (never the raw key itself, reusing AutomationService's existing
+// encrypted Secret store — the same one Integration connectors use),
+// per-call usage/cost tracking, and a company-settable daily token budget.
+// LlmOrchestratorService (modules/ai/llm-orchestrator.service.ts) is the
+// only thing that ever calls a configured provider, and it never fabricates
+// a response: with no AiModelConfig set for a company, every call fails
+// honestly rather than returning invented text.
+
+/** Not a hard-coded single vendor: any provider that speaks one of these two
+ * common wire protocols can be plugged in via baseUrl (self-hosted included). */
+export type LlmProviderKind = 'openai_compatible' | 'anthropic_compatible';
+
+export interface AiModelConfig {
+  id: string;
+  companyId: string;
+  provider: LlmProviderKind;
+  displayName: string;
+  model: string;
+  baseUrl: string;
+  /** A key into AutomationService's existing encrypted Secret store — never
+   * the raw API key. Convention: `llm:{id}:api_key`. */
+  secretKey: string;
+  maxOutputTokens: number;
+  temperature?: number;
+  timeoutMs: number;
+  maxRetries: number;
+  /** Company-wide daily prompt+completion token budget for this config —
+   * undefined means unbounded. Real enforcement (LlmOrchestratorService
+   * rejects a call once today's recorded usage meets/exceeds it), not a UI
+   * decoration. */
+  dailyTokenBudget?: number;
+  costPerInputTokenUsd?: number;
+  costPerOutputTokenUsd?: number;
+  isActive: boolean;
+  createdByUserId: string;
+  updatedAt: string;
+}
+
+export type LlmUsagePurpose = 'agent_reasoning' | 'tool_selection' | 'other';
+
+/** One row per LLM call attempt, success or failure — an append-only cost
+ * and reliability ledger, never mutated in place. */
+export interface AiLlmUsage {
+  id: string;
+  companyId: string;
+  modelConfigId: string;
+  provider: LlmProviderKind;
+  model: string;
+  requestId: string;
+  purpose: LlmUsagePurpose;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costEstimateUsd?: number;
+  latencyMs: number;
+  success: boolean;
+  errorMessage?: string;
+  createdAt: string;
 }
 
 // ---- Integration Layer ----
