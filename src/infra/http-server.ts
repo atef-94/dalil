@@ -53,6 +53,16 @@ export interface HttpServerOptions {
   nodeEnv: string;
   globalRateLimiter: SlidingWindowRateLimiter;
   authRateLimiter: SlidingWindowRateLimiter;
+  /** Whether to trust the `X-Forwarded-For` header for rate-limiting/logging
+   * client IPs. Defaults to false — any external caller can otherwise set an
+   * arbitrary value on this header and get a fresh rate-limit bucket on
+   * every request, completely defeating both the global limiter and the
+   * auth/login brute-force limiter. Only set this true when the app is
+   * genuinely unreachable except through a trusted reverse proxy that sets
+   * (not merely appends to) this header itself — e.g. Railway's edge — via
+   * the TRUST_PROXY env var. When false, the real socket address is always
+   * used instead, which is correct for any direct-exposed deployment. */
+  trustProxy?: boolean;
 }
 
 export class HttpServer {
@@ -161,9 +171,11 @@ export class HttpServer {
   }
 
   private clientIp(req: IncomingMessage): string {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string' && forwarded.length > 0) {
-      return forwarded.split(',')[0]!.trim();
+    if (this.options.trustProxy) {
+      const forwarded = req.headers['x-forwarded-for'];
+      if (typeof forwarded === 'string' && forwarded.length > 0) {
+        return forwarded.split(',')[0]!.trim();
+      }
     }
     return req.socket.remoteAddress ?? 'unknown';
   }

@@ -214,3 +214,54 @@ test('sweepSlaBreaches is repeatable: a lead that keeps missing SLA keeps cyclin
   const updatedLead = await h.leads.findById(lead.id);
   assert.equal(updatedLead!.reassignmentCount, 2);
 });
+
+test('sweepSlaBreaches only sweeps the given companyId when one is passed, and every company when omitted (Phase 0: cross-tenant sweep fix)', async () => {
+  // A manual two-tenant harness (not freshHarness, which builds isolated
+  // repos per call) — both companies' pools/leads/employees share the same
+  // repo instances, the way a real single-process deployment does.
+  const leads = new InMemoryRepository<Lead>();
+  const users = new InMemoryRepository<User>();
+  const employees = new InMemoryRepository<Employee>();
+  const pools = new InMemoryRepository<LeadDistributionPool>();
+  const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
+  await crmStages.seedDefaultStages('c1');
+  await crmStages.seedDefaultStages('c2');
+  const crm = new CrmService(leads, crmStages);
+  const svc = new LeadDistributionService(pools, users, employees, leads, crm, crmStages);
+  const h = { leads, users, employees, pools, crm, crmStages, svc };
+
+  const a1 = await seedEmployeeUser(h, 'c1');
+  const b1 = await seedEmployeeUser(h, 'c1');
+  await svc.configurePool({ companyId: 'c1', mode: 'round_robin', memberUserIds: [a1.userId, b1.userId], slaMinutes: 15 });
+  const assignment1 = await svc.pickOwnerForNewLead('c1');
+  const lead1 = await crm.createLead({
+    companyId: 'c1',
+    fullName: 'Client c1',
+    phone: '0100',
+    ownerEmployeeUserId: assignment1!.ownerUserId,
+    firstContactSlaDueAt: assignment1!.firstContactSlaDueAt,
+  });
+
+  const a2 = await seedEmployeeUser(h, 'c2');
+  const b2 = await seedEmployeeUser(h, 'c2');
+  await svc.configurePool({ companyId: 'c2', mode: 'round_robin', memberUserIds: [a2.userId, b2.userId], slaMinutes: 15 });
+  const assignment2 = await svc.pickOwnerForNewLead('c2');
+  const lead2 = await crm.createLead({
+    companyId: 'c2',
+    fullName: 'Client c2',
+    phone: '0200',
+    ownerEmployeeUserId: assignment2!.ownerUserId,
+    firstContactSlaDueAt: assignment2!.firstContactSlaDueAt,
+  });
+
+  const future = new Date(Date.now() + 20 * 60_000);
+  const breachesC1Only = await svc.sweepSlaBreaches(future, 'c1');
+  assert.equal(breachesC1Only.length, 1);
+  assert.equal(breachesC1Only[0]!.leadId, lead1.id);
+  const stillC2 = await leads.findById(lead2.id);
+  assert.equal(stillC2!.ownerEmployeeUserId, assignment2!.ownerUserId, "company c2's own breach must be untouched by a sweep scoped to c1");
+
+  const breachesEveryone = await svc.sweepSlaBreaches(future);
+  assert.equal(breachesEveryone.length, 1);
+  assert.equal(breachesEveryone[0]!.leadId, lead2.id);
+});

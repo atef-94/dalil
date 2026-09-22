@@ -490,18 +490,30 @@ export class InventoryService {
     });
   }
 
+  /** Mutex-protected on unitId — without this, a concurrent
+   * sweepExpiredReservationsDetailed() call racing this same unit could read
+   * a stale pre-contract status and overwrite 'contracted' back to
+   * 'available' after this write commits, reopening a sold unit for a
+   * second reservation. Both this method and the sweep now serialize on the
+   * same per-unit key, so whichever runs first is always fully visible to
+   * the other. */
   async markContracted(unitId: string): Promise<Unit> {
-    const unit = await this.units.findById(unitId);
-    if (!unit) throw new NotFoundError('unit not found');
-    return this.units.save({ ...unit, status: 'contracted' });
+    return this.mutex.runExclusive(unitId, async () => {
+      const unit = await this.units.findById(unitId);
+      if (!unit) throw new NotFoundError('unit not found');
+      return this.units.save({ ...unit, status: 'contracted' });
+    });
   }
 
   /** Releases a unit back onto the market — used when the contract that
-   * had contracted it is cancelled. */
+   * had contracted it is cancelled. Mutex-protected on unitId for the same
+   * reason as markContracted — see its comment. */
   async markAvailable(unitId: string): Promise<Unit> {
-    const unit = await this.units.findById(unitId);
-    if (!unit) throw new NotFoundError('unit not found');
-    return this.units.save({ ...unit, status: 'available' });
+    return this.mutex.runExclusive(unitId, async () => {
+      const unit = await this.units.findById(unitId);
+      if (!unit) throw new NotFoundError('unit not found');
+      return this.units.save({ ...unit, status: 'available' });
+    });
   }
 
   async getReservation(id: string): Promise<Reservation | undefined> {
@@ -522,8 +534,8 @@ export class InventoryService {
 
   /** Never touches a reservation that already converted or was cancelled.
    * Safe to call repeatedly — same shape as FinanceService.sweepOverdue. */
-  async sweepExpiredReservations(now = new Date()): Promise<number> {
-    const swept = await this.sweepExpiredReservationsDetailed(now);
+  async sweepExpiredReservations(now = new Date(), companyId?: string): Promise<number> {
+    const swept = await this.sweepExpiredReservationsDetailed(now, companyId);
     return swept.length;
   }
 
@@ -532,16 +544,32 @@ export class InventoryService {
    * `reservation.expired` domain event per reservation so the Automation
    * Engine can react (e.g. notify the assigned agent). Releases the unit
    * back to 'available' only when it's still 'reserved' — a unit that has
-   * since been contracted (or otherwise moved on) is never downgraded. */
-  async sweepExpiredReservationsDetailed(now = new Date()): Promise<Reservation[]> {
-    const candidates = await this.reservations.findAll((r) => r.status === 'active' && Date.parse(r.expiresAt) < now.getTime());
+   * since been contracted (or otherwise moved on) is never downgraded. The
+   * unit read-check-write runs inside the same per-unit KeyedMutex
+   * markContracted()/markAvailable()/holdUnit()/reserveUnit() use, so a
+   * signContract() landing concurrently on the same unit can never have its
+   * 'contracted' write silently reverted by a sweep that read a stale
+   * pre-contract status (the double-sell race this closes).
+   *
+   * `companyId` is optional and, when omitted, sweeps every tenant — correct
+   * for main.ts's periodic background tick, the only caller meant to act
+   * across the whole deployment. The manual HTTP route
+   * (/api/inventory/sweep-expired-reservations) MUST pass the requesting
+   * user's own companyId, or any tenant could trigger a mutation touching
+   * every other tenant's reservations. */
+  async sweepExpiredReservationsDetailed(now = new Date(), companyId?: string): Promise<Reservation[]> {
+    const candidates = await this.reservations.findAll(
+      (r) => (!companyId || r.companyId === companyId) && r.status === 'active' && Date.parse(r.expiresAt) < now.getTime(),
+    );
     const swept: Reservation[] = [];
     for (const reservation of candidates) {
       swept.push(await this.reservations.save({ ...reservation, status: 'cancelled' }));
-      const unit = await this.units.findById(reservation.unitId);
-      if (unit && unit.status === 'reserved') {
-        await this.units.save({ ...unit, status: 'available' });
-      }
+      await this.mutex.runExclusive(reservation.unitId, async () => {
+        const unit = await this.units.findById(reservation.unitId);
+        if (unit && unit.status === 'reserved') {
+          await this.units.save({ ...unit, status: 'available' });
+        }
+      });
     }
     return swept;
   }

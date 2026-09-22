@@ -12,6 +12,7 @@ async function main(): Promise<void> {
   const tokenSecret = process.env.TOKEN_SECRET ?? 'dev-secret';
   const secretStoreKey = process.env.SECRET_STORE_KEY ?? tokenSecret;
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const trustProxy = process.env.TRUST_PROXY === 'true';
 
   const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
     automationRetryBaseDelayMs: process.env.AUTOMATION_RETRY_BASE_DELAY_MS ? Number(process.env.AUTOMATION_RETRY_BASE_DELAY_MS) : 300,
     automationMaxConcurrentRuns: process.env.AUTOMATION_MAX_CONCURRENT_RUNS ? Number(process.env.AUTOMATION_MAX_CONCURRENT_RUNS) : undefined,
+    trustProxy,
   });
 
   // Crash recovery: any WorkflowRun left `running` in storage is one that

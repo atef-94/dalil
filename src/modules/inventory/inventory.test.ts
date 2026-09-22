@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InMemoryRepository } from '../../infra/repository.js';
+import { InMemoryRepository, type Repository } from '../../infra/repository.js';
 import { InventoryService, computePricePerMeter } from './inventory.service.js';
 import type { Consultant, Developer, Facility, Launch, Project, ProjectPhase, Reservation, SalesPhoneNumber, Unit, UnitHold } from '../../domain/types.js';
 
@@ -584,4 +584,107 @@ test('updateUnitDetails is non-destructive: patching one new field keeps the oth
   assert.equal(updated.bedrooms, 2, 'untouched field survives the partial update');
   assert.equal(updated.finishingType, 'Semi Finished', 'untouched field survives the partial update');
   assert.deepEqual(updated.view, ['Garden'], 'untouched field survives the partial update');
+});
+
+// ---- Phase 0 fix: double-sell race between sweepExpiredReservationsDetailed
+// and markContracted (both now serialize on the same per-unit KeyedMutex) ----
+
+// A plain `Promise.all([markContracted(id), sweep(future)])` does NOT
+// reliably discriminate this fix: InMemoryRepository has no real I/O delay,
+// so markContracted's much shorter await-chain always finishes committing
+// its write before the sweep's longer chain (findAll -> reservation.save ->
+// unit.findById -> unit.save) reaches its own unit read, regardless of
+// which call starts first in the array. Verified empirically — a version of
+// this test using bare Promise.all passed even against the pre-fix,
+// unguarded code. So instead we deterministically force the exact harmful
+// interleaving the fix closes, using an instrumented Repository<Unit> that
+// pauses the sweep's unit read (its `findById`) right after it captures a
+// stale 'reserved' snapshot, letting a concurrent markContracted run to
+// completion before the sweep is allowed to resume and (on unfixed code)
+// overwrite 'contracted' back to 'available' using that stale snapshot.
+test('concurrency (deterministic): a sweep paused mid-read cannot have its stale-snapshot write revert a markContracted that completed while it was paused', async () => {
+  const realUnits = new InMemoryRepository<Unit>();
+  let targetUnitId: string | undefined;
+  let gateReached = false;
+  let resolveReachedGate!: () => void;
+  const reachedGate = new Promise<void>((resolve) => {
+    resolveReachedGate = resolve;
+  });
+  let resolveReleaseGate!: () => void;
+  const releaseGate = new Promise<void>((resolve) => {
+    resolveReleaseGate = resolve;
+  });
+
+  // Wraps the real in-memory unit store so the sweep's read of the target
+  // unit (and only that read, only once) blocks until the test explicitly
+  // releases it — after a concurrent markContracted has had every chance
+  // to run to completion.
+  const instrumentedUnits: Repository<Unit> = {
+    async findById(id) {
+      const result = await realUnits.findById(id);
+      if (id === targetUnitId && !gateReached) {
+        gateReached = true;
+        resolveReachedGate();
+        await releaseGate;
+      }
+      return result;
+    },
+    findAll: (predicate) => realUnits.findAll(predicate),
+    save: (item) => realUnits.save(item),
+    deleteById: (id) => realUnits.deleteById(id),
+  };
+
+  const svc = new InventoryService(
+    instrumentedUnits,
+    new InMemoryRepository<UnitHold>(),
+    new InMemoryRepository<Reservation>(),
+    new InMemoryRepository<Project>(),
+  );
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const reservation = await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  const future = new Date(Date.parse(reservation.expiresAt) + 1000);
+
+  // Only arm the gate now — reserveUnit() above does its own internal
+  // findById(unitId) through this same instrumented repo, which must be
+  // left alone (not paused) or setup itself would hang.
+  targetUnitId = unit.id;
+  const sweepPromise = svc.sweepExpiredReservationsDetailed(future);
+  await reachedGate; // sweep has read the unit (still 'reserved') and is now paused
+
+  const markPromise = svc.markContracted(unit.id);
+  // Flush the microtask/macrotask queue so markContracted (fixed code: only
+  // queues on the mutex the paused sweep holds; unfixed code: runs to
+  // completion immediately, since nothing guards it) gets every chance to
+  // finish before we let the sweep resume.
+  await new Promise((resolve) => setImmediate(resolve));
+
+  resolveReleaseGate();
+  await Promise.all([sweepPromise, markPromise]);
+
+  const finalUnit = await svc.getUnit(unit.id);
+  assert.equal(
+    finalUnit!.status,
+    'contracted',
+    'a markContracted that completed while the sweep was mid-read must never be silently reverted once the sweep resumes and writes',
+  );
+});
+
+test('sweepExpiredReservationsDetailed only sweeps the given companyId when one is passed, and every company when omitted (Phase 0: cross-tenant sweep fix)', async () => {
+  const svc = freshService();
+  const unitA = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const unitB = await svc.createUnit({ companyId: 'c2', projectId: 'p1', code: 'B-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const reservationA = await svc.reserveUnit(unitA.id, 'lead-1', 'c1');
+  const reservationB = await svc.reserveUnit(unitB.id, 'lead-2', 'c2');
+  const future = new Date(Math.max(Date.parse(reservationA.expiresAt), Date.parse(reservationB.expiresAt)) + 1000);
+
+  const sweptForC1Only = await svc.sweepExpiredReservationsDetailed(future, 'c1');
+  assert.equal(sweptForC1Only.length, 1);
+  assert.equal(sweptForC1Only[0]!.companyId, 'c1');
+  assert.equal((await svc.getUnit(unitA.id))!.status, 'available', "company c1's own expired reservation was swept");
+  assert.equal((await svc.getUnit(unitB.id))!.status, 'reserved', "company c2's reservation must be untouched by a sweep scoped to c1");
+
+  const sweptForEveryone = await svc.sweepExpiredReservationsDetailed(future);
+  assert.equal(sweptForEveryone.length, 1);
+  assert.equal(sweptForEveryone[0]!.companyId, 'c2');
+  assert.equal((await svc.getUnit(unitB.id))!.status, 'available', 'an omitted companyId (the background tick) still sweeps every tenant');
 });

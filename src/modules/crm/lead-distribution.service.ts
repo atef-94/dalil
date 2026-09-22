@@ -135,10 +135,17 @@ export class LeadDistributionService {
    * pool has no one else to give it to). Safe to call repeatedly — each
    * breach resets the lead's own deadline, so a lead that keeps missing
    * SLA keeps cycling rather than being processed twice for the same
-   * window or getting stuck forever. */
-  async sweepSlaBreaches(now: Date = new Date()): Promise<SlaBreach[]> {
+   * window or getting stuck forever.
+   *
+   * `companyId` is optional and, when omitted, sweeps every tenant — correct
+   * for main.ts's periodic background tick, the only caller meant to act
+   * across the whole deployment. The manual HTTP route
+   * (/api/crm/lead-distribution/sweep) MUST pass the requesting user's own
+   * companyId, or any tenant could trigger a mutation (reassignment, SLA
+   * penalty points) touching every other tenant's leads. */
+  async sweepSlaBreaches(now: Date = new Date(), companyId?: string): Promise<SlaBreach[]> {
     const overdueCandidates = await this.leads.findAll(
-      (l) => !!l.firstContactSlaDueAt && Date.parse(l.firstContactSlaDueAt) < now.getTime(),
+      (l) => (!companyId || l.companyId === companyId) && !!l.firstContactSlaDueAt && Date.parse(l.firstContactSlaDueAt) < now.getTime(),
     );
 
     // A lead only breaches SLA while it's still sitting untouched in its

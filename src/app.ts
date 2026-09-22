@@ -164,6 +164,12 @@ export interface AppOptions {
   /** Max workflow runs the Automation Engine executes concurrently,
    * process-wide. Defaults to 10. */
   automationMaxConcurrentRuns?: number;
+  /** Whether to trust X-Forwarded-For for client-IP-based rate limiting —
+   * see HttpServerOptions.trustProxy for why this defaults to false (an
+   * untrusted client can otherwise spoof a fresh rate-limit bucket on every
+   * request). Only set true when genuinely deployed behind a trusted single
+   * reverse proxy. */
+  trustProxy?: boolean;
 }
 
 export interface Application {
@@ -219,17 +225,21 @@ export interface Application {
      * feed the Automation Engine (the HTTP route and main.ts's tick both
      * do). `finance.sweepOverdue()` itself stays event-free for existing
      * callers/tests that only care about the count. */
-    sweepOverdueAndEmit: () => Promise<number>;
+    /** `companyId` optional — omit it (as main.ts's tick does) to sweep
+     * every tenant; a per-tenant HTTP caller must always pass its own. */
+    sweepOverdueAndEmit: (companyId?: string) => Promise<number>;
     /** Auto-reassigns leads that breached their first-contact SLA and
      * emits one `lead.sla_breached` event per breach — use this instead
      * of `leadDistribution.sweepSlaBreaches()` wherever the sweep should
      * also feed the Automation Engine (the HTTP route and main.ts's tick
-     * both do), mirroring sweepOverdueAndEmit above. */
-    sweepSlaBreachesAndEmit: () => Promise<number>;
+     * both do), mirroring sweepOverdueAndEmit above. `companyId` optional,
+     * same rule as sweepOverdueAndEmit. */
+    sweepSlaBreachesAndEmit: (companyId?: string) => Promise<number>;
     /** Expires active Reservations past their expiresAt and emits one
      * `reservation.expired` domain event per reservation, mirroring
-     * sweepOverdueAndEmit/sweepSlaBreachesAndEmit above. */
-    sweepExpiredReservationsAndEmit: () => Promise<number>;
+     * sweepOverdueAndEmit/sweepSlaBreachesAndEmit above, including the
+     * optional `companyId` rule. */
+    sweepExpiredReservationsAndEmit: (companyId?: string) => Promise<number>;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -555,6 +565,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     nodeEnv: options.nodeEnv,
     globalRateLimiter,
     authRateLimiter,
+    trustProxy: options.trustProxy ?? false,
   });
 
   const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv);
@@ -577,9 +588,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
 
   // Shared by the manual sweep route below and main.ts's periodic tick, so
   // both paths emit the same `payment.overdue_swept` event per line instead
-  // of duplicating the sweep-then-emit logic.
-  const sweepOverdueAndEmit = async (): Promise<number> => {
-    const swept = await finance.sweepOverdueDetailed();
+  // of duplicating the sweep-then-emit logic. `companyId` omitted (main.ts's
+  // tick) sweeps every tenant; the manual HTTP route always passes its own.
+  const sweepOverdueAndEmit = async (companyId?: string): Promise<number> => {
+    const swept = await finance.sweepOverdueDetailed(new Date(), companyId);
     for (const line of swept) {
       await emitEvent({
         companyId: line.companyId,
@@ -593,8 +605,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
 
   // Same shared-by-manual-route-and-tick shape as sweepOverdueAndEmit
   // above, for the SLA sweep instead of the payment-overdue sweep.
-  const sweepSlaBreachesAndEmit = async (): Promise<number> => {
-    const breaches = await leadDistribution.sweepSlaBreaches();
+  const sweepSlaBreachesAndEmit = async (companyId?: string): Promise<number> => {
+    const breaches = await leadDistribution.sweepSlaBreaches(new Date(), companyId);
     for (const breach of breaches) {
       await emitEvent({
         companyId: breach.companyId,
@@ -610,8 +622,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // for expired reservations — closes the previously-open gap where a
   // reservation past its expiresAt never released its unit back onto the
   // market unless something else happened to touch that unit.
-  const sweepExpiredReservationsAndEmit = async (): Promise<number> => {
-    const expired = await inventory.sweepExpiredReservationsDetailed();
+  const sweepExpiredReservationsAndEmit = async (companyId?: string): Promise<number> => {
+    const expired = await inventory.sweepExpiredReservationsDetailed(new Date(), companyId);
     for (const reservation of expired) {
       await emitEvent({
         companyId: reservation.companyId,
@@ -1825,7 +1837,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {
       throw new ForbiddenError('missing edit:unit permission');
     }
-    const count = await sweepExpiredReservationsAndEmit();
+    const count = await sweepExpiredReservationsAndEmit(actor.companyId);
     return { status: 200, body: { swept: count } };
   });
 
@@ -1985,7 +1997,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'lead'))) {
       throw new ForbiddenError('missing edit:lead permission');
     }
-    const swept = await sweepSlaBreachesAndEmit();
+    const swept = await sweepSlaBreachesAndEmit(actor.companyId);
     return { status: 200, body: { swept } };
   });
 
@@ -2856,7 +2868,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
       throw new ForbiddenError('missing edit:payment_schedule permission');
     }
-    const count = await sweepOverdueAndEmit();
+    const count = await sweepOverdueAndEmit(actor.companyId);
     return { status: 200, body: { swept: count } };
   });
 
