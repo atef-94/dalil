@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState, selectInput } from '../ui.js';
 import { api } from '../api.js';
 import { can, getLocale } from '../state.js';
 import { t } from '../i18n.js';
@@ -554,6 +554,155 @@ export async function renderCrm(container) {
 
       if (lead.tags?.length) {
         body.appendChild(el('div', { style: 'margin-bottom:14px' }, lead.tags.map((tag) => badge(tag))));
+      }
+
+      // ---- Offers: unit code -> auto-filled unit/payment data -> a real
+      // Offer PDF the sales team can print or send over WhatsApp. Reuses
+      // the Quotation/Offer engine (quotation.service.ts) — the same
+      // deep-snapshot payment schedule, PDF, and WhatsApp document send
+      // every other Offer surface uses; nothing here is a second path. ----
+      if (can('quotation', 'create')) {
+        const unitCodeInput = el('input', { type: 'text', placeholder: 'Unit code, e.g. A-1203' });
+        const lookupBtn = el('button', {}, 'Look up');
+        const offerUnitInfo = el('div', { class: 'muted', style: 'margin-top:6px' });
+        const offerTemplateSelect = selectInput([]);
+        const offerDiscountInput = el('input', { type: 'number', placeholder: '0', value: '0' });
+        const createOfferBtn = el('button', { class: 'primary' }, 'Create Offer');
+        createOfferBtn.disabled = true;
+        let foundUnit = null;
+
+        api.get('/api/payment-plan-templates', { limit: 100 }).then((page) => {
+          clear(offerTemplateSelect);
+          page.items.forEach((tpl) => offerTemplateSelect.appendChild(el('option', { value: tpl.id }, tpl.name)));
+        }).catch(() => {});
+
+        lookupBtn.addEventListener('click', async () => {
+          clear(offerUnitInfo);
+          foundUnit = null;
+          createOfferBtn.disabled = true;
+          if (!unitCodeInput.value.trim()) return;
+          lookupBtn.disabled = true;
+          try {
+            const result = await api.get(`/api/quotations/units/by-code/${encodeURIComponent(unitCodeInput.value.trim())}`);
+            foundUnit = result.unit;
+            offerUnitInfo.appendChild(el('div', {}, [
+              el('strong', {}, `${result.project?.name || ''} — ${result.unit.unitType}`),
+              el('div', {}, `${result.unit.areaSqm} m² · ${Number(result.unit.listPrice).toLocaleString()}${result.unit.floorLabel ? ` · Floor ${result.unit.floorLabel}` : ''}${result.unit.buildingLabel ? ` · Building ${result.unit.buildingLabel}` : ''}`),
+            ]));
+            createOfferBtn.disabled = false;
+          } catch (err) {
+            offerUnitInfo.appendChild(errorBanner(err.message));
+          } finally {
+            lookupBtn.disabled = false;
+          }
+        });
+
+        const offersListSlot = el('div', { style: 'margin-top:10px' });
+
+        function downloadBase64(filename, contentType, base64) {
+          const byteChars = atob(base64);
+          const bytes = new Uint8Array(byteChars.length);
+          for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+          const blob = new Blob([bytes], { type: contentType });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+
+        async function downloadOfferPdf(quotation) {
+          try {
+            const result = await api.get(`/api/quotations/${quotation.id}/pdf`);
+            downloadBase64(result.filename, result.contentType, result.base64);
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+        }
+
+        async function sendOfferWhatsApp(quotation) {
+          const values = await formModal({
+            title: `Send Offer ${quotation.referenceNumber} via WhatsApp`,
+            fields: [
+              { key: 'to', label: 'WhatsApp number (intl format, e.g. 201234567890)', type: 'text', value: lead.phone || '' },
+              { key: 'message', label: 'Message', type: 'textarea', value: `Hi ${lead.fullName}, here is your offer.` },
+            ],
+            submitLabel: 'Send',
+          });
+          if (!values || !values.to?.trim()) return;
+          try {
+            await api.post(`/api/quotations/${quotation.id}/send-whatsapp`, { to: values.to.trim(), message: values.message });
+            toast('Offer sent via WhatsApp.', 'success');
+            await refreshDetail();
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+        }
+
+        async function loadOffers() {
+          clear(offersListSlot);
+          try {
+            const page = await api.get('/api/quotations', { leadId: lead.id, limit: 20 });
+            offersListSlot.appendChild(table(
+              [
+                { label: 'Reference', key: 'referenceNumber' },
+                { label: 'Status', render: (q) => statusBadge(q.status) },
+                { label: 'Created', render: (q) => new Date(q.createdAt).toLocaleString() },
+                { label: '', render: (q) => {
+                  const printBtn = el('button', {}, 'Print');
+                  printBtn.addEventListener('click', () => downloadOfferPdf(q));
+                  const waBtn = el('button', {}, 'Send via WhatsApp');
+                  waBtn.addEventListener('click', () => sendOfferWhatsApp(q));
+                  return el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, [printBtn, waBtn]);
+                } },
+              ],
+              page.items,
+              { empty: 'No offers created yet for this lead.' },
+            ));
+          } catch (err) {
+            offersListSlot.appendChild(errorBanner(err.message));
+          }
+        }
+
+        createOfferBtn.addEventListener('click', async () => {
+          if (!foundUnit || !offerTemplateSelect.value) {
+            toast('Look up a unit and choose a payment plan first.', 'error');
+            return;
+          }
+          createOfferBtn.disabled = true;
+          try {
+            const quotation = await api.post('/api/quotations', {
+              unitId: foundUnit.id,
+              paymentPlanTemplateId: offerTemplateSelect.value,
+              discountPercent: Number(offerDiscountInput.value) || 0,
+              leadId: lead.id,
+            });
+            toast(`Offer ${quotation.referenceNumber} created.`, 'success');
+            unitCodeInput.value = '';
+            clear(offerUnitInfo);
+            foundUnit = null;
+            await loadOffers();
+          } catch (err) {
+            toast(err.message, 'error');
+          } finally {
+            createOfferBtn.disabled = false;
+          }
+        });
+
+        body.appendChild(el('div', { class: 'card' }, [
+          el('h4', { style: 'margin-top:0' }, 'Offers'),
+          el('div', { class: 'form-row' }, [
+            el('div', {}, [el('label', {}, 'Unit code'), unitCodeInput]),
+            el('div', { style: 'align-self:flex-end' }, lookupBtn),
+            el('div', {}, [el('label', {}, 'Payment plan'), offerTemplateSelect]),
+            el('div', {}, [el('label', {}, 'Discount %'), offerDiscountInput]),
+          ]),
+          offerUnitInfo,
+          el('div', { class: 'form-actions' }, [createOfferBtn]),
+          offersListSlot,
+        ]));
+        await loadOffers();
       }
 
       // ---- Log activity: comment / call / WhatsApp note ----
