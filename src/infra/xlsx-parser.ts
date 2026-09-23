@@ -102,7 +102,18 @@ export async function parseXlsx(buffer: Buffer, fields?: ImportFieldDef[]): Prom
   const allRows: string[][] = [];
   sheet.eachRow({ includeEmpty: false }, (row) => {
     const values = row.values as unknown[]; // exceljs pads index 0; real cells start at 1
-    allRows.push(values.slice(1).map(cellToString));
+    // A row whose trailing/middle cells were never touched (no value, no
+    // style) comes back as a genuinely sparse array — real holes, not
+    // `undefined` elements. `.map()` silently skips holes, which used to be
+    // "safe" only because every consumer downstream (`.map`/`.forEach`/
+    // `.filter`) also skips them — but a plain `for...of` loop (as
+    // suggestMapping uses) does NOT skip holes, and yields `undefined` for
+    // each one, which then crashes the first `.replace()` call on it. Build
+    // the row explicitly by index instead, so every position — hole or not
+    // — becomes a real string via cellToString(undefined) === ''.
+    const cells: string[] = [];
+    for (let i = 1; i < values.length; i++) cells.push(cellToString(values[i]));
+    allRows.push(cells);
   });
   if (allRows.length === 0) return { headers: [], rows: [] };
 

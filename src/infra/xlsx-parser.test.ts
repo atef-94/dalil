@@ -129,3 +129,32 @@ test('parseXlsx falls back to row 1 when no row scores higher (an unrecognized h
   const { headers } = await parseXlsx(buf, INVENTORY_LIKE_FIELDS);
   assert.deepEqual(headers, ['Column Alpha', 'Column Beta', 'Column Gamma']);
 });
+
+// ---- Crash fix: a row with a genuinely untouched cell (never given a
+// value or style) reads back from exceljs as a real sparse-array hole, not
+// an empty string. sheet.addRow([...]) above always writes every cell, so
+// it never reproduces this — a real developer export can and does leave
+// cells like that. detectHeaderRowIndex runs suggestMapping's `for...of`
+// loop directly over each candidate row, which (unlike .map/.forEach)
+// visits holes and yields `undefined` for them, crashing the first
+// .replace() call inside normalizeHeader. This actually happened importing
+// a real production file once the header-auto-detection above shipped. ----
+
+test('parseXlsx does not crash on a row with a genuinely untouched (sparse) cell', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  const header = sheet.getRow(1);
+  header.getCell(1).value = 'Project';
+  // Cell 2 is deliberately never touched — a real hole, not ''.
+  header.getCell(3).value = 'Unit Type';
+  header.commit();
+  const dataRow = sheet.getRow(2);
+  dataRow.getCell(1).value = 'Zed Towers';
+  dataRow.getCell(3).value = 'Apartment';
+  dataRow.commit();
+  const buf = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  const { headers, rows } = await parseXlsx(buf, INVENTORY_LIKE_FIELDS);
+  assert.deepEqual(headers, ['Project', 'Unit Type']);
+  assert.equal(rows.length, 1);
+});
