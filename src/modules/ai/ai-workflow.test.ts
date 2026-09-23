@@ -286,7 +286,7 @@ const FULL_GRANTS: { action: ActionName; resource: ResourceName }[] = [
  * overridden) real requirement/budget fields so the multi-step flow has
  * something concrete to match against. */
 async function createHighValueLead(h: Harness, companyId: string, overrides: Partial<Lead> = {}): Promise<Lead> {
-  const qualified = await stageByKey(h.crmStages, companyId, 'qualified');
+  const qualified = await stageByKey(h.crmStages, companyId, 'meeting');
   const lead = await h.crm.createLead({
     companyId,
     fullName: 'Jane Prospect',
@@ -340,7 +340,7 @@ test('a lead below the high-value score threshold completes immediately without 
 test('a high-value lead with no captured requirements escalates for a human qualifying call', async () => {
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', FULL_GRANTS);
-  const qualified = await stageByKey(h.crmStages, 'c1', 'qualified');
+  const qualified = await stageByKey(h.crmStages, 'c1', 'meeting');
   const lead = await h.crm.createLead({
     companyId: 'c1', fullName: 'No Requirements', phone: '+201000000098', email: 'a@b.com',
     sourceId: 'src', stageId: qualified.id, ownerEmployeeUserId: 'agent-1',

@@ -14,7 +14,7 @@ import type {
 } from '../domain/types.js';
 import type { Repository } from './repository.js';
 import { hashPassword } from './security.js';
-import { CrmStageService } from '../modules/crm/crm-stage.service.js';
+import { CrmStageService, DEFAULT_STAGES } from '../modules/crm/crm-stage.service.js';
 import { CrmService } from '../modules/crm/crm.service.js';
 
 export interface SeedRepos {
@@ -93,10 +93,15 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
   const companyId = 'company-demo';
 
   // Runs on every boot, existing company or not — seedDefaultStages() is a
-  // no-op once a company has stages, and migrateLegacyStatuses() is a no-op
-  // once every lead has a stageId, so this is cheap and safe to repeat.
+  // no-op once a company has stages, syncMissingStages() only ever adds a
+  // stage the company doesn't have yet (never touches one it does, so a
+  // company's real lead data and any admin customization stay intact even
+  // when the default pipeline itself changes later), and
+  // migrateLegacyStatuses() is a no-op once every lead has a stageId — all
+  // cheap and safe to repeat.
   const crmStages = new CrmStageService(repos.crmStages);
   await crmStages.seedDefaultStages(companyId);
+  await crmStages.syncMissingStages(companyId, DEFAULT_STAGES);
   await new CrmService(repos.leads, crmStages).migrateLegacyStatuses(companyId);
 
   const existing = await repos.companies.findById(companyId);

@@ -34,7 +34,7 @@ async function stageByKey(crmStages: CrmStageService, companyId: string, key: st
 test('salesFunnel counts leads by CRM stage, scoped to the company', async () => {
   const { svc, leads, crmStages } = await freshService();
   const fresh = await stageByKey(crmStages, 'c1', 'fresh');
-  const qualified = await stageByKey(crmStages, 'c1', 'qualified');
+  const qualified = await stageByKey(crmStages, 'c1', 'meeting');
   const freshC2 = await stageByKey(crmStages, 'c2', 'fresh');
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', stageId: fresh.id, createdAt: new Date().toISOString() });
   await leads.save({ id: 'l2', companyId: 'c1', fullName: 'B', phone: '2', stageId: qualified.id, createdAt: new Date().toISOString() });
@@ -42,7 +42,7 @@ test('salesFunnel counts leads by CRM stage, scoped to the company', async () =>
   const funnel = await svc.salesFunnel('c1');
   assert.equal(funnel.totalLeads, 2);
   assert.equal(funnel.stages.find((s) => s.stageKey === 'fresh')!.count, 1);
-  assert.equal(funnel.stages.find((s) => s.stageKey === 'qualified')!.count, 1);
+  assert.equal(funnel.stages.find((s) => s.stageKey === 'meeting')!.count, 1);
 });
 
 test('pipelineSummary counts opportunities by stage and contracts by status', async () => {
@@ -85,7 +85,7 @@ test('brokerPerformance aggregates commissions by broker company and status', as
 
 test('speedToFirstContact averages the real gap between lead creation and the first stage-change audit entry', async () => {
   const { svc, leads, auditLog, crmStages } = await freshService();
-  const contacted = await stageByKey(crmStages, 'c1', 'contacted');
+  const contacted = await stageByKey(crmStages, 'c1', 'no_answer');
   const createdAt = new Date(Date.now() - 5 * 60 * 60 * 1000); // 5 hours ago
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', stageId: contacted.id, createdAt: createdAt.toISOString() });
   await auditLog.record({ companyId: 'c1', actorUserId: 'u1', action: 'edit', resource: 'lead', resourceId: 'l1', metadata: { toStageId: contacted.id } });
@@ -105,8 +105,8 @@ test('speedToFirstContact returns null with zero sample size when no lead has ev
 
 test('speedToFirstContact only counts the FIRST stage-change event per lead', async () => {
   const { svc, leads, auditLog, crmStages } = await freshService();
-  const contacted = await stageByKey(crmStages, 'c1', 'contacted');
-  const qualified = await stageByKey(crmStages, 'c1', 'qualified');
+  const contacted = await stageByKey(crmStages, 'c1', 'no_answer');
+  const qualified = await stageByKey(crmStages, 'c1', 'meeting');
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', stageId: qualified.id, createdAt: new Date(Date.now() - 10 * 60 * 60 * 1000).toISOString() });
   await auditLog.record({ companyId: 'c1', actorUserId: 'u1', action: 'edit', resource: 'lead', resourceId: 'l1', metadata: { toStageId: contacted.id } });
   await auditLog.record({ companyId: 'c1', actorUserId: 'u1', action: 'edit', resource: 'lead', resourceId: 'l1', metadata: { toStageId: qualified.id } });
@@ -117,17 +117,17 @@ test('speedToFirstContact only counts the FIRST stage-change event per lead', as
 test('funnelConversionRates computes stage-to-stage percentages from the current snapshot', async () => {
   const { svc, leads, crmStages } = await freshService();
   const fresh = await stageByKey(crmStages, 'c1', 'fresh');
-  const contacted = await stageByKey(crmStages, 'c1', 'contacted');
-  const qualified = await stageByKey(crmStages, 'c1', 'qualified');
-  const won = await stageByKey(crmStages, 'c1', 'won');
+  const contacted = await stageByKey(crmStages, 'c1', 'no_answer');
+  const qualified = await stageByKey(crmStages, 'c1', 'meeting');
+  const won = await stageByKey(crmStages, 'c1', 'contacts');
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', stageId: fresh.id, createdAt: new Date().toISOString() });
   await leads.save({ id: 'l2', companyId: 'c1', fullName: 'B', phone: '2', stageId: contacted.id, createdAt: new Date().toISOString() });
   await leads.save({ id: 'l3', companyId: 'c1', fullName: 'C', phone: '3', stageId: qualified.id, createdAt: new Date().toISOString() });
   await leads.save({ id: 'l4', companyId: 'c1', fullName: 'D', phone: '4', stageId: won.id, createdAt: new Date().toISOString() });
   const rates = await svc.funnelConversionRates('c1');
   assert.equal(rates.totalLeads, 4);
-  const freshToContacted = rates.stageConversion.find((s) => s.fromStageName === 'Fresh Leads' && s.toStageName === 'Contacted');
-  assert.equal(freshToContacted!.conversionPercent, 75); // 3 of 4 are at-or-beyond Contacted
+  const freshToContacted = rates.stageConversion.find((s) => s.fromStageName === 'Fresh Leads' && s.toStageName === 'No Answer');
+  assert.equal(freshToContacted!.conversionPercent, 75); // 3 of 4 are at-or-beyond No Answer
   assert.equal(rates.overallWinRatePercent, 25); // 1 of 4 reached the Won stage
 });
 
@@ -143,8 +143,8 @@ test('funnelConversionRates returns all zeros for an empty pipeline instead of d
 test('costPerQualifiedLead divides real campaign budget by real campaign-attributed qualified leads', async () => {
   const { svc, leads, campaigns, crmStages } = await freshService();
   const fresh = await stageByKey(crmStages, 'c1', 'fresh');
-  const qualified = await stageByKey(crmStages, 'c1', 'qualified');
-  const won = await stageByKey(crmStages, 'c1', 'won');
+  const qualified = await stageByKey(crmStages, 'c1', 'meeting');
+  const won = await stageByKey(crmStages, 'c1', 'contacts');
   await campaigns.save({ id: 'camp1', companyId: 'c1', name: 'Spring Promo', channel: 'digital', budget: 1000, startDate: new Date().toISOString(), status: 'active', createdAt: new Date().toISOString() });
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', sourceId: 'camp1', stageId: qualified.id, createdAt: new Date().toISOString() });
   await leads.save({ id: 'l2', companyId: 'c1', fullName: 'B', phone: '2', sourceId: 'camp1', stageId: fresh.id, createdAt: new Date().toISOString() });
@@ -165,7 +165,7 @@ test('costPerQualifiedLead returns null when no campaign-attributed lead has qua
 test('lostReasonBreakdown groups leads by exact lostReason text, most frequent first', async () => {
   const { svc, leads, crmStages } = await freshService();
   const fresh = await stageByKey(crmStages, 'c1', 'fresh');
-  const lost = await stageByKey(crmStages, 'c1', 'lost');
+  const lost = await stageByKey(crmStages, 'c1', 'cancellation');
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', stageId: lost.id, lostReason: 'Price too high', createdAt: new Date().toISOString() });
   await leads.save({ id: 'l2', companyId: 'c1', fullName: 'B', phone: '2', stageId: lost.id, lostReason: 'Price too high', createdAt: new Date().toISOString() });
   await leads.save({ id: 'l3', companyId: 'c1', fullName: 'C', phone: '3', stageId: lost.id, lostReason: 'Went with a competitor', createdAt: new Date().toISOString() });

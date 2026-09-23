@@ -56,8 +56,8 @@ test('updateStatus rejects a campaign belonging to a different company (cross-te
 
 test('campaignPerformance attributes leads by sourceId and computes conversion rate', async () => {
   const { svc, leads, crmStages } = await freshService();
-  const won = await stageByKey(crmStages, 'c1', 'won');
-  const qualified = await stageByKey(crmStages, 'c1', 'qualified');
+  const won = await stageByKey(crmStages, 'c1', 'contacts');
+  const qualified = await stageByKey(crmStages, 'c1', 'meeting');
   const fresh = await stageByKey(crmStages, 'c1', 'fresh');
   const campaign = await svc.createCampaign({ companyId: 'c1', name: 'Spring Launch', channel: 'digital', budget: 5000, startDate: '2026-03-01' });
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', sourceId: campaign.id, stageId: won.id, createdAt: new Date().toISOString() });

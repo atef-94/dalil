@@ -489,7 +489,7 @@ test('suggestNextAction proposes advancing a well-scored new lead to contacted',
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Promising Client', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'human-1' });
-  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
+  const contacted = await stageByKey(h.crmStages, 'c1', 'no_answer');
   const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
   assert.equal(decision.status, 'proceeded');
   assert.equal(decision.chosenActionType, 'update_lead_status');
@@ -519,7 +519,7 @@ test('an escalated decision has no riskLevel/requiredPermission (no action was c
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Qualified Client', phone: '0100' });
-  const recycle = await stageByKey(h.crmStages, 'c1', 'recycle');
+  const recycle = await stageByKey(h.crmStages, 'c1', 'cold_call');
   await h.crm.moveToStage(lead.id, 'c1', recycle.id);
   const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
   assert.equal(decision.status, 'escalated');
@@ -534,7 +534,7 @@ test('suggestNextAction reports no_action for a lead already lost, without propo
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Gone Cold', phone: '0100' });
-  const lost = await stageByKey(h.crmStages, 'c1', 'lost');
+  const lost = await stageByKey(h.crmStages, 'c1', 'cancellation');
   await h.crm.moveToStage(lead.id, 'c1', lost.id, 'went with a competitor');
   const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
   assert.equal(decision.status, 'no_action');
@@ -546,7 +546,7 @@ test('suggestNextAction executes automatically when the company opts a lead acti
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Hot Lead', phone: '0100', sourceId: 'campaign-1', ownerEmployeeUserId: 'human-1' });
-  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
+  const contacted = await stageByKey(h.crmStages, 'c1', 'no_answer');
   const decision = await h.ai.suggestNextAction(lead.id, 'c1', 'human-1');
   assert.equal(decision.status, 'proceeded');
   assert.equal(decision.resultActionStatus, 'executed');
@@ -771,7 +771,7 @@ test('executing update_lead_status re-reads the lead and records verificationSta
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'human-1' });
-  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
+  const contacted = await stageByKey(h.crmStages, 'c1', 'no_answer');
   const request = await h.ai.requestAction({
     companyId: 'c1',
     requestedByUserId: 'human-1',
@@ -818,7 +818,7 @@ test('verificationStatus is undefined for a suggested/pending action — verific
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'human-1' });
-  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
+  const contacted = await stageByKey(h.crmStages, 'c1', 'no_answer');
   const request = await h.ai.requestAction({
     companyId: 'c1',
     requestedByUserId: 'human-1',
@@ -1025,7 +1025,7 @@ test('a lead is never messaged twice automatically — the second decision advan
   assert.equal(second.chosenActionType, 'update_lead_status');
   assert.equal(h.integrationFetchCalls.length, 1);
 
-  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
+  const contacted = await stageByKey(h.crmStages, 'c1', 'no_answer');
   const updated = await h.crm.getLead(lead.id);
   assert.equal(updated!.stageId, contacted.id);
 });
@@ -1034,7 +1034,7 @@ test('a lead at the last stage before a Won/Lost decision escalates to a human i
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Qualified Client', phone: '0100' });
-  const recycle = await stageByKey(h.crmStages, 'c1', 'recycle');
+  const recycle = await stageByKey(h.crmStages, 'c1', 'cold_call');
   await h.crm.moveToStage(lead.id, 'c1', recycle.id);
   const decision = await h.ai.decide('sales', 'c1', lead.id, 'human-1');
   assert.equal(decision.status, 'escalated');
@@ -1305,7 +1305,7 @@ test('listAgentDecisions and getAgentStats reflect decisions across agents', asy
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', [CREATE_TASK_GRANT, EDIT_LEAD_GRANT]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Stats Lead', phone: '0100' });
-  const recycle = await stageByKey(h.crmStages, 'c1', 'recycle');
+  const recycle = await stageByKey(h.crmStages, 'c1', 'cold_call');
   await h.crm.moveToStage(lead.id, 'c1', recycle.id);
   await h.ai.decide('sales', 'c1', lead.id, 'human-1'); // escalates (last stage before Won/Lost)
 

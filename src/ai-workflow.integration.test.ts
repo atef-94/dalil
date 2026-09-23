@@ -59,8 +59,8 @@ test('AI Workflow Engine: full lead-followup plan runs over real HTTP, waits, th
     const stagesRes = await call(base, 'GET', '/api/crm/stages', undefined, headers);
     assert.equal(stagesRes.status, 200);
     const stages = (stagesRes.body as { items?: { id: string; key: string }[] }).items ?? (stagesRes.body as { id: string; key: string }[]);
-    const qualifiedStage = (stages as { id: string; key: string }[]).find((s) => s.key === 'qualified')!;
-    assert.ok(qualifiedStage, 'expected a seeded "qualified" stage');
+    const qualifiedStage = (stages as { id: string; key: string }[]).find((s) => s.key === 'meeting')!;
+    assert.ok(qualifiedStage, 'expected a seeded "meeting" stage');
 
     const leadRes = await call(base, 'POST', '/api/crm/leads', {
       fullName: `AI Workflow Lead ${suffix}`, phone: `+2010${suffix}`.slice(0, 14), email: `lead-${suffix}@example.com`,

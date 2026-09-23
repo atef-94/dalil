@@ -80,7 +80,7 @@ test('reorderStages reassigns order by the given sequence, rejects a foreign sta
 test('setDefaultStage moves the flag — exactly one default remains', async () => {
   const svc = freshService();
   const stages = await svc.seedDefaultStages('c1');
-  const contacted = stages.find((s) => s.key === 'contacted')!;
+  const contacted = stages.find((s) => s.key === 'no_answer')!;
   await svc.setDefaultStage(contacted.id, 'c1');
   const all = await svc.listStages('c1');
   const defaults = all.filter((s) => s.isDefault);
@@ -107,4 +107,45 @@ test('getStage and archiveStage reject a stage belonging to a different company 
 test('getDefaultStage throws when a company has no default stage configured', async () => {
   const svc = freshService();
   await assert.rejects(() => svc.getDefaultStage('empty-co'));
+});
+
+// ---- syncMissingStages: when the seeded default pipeline itself changes
+// after companies already exist (seedDefaultStages is a no-op for them),
+// this additive-only sync backfills any newly-desired stage the company
+// doesn't have yet — without touching anything it already has, so no
+// lead's stageId reference or admin customization is ever disturbed. ----
+
+test('syncMissingStages adds only the stages a company is missing, appended after its current highest order', async () => {
+  const svc = freshService();
+  await svc.seedDefaultStages('c1');
+  const added = await svc.syncMissingStages('c1', [
+    { key: 'fresh', name: 'Should not be re-added' }, // already exists — skipped
+    { key: 'referral', name: 'Referral', isWon: false },
+  ]);
+  assert.equal(added.length, 1);
+  assert.equal(added[0]!.key, 'referral');
+  assert.equal(added[0]!.name, 'Referral');
+  assert.equal(added[0]!.order, 12); // after the 12 seeded defaults
+
+  const all = await svc.listStages('c1', true);
+  assert.equal(all.length, 13);
+  assert.equal(all.filter((s) => s.key === 'fresh').length, 1); // not duplicated
+});
+
+test('syncMissingStages never renames, reorders, or touches an existing stage', async () => {
+  const svc = freshService();
+  await svc.seedDefaultStages('c1');
+  const renamed = await svc.updateStage((await svc.listStages('c1')).find((s) => s.key === 'fresh')!.id, 'c1', { name: 'Admin Renamed Fresh' });
+  await svc.syncMissingStages('c1', [{ key: 'fresh', name: 'Fresh Leads' }, { key: 'new_key', name: 'New Stage' }]);
+  const fresh = (await svc.listStages('c1')).find((s) => s.key === 'fresh')!;
+  assert.equal(fresh.id, renamed.id);
+  assert.equal(fresh.name, 'Admin Renamed Fresh'); // untouched by the sync
+});
+
+test('syncMissingStages is a no-op for a company with no stages yet (goes through seedDefaultStages instead)', async () => {
+  const svc = freshService();
+  const added = await svc.syncMissingStages('brand-new-co', [{ key: 'fresh', name: 'Fresh Leads' }]);
+  assert.deepEqual(added, []);
+  const all = await svc.listStages('brand-new-co', true);
+  assert.equal(all.length, 0);
 });

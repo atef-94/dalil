@@ -50,7 +50,7 @@ test('dedup is scoped per company: the same phone is allowed in a different comp
 test('moveToStage moves a lead into a different CRM stage, keeping the same lead id (never duplicated)', async () => {
   const { svc, crmStages } = await freshService();
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const contacted = await stageByKey(crmStages, 'c1', 'contacted');
+  const contacted = await stageByKey(crmStages, 'c1', 'no_answer');
   const updated = await svc.moveToStage(lead.id, 'c1', contacted.id);
   assert.equal(updated.id, lead.id);
   assert.equal(updated.stageId, contacted.id);
@@ -59,8 +59,8 @@ test('moveToStage moves a lead into a different CRM stage, keeping the same lead
 test('moveToStage allows moving a lead backward in the pipeline (no forward-only lock, unlike the old status enum)', async () => {
   const { svc, crmStages } = await freshService();
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const qualified = await stageByKey(crmStages, 'c1', 'qualified');
-  const contacted = await stageByKey(crmStages, 'c1', 'contacted');
+  const qualified = await stageByKey(crmStages, 'c1', 'meeting');
+  const contacted = await stageByKey(crmStages, 'c1', 'no_answer');
   await svc.moveToStage(lead.id, 'c1', qualified.id);
   const backward = await svc.moveToStage(lead.id, 'c1', contacted.id);
   assert.equal(backward.stageId, contacted.id);
@@ -69,14 +69,14 @@ test('moveToStage allows moving a lead backward in the pipeline (no forward-only
 test('moving a lead into a Lost-flagged stage without a lostReason is rejected', async () => {
   const { svc, crmStages } = await freshService();
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const lost = await stageByKey(crmStages, 'c1', 'lost');
+  const lost = await stageByKey(crmStages, 'c1', 'cancellation');
   await assert.rejects(() => svc.moveToStage(lead.id, 'c1', lost.id));
 });
 
 test('moving a lead into a Lost-flagged stage with a lostReason succeeds and records the reason', async () => {
   const { svc, crmStages } = await freshService();
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const lost = await stageByKey(crmStages, 'c1', 'lost');
+  const lost = await stageByKey(crmStages, 'c1', 'cancellation');
   const updated = await svc.moveToStage(lead.id, 'c1', lost.id, 'Went with a competitor');
   assert.equal(updated.stageId, lost.id);
   assert.equal(updated.lostReason, 'Went with a competitor');
@@ -85,8 +85,8 @@ test('moving a lead into a Lost-flagged stage with a lostReason succeeds and rec
 test('a lead in a Lost-flagged stage can be moved out again (fixable, not a hard lock)', async () => {
   const { svc, crmStages } = await freshService();
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const lost = await stageByKey(crmStages, 'c1', 'lost');
-  const contacted = await stageByKey(crmStages, 'c1', 'contacted');
+  const lost = await stageByKey(crmStages, 'c1', 'cancellation');
+  const contacted = await stageByKey(crmStages, 'c1', 'no_answer');
   await svc.moveToStage(lead.id, 'c1', lost.id, 'Went with a competitor');
   const revived = await svc.moveToStage(lead.id, 'c1', contacted.id);
   assert.equal(revived.stageId, contacted.id);
@@ -95,14 +95,14 @@ test('a lead in a Lost-flagged stage can be moved out again (fixable, not a hard
 test('moveToStage rejects a lead belonging to a different company (cross-tenant)', async () => {
   const { svc, crmStages } = await freshService();
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const contacted = await stageByKey(crmStages, 'c2', 'contacted');
+  const contacted = await stageByKey(crmStages, 'c2', 'no_answer');
   await assert.rejects(() => svc.moveToStage(lead.id, 'c2', contacted.id));
 });
 
 test('moveToStage rejects moving a lead into an archived CRM stage', async () => {
   const { svc, crmStages } = await freshService();
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const recycle = await stageByKey(crmStages, 'c1', 'recycle');
+  const recycle = await stageByKey(crmStages, 'c1', 'cold_call');
   await crmStages.archiveStage(recycle.id, 'c1');
   await assert.rejects(() => svc.moveToStage(lead.id, 'c1', recycle.id));
 });

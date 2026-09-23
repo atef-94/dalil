@@ -32,28 +32,31 @@ function slugify(name: string): string {
 
 /**
  * The default pipeline every company gets on first boot — matches the
- * stage list the CRM restructuring was built around (Fresh Leads through
- * Won/Lost/Unqualified/Recycle). Seeded once per company, then fully
- * editable: an admin can rename, reorder, deactivate, or add their own
- * stages on top without touching this list again. `key` is a stable slug
- * for these defaults only — nothing in business logic branches on it,
- * only on the isDefault/isWon/isLost/order flags, so a renamed or
- * custom-added stage behaves correctly with zero code changes.
+ * real operational sales pipeline this was built around (Fresh Leads
+ * through Contacts/Cancellation/Not Interested/Hold/Cold Call). Seeded
+ * once per company, then fully editable: an admin can rename, reorder,
+ * deactivate, or add their own stages on top without touching this list
+ * again. `key` is a stable slug for these defaults only — nothing in
+ * business logic branches on it, only on the isDefault/isWon/isLost/order
+ * flags, so a renamed or custom-added stage behaves correctly with zero
+ * code changes.
  */
 const DEFAULT_STAGES: Array<Omit<CreateStageInput, 'companyId'>> = [
   { key: 'fresh', name: 'Fresh Leads', order: 0, isDefault: true },
-  { key: 'contacted', name: 'Contacted', order: 1 },
+  { key: 'no_answer', name: 'No Answer', order: 1 },
   { key: 'follow_up', name: 'Follow Up', order: 2 },
-  { key: 'qualified', name: 'Qualified', order: 3 },
-  { key: 'meeting', name: 'Meeting / Appointment', order: 4 },
-  { key: 'negotiation', name: 'Negotiation', order: 5 },
-  { key: 'proposal', name: 'Proposal / Offer', order: 6 },
-  { key: 'booking', name: 'Booking', order: 7 },
-  { key: 'won', name: 'Won', order: 8, isWon: true, allowAutomationMove: false },
-  { key: 'unqualified', name: 'Unqualified', order: 9, isLost: true },
-  { key: 'recycle', name: 'Recycle / Later', order: 10 },
-  { key: 'lost', name: 'Lost', order: 11, isLost: true },
+  { key: 'meeting', name: 'Meeting', order: 3 },
+  { key: 'offers', name: 'Offers', order: 4 },
+  { key: 'reservations', name: 'Reservations', order: 5 },
+  { key: 'contacts', name: 'Contacts', order: 6, isWon: true, allowAutomationMove: false },
+  { key: 'follow_up_after_meeting', name: 'Follow Up After Meeting', order: 7 },
+  { key: 'cancellation', name: 'Cancellation', order: 8, isLost: true },
+  { key: 'not_interested', name: 'Not Interested', order: 9, isLost: true },
+  { key: 'hold', name: 'Hold', order: 10 },
+  { key: 'cold_call', name: 'Cold Call', order: 11 },
 ];
+
+export { DEFAULT_STAGES };
 
 export class CrmStageService {
   constructor(private readonly stages: Repository<CrmStage>) {}
@@ -89,6 +92,46 @@ export class CrmStageService {
       );
     }
     return created;
+  }
+
+  /** Additive-only sync for a company that already has stages (so
+   * seedDefaultStages is a no-op for it): adds any stage from a desired
+   * list whose `key` doesn't exist yet, appended after the current
+   * highest order. Never renames, reorders, or removes an existing
+   * stage — so no lead's stageId reference or admin customization is
+   * ever touched. Used when the seeded default pipeline itself changes
+   * after companies already exist (see seed.ts). */
+  async syncMissingStages(companyId: string, desired: Array<Omit<CreateStageInput, 'companyId'>>): Promise<CrmStage[]> {
+    const existing = await this.stages.findAll((s) => s.companyId === companyId);
+    if (existing.length === 0) return []; // a brand-new company goes through seedDefaultStages instead
+    const existingKeys = new Set(existing.map((s) => s.key));
+    let nextOrder = Math.max(...existing.map((s) => s.order)) + 1;
+    const now = new Date().toISOString();
+    const added: CrmStage[] = [];
+    for (const def of desired) {
+      if (!def.key || existingKeys.has(def.key)) continue;
+      added.push(
+        await this.stages.save({
+          id: randomUUID(),
+          companyId,
+          key: def.key,
+          name: def.name,
+          description: def.description,
+          icon: def.icon,
+          color: def.color,
+          order: nextOrder++,
+          isActive: true,
+          isDefault: false, // never silently reassign the company's default stage
+          isWon: def.isWon ?? false,
+          isLost: def.isLost ?? false,
+          allowManualMove: def.allowManualMove ?? true,
+          allowAutomationMove: def.allowAutomationMove ?? true,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+    }
+    return added;
   }
 
   async listStages(companyId: string, includeInactive = false): Promise<CrmStage[]> {

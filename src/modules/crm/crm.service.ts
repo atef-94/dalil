@@ -78,10 +78,10 @@ function sanitizeCustomFields(input: LeadCustomFields): LeadCustomFields {
  * still sends `params.status` instead of `params.stageId`). */
 export const LEGACY_STATUS_TO_STAGE_KEY: Record<string, string> = {
   new: 'fresh',
-  contacted: 'contacted',
-  qualified: 'qualified',
-  opportunity: 'won',
-  lost: 'lost',
+  contacted: 'no_answer',
+  qualified: 'meeting',
+  opportunity: 'contacts',
+  lost: 'cancellation',
 };
 
 export class CrmService {

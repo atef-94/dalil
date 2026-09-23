@@ -11,8 +11,8 @@ async function setup() {
 
   const lead = await crm.createLead({ companyId, fullName: 'Payment Import Client', phone: '0500000001', ownerEmployeeUserId: agentUserId });
   const stages = await crmStages.listStages(companyId, true);
-  await crm.moveToStage(lead.id, companyId, stages.find((s) => s.key === 'contacted')!.id);
-  await crm.moveToStage(lead.id, companyId, stages.find((s) => s.key === 'qualified')!.id);
+  await crm.moveToStage(lead.id, companyId, stages.find((s) => s.key === 'no_answer')!.id);
+  await crm.moveToStage(lead.id, companyId, stages.find((s) => s.key === 'meeting')!.id);
 
   const opportunity = await sales.createOpportunity({ companyId, leadId: lead.id, ownerEmployeeUserId: agentUserId });
   const project = await inventory.createProject({ companyId, name: `Payment Import Project ${Date.now()}` });

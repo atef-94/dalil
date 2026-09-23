@@ -437,7 +437,7 @@ test('update_lead_status action moves the real lead through CrmService via a rea
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
-  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'contacted')!;
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'no_answer')!;
 
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -457,7 +457,7 @@ test('update_lead_status action still resolves a legacy literal "status" param t
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client B', phone: '0200' });
-  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'contacted')!;
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'no_answer')!;
 
   await h.automation.createWorkflow({
     companyId: 'c1',

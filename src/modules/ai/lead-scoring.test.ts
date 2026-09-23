@@ -29,7 +29,7 @@ test('scoreLead rejects a nonexistent lead', async () => {
 
 test('a lead in a Lost-flagged stage always scores 0', async () => {
   const { svc, leads, crmStages } = await freshService();
-  const lost = await stageByKey(crmStages, 'c1', 'lost');
+  const lost = await stageByKey(crmStages, 'c1', 'cancellation');
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'A', phone: '1', stageId: lost.id, lostReason: 'no budget', createdAt: new Date().toISOString() });
   const result = await svc.scoreLead('l1', 'c1');
   assert.equal(result.score, 0);
@@ -38,7 +38,7 @@ test('a lead in a Lost-flagged stage always scores 0', async () => {
 test('a fresh Won-stage lead with an owner scores higher than a stale default-stage lead with no owner', async () => {
   const { svc, leads, crmStages } = await freshService();
   const fresh = await stageByKey(crmStages, 'c1', 'fresh');
-  const won = await stageByKey(crmStages, 'c1', 'won');
+  const won = await stageByKey(crmStages, 'c1', 'contacts');
   const old = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'Stale', phone: '1', stageId: fresh.id, createdAt: old });
   await leads.save({ id: 'l2', companyId: 'c1', fullName: 'Hot', phone: '2', stageId: won.id, ownerEmployeeUserId: 'u1', sourceId: 'campaign-1', createdAt: new Date().toISOString() });
@@ -57,8 +57,8 @@ test('scoreLead rejects a lead belonging to a different company (cross-tenant)',
 test('rankedLeads excludes leads in a Lost-flagged stage and sorts descending by score', async () => {
   const { svc, leads, crmStages } = await freshService();
   const fresh = await stageByKey(crmStages, 'c1', 'fresh');
-  const won = await stageByKey(crmStages, 'c1', 'won');
-  const lost = await stageByKey(crmStages, 'c1', 'lost');
+  const won = await stageByKey(crmStages, 'c1', 'contacts');
+  const lost = await stageByKey(crmStages, 'c1', 'cancellation');
   await leads.save({ id: 'l1', companyId: 'c1', fullName: 'New', phone: '1', stageId: fresh.id, createdAt: new Date().toISOString() });
   await leads.save({ id: 'l2', companyId: 'c1', fullName: 'Won', phone: '2', stageId: won.id, createdAt: new Date().toISOString() });
   await leads.save({ id: 'l3', companyId: 'c1', fullName: 'Lost', phone: '3', stageId: lost.id, lostReason: 'x', createdAt: new Date().toISOString() });

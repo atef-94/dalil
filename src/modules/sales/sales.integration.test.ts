@@ -14,8 +14,8 @@ test('full chain: Lead -> Opportunity -> Reserve Unit -> Sign Contract generates
 
   const lead = await crm.createLead({ companyId, fullName: 'Client A', phone: '0555-0001', ownerEmployeeUserId: agentUserId });
   const stages = await crmStages.listStages(companyId, true);
-  const contacted = stages.find((s) => s.key === 'contacted')!;
-  const qualified = stages.find((s) => s.key === 'qualified')!;
+  const contacted = stages.find((s) => s.key === 'no_answer')!;
+  const qualified = stages.find((s) => s.key === 'meeting')!;
   await crm.moveToStage(lead.id, companyId, contacted.id);
   await crm.moveToStage(lead.id, companyId, qualified.id);
 

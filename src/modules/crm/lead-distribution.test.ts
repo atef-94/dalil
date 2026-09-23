@@ -153,7 +153,7 @@ test('sweepSlaBreaches never touches a lead that already moved past new', async 
     ownerEmployeeUserId: assignment!.ownerUserId,
     firstContactSlaDueAt: assignment!.firstContactSlaDueAt,
   });
-  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'contacted')!;
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'no_answer')!;
   await h.crm.moveToStage(lead.id, 'c1', contacted.id);
 
   const future = new Date(Date.now() + 20 * 60_000);

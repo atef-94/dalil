@@ -46,8 +46,8 @@ test('getTimeline always includes a lead_created entry as the first entry', asyn
 test('getTimeline surfaces stage changes from the audit trail, oldest first', async () => {
   const h = await freshHarness();
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'A', phone: '01' });
-  const contacted = await stageByKey(h.crmStages, 'c1', 'contacted');
-  const qualified = await stageByKey(h.crmStages, 'c1', 'qualified');
+  const contacted = await stageByKey(h.crmStages, 'c1', 'no_answer');
+  const qualified = await stageByKey(h.crmStages, 'c1', 'meeting');
 
   // Mirrors exactly what the PATCH /api/crm/leads/:leadId/stage route
   // writes: toStatus carries the new stage's display name (not a legacy
@@ -61,8 +61,8 @@ test('getTimeline surfaces stage changes from the audit trail, oldest first', as
   const timeline = await h.svc.getTimeline(lead.id, 'c1');
   const statusEntries = timeline.entries.filter((e) => e.type === 'status_changed');
   assert.equal(statusEntries.length, 2);
-  assert.match(statusEntries[0]!.summary, /Contacted/);
-  assert.match(statusEntries[1]!.summary, /Qualified/);
+  assert.match(statusEntries[0]!.summary, /No Answer/);
+  assert.match(statusEntries[1]!.summary, /Meeting/);
 });
 
 test('getTimeline includes messages, tasks, opportunities, and signed contracts', async () => {
