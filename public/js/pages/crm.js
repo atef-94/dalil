@@ -690,8 +690,13 @@ export async function renderCrm(container) {
           }
         });
 
+        // Named "Price Offer" (not "Offers") deliberately — the CRM
+        // workspace already has a top-level "Offers" tab for the deal
+        // pipeline (Opportunities); this is a different thing (a unit +
+        // payment-plan + PDF quote for this specific lead), so it needs a
+        // different label to not read as the same feature.
         body.appendChild(el('div', { class: 'card' }, [
-          el('h4', { style: 'margin-top:0' }, 'Offers'),
+          el('h4', { style: 'margin-top:0' }, 'Price Offer (unit + payment plan + PDF)'),
           el('div', { class: 'form-row' }, [
             el('div', {}, [el('label', {}, 'Unit code'), unitCodeInput]),
             el('div', { style: 'align-self:flex-end' }, lookupBtn),

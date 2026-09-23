@@ -162,6 +162,38 @@ export async function renderQuotations(container) {
     }
   }
 
+  // Real branded PDF (project images, payment schedule, master-plan with
+  // the unit highlighted, floor plan) and real WhatsApp document send —
+  // the same Offer engine the CRM Lead detail's "Price Offer" card uses
+  // (quotation.service.ts / offer-pdf.service.ts). "Share" above only
+  // logs a text link; these two send/download the actual PDF.
+  async function downloadOfferPdf(quotation) {
+    try {
+      const result = await api.get(`/api/quotations/${quotation.id}/pdf`);
+      downloadBase64(result.filename, result.contentType, result.base64);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  async function sendOfferWhatsApp(quotation) {
+    const values = await formModal({
+      title: `Send Offer ${quotation.referenceNumber} via WhatsApp`,
+      fields: [
+        { key: 'to', label: 'WhatsApp number (intl format, e.g. 201234567890)', type: 'text' },
+        { key: 'message', label: 'Message', type: 'textarea', value: `Hi, here is quotation ${quotation.referenceNumber}.` },
+      ],
+      submitLabel: 'Send',
+    });
+    if (!values || !values.to?.trim()) return;
+    try {
+      await api.post(`/api/quotations/${quotation.id}/send-whatsapp`, { to: values.to.trim(), message: values.message });
+      toast('Offer sent via WhatsApp.', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
   async function shareQuotation(quotation) {
     const values = await formModal({
       title: `Share quotation ${quotation.referenceNumber}`,
@@ -214,11 +246,16 @@ export async function renderQuotations(container) {
             excelBtn.addEventListener('click', () => downloadExcel(q));
             const printBtn = el('button', {}, 'Print / PDF');
             printBtn.addEventListener('click', () => openPrintView(q));
-            const actions = [excelBtn, printBtn];
+            const offerPdfBtn = el('button', {}, 'Print PDF');
+            offerPdfBtn.addEventListener('click', () => downloadOfferPdf(q));
+            const actions = [excelBtn, printBtn, offerPdfBtn];
             if (can('quotation', 'edit')) {
               const shareBtn = el('button', {}, 'Share');
               shareBtn.addEventListener('click', () => shareQuotation(q));
               actions.push(shareBtn);
+              const waBtn = el('button', {}, 'Send via WhatsApp');
+              waBtn.addEventListener('click', () => sendOfferWhatsApp(q));
+              actions.push(waBtn);
               if (q.status === 'generated') {
                 const sentBtn = el('button', {}, 'Mark sent');
                 sentBtn.addEventListener('click', () => updateStatus(q, 'sent'));
