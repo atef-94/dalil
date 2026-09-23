@@ -79,7 +79,7 @@ export class ImportSessionService {
       rows = parseCsvRecords(input.fileBuffer.toString('utf8'));
       headers = rows.length > 0 ? Object.keys(rows[0]!) : [];
     } else if (fileType === 'xlsx') {
-      const parsed = await parseXlsx(input.fileBuffer);
+      const parsed = await parseXlsx(input.fileBuffer, input.fields);
       headers = parsed.headers;
       rows = parsed.rows;
     } else {
