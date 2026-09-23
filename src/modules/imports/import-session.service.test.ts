@@ -165,6 +165,31 @@ test('markConfirmed advances status to confirmed', async () => {
   assert.equal(confirmed.status, 'confirmed');
 });
 
+test('mapRows does not let a blank column overwrite a value already set by another column mapped to the same field', async () => {
+  // A multi-sheet import can end up with two differently-named columns
+  // mapped to the same target field by hand (one sheet's own header wasn't
+  // auto-recognized as equivalent to another sheet's). Any single row only
+  // has real data under ONE of those columns — the other is genuinely
+  // blank because it belongs to a different sheet. mapRows must not let
+  // that blank silently wipe out the value the row actually has.
+  const svc = service();
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'lead',
+    fileName: 'leads.csv',
+    fileBuffer: Buffer.from('Full Name,Client Name,Phone\nAhmed,,0100000000\n,Sara,0111111111\n'),
+    contentType: 'text/csv',
+    fields: LEAD_FIELDS,
+  });
+  const mapped = await svc.confirmMapping(session.id, 'c1', { 'Full Name': 'fullName', 'Client Name': 'fullName', Phone: 'phone' });
+  const rows = svc.mapRows(mapped);
+  assert.deepEqual(rows, [
+    { fullName: 'Ahmed', phone: '0100000000' },
+    { fullName: 'Sara', phone: '0111111111' },
+  ]);
+});
+
 // ---- Multi-sheet import: a real broker/developer portfolio export
 // commonly puts one project per worksheet tab (e.g. "Stayn", "Connect4")
 // instead of one flat table with a Project column. sheetNameAsColumn is the
@@ -254,4 +279,46 @@ test('createSession without sheetNameAsColumn only reads the first sheet (unchan
 
   assert.equal(session.rawRows.length, 1);
   assert.equal(session.rawRows[0]!['Unit Type'], 'Apartment');
+});
+
+test('createSession with sheetNameAsColumn canonicalizes differently-spelled headers for the same field across sheets', async () => {
+  // Reproduces a real bug found against a real 7-sheet user file: a
+  // multi-sheet export rarely spells the same column the same way on
+  // every tab ("Type" on one sheet, "Unit Type" on another). A naive flat
+  // union of raw header text leaves those as two separate columns, and
+  // suggestMapping only ever awards one column per target field — so
+  // whichever sheet's spelling loses ends up completely unmapped, and
+  // every row from that sheet comes through with a required field blank
+  // (surfaced as "Unit Type is required" on hundreds of otherwise-valid
+  // rows). Both spellings must resolve to ONE merged column.
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Type', 'Area (sqm) — From']);
+  stayn.addRow(['Apartment', '150']);
+  const connect4 = wb.addWorksheet('Connect4');
+  connect4.addRow(['Unit Type', 'Area (sqm) — From']); // same field as Stayn's "Type", spelled differently
+  connect4.addRow(['Duplex', '220']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  // Stayn is processed first, so its own spelling ("Type") becomes the
+  // canonical merged column — Connect4's "Unit Type" values land there too.
+  assert.ok(session.detectedColumns.includes('Type'));
+  assert.ok(!session.detectedColumns.includes('Unit Type'));
+  assert.deepEqual(
+    session.rawRows.map((r) => r.Type),
+    ['Apartment', 'Duplex'],
+  );
+  assert.equal(session.suggestedMapping.Type, 'unitType');
 });

@@ -93,12 +93,44 @@ export class ImportSessionService {
     } else if (fileType === 'xlsx' && input.sheetNameAsColumn) {
       const projectColumn = input.sheetNameAsColumn;
       const sheets = await parseXlsxAllSheets(input.fileBuffer, input.fields);
+      // A real multi-sheet export rarely spells the same column the same
+      // way on every tab (e.g. "Type" on one sheet, "Unit Type" on
+      // another; "code" vs "Code"; "Floor" vs "FLOOR"). Taking a flat
+      // union of raw header text — the naive approach — leaves those as
+      // separate columns, and suggestMapping only ever awards one column
+      // per target field (by design, so two differently-worded columns
+      // never silently collide within a single sheet). The result: every
+      // sheet after the first "loses" the field to whichever sheet's
+      // spelling got processed first, and its rows come through with that
+      // required field blank — exactly what a real 7-sheet file surfaced.
+      // Instead, each sheet's own headers are mapped to target fields
+      // independently (safe: no single real sheet has two columns for the
+      // same field), and every sheet after the first has its columns
+      // renamed to match the first sheet's spelling for that same field —
+      // so the merged row set ends up with one column per field, filled
+      // in from whichever sheet actually carried it.
+      const fieldKeyToCanonicalHeader = new Map<string, string>();
       const headerSet = new Set<string>([projectColumn]);
       rows = [];
       for (const sheet of sheets) {
-        for (const header of sheet.headers) headerSet.add(header);
+        const sheetMapping = suggestMapping(sheet.headers, input.fields);
+        const renameHeader = new Map<string, string>();
+        for (const header of sheet.headers) {
+          const fieldKey = sheetMapping[header];
+          if (!fieldKey) continue;
+          const canonical = fieldKeyToCanonicalHeader.get(fieldKey);
+          if (canonical) {
+            if (canonical !== header) renameHeader.set(header, canonical);
+          } else {
+            fieldKeyToCanonicalHeader.set(fieldKey, header);
+          }
+        }
+        for (const header of sheet.headers) headerSet.add(renameHeader.get(header) ?? header);
         for (const row of sheet.rows) {
-          const merged = { ...row };
+          const merged: Record<string, string> = {};
+          for (const [header, value] of Object.entries(row)) {
+            merged[renameHeader.get(header) ?? header] = value;
+          }
           if (!merged[projectColumn]?.trim()) merged[projectColumn] = sheet.sheetName;
           rows.push(merged);
         }
@@ -182,6 +214,18 @@ export class ImportSessionService {
    * suggested one before confirmation, e.g. for an early preview). A
    * column mapped to null is dropped. This is the shape every specific
    * importer's validation/dedupe/conflict logic reads.
+   *
+   * A multi-sheet import (sheetNameAsColumn) can legitimately need two
+   * differently-named raw columns mapped onto the same target field — e.g.
+   * one sheet's price column wasn't recognized as the same field as
+   * another sheet's during auto-detection, so the user maps both by hand.
+   * Any single row only ever has real data under ONE of those columns (the
+   * other is blank, since it belongs to a different sheet) — plain
+   * iteration order would let whichever column happens to come last in the
+   * mapping always win, silently blanking out a real value with an empty
+   * one from the row's "other" sheet. A blank never overwrites a value
+   * already set for that field; a second real value (a genuine conflict)
+   * still wins, same as before.
    */
   mapRows(session: ImportSession): Record<string, string>[] {
     const mapping = session.confirmedMapping ?? session.suggestedMapping;
@@ -189,7 +233,9 @@ export class ImportSessionService {
       const mapped: Record<string, string> = {};
       for (const [column, fieldKey] of Object.entries(mapping)) {
         if (!fieldKey) continue;
-        mapped[fieldKey] = row[column] ?? '';
+        const value = row[column] ?? '';
+        if (value === '' && mapped[fieldKey]) continue;
+        mapped[fieldKey] = value;
       }
       return mapped;
     });
