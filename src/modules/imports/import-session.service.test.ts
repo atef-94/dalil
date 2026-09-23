@@ -12,6 +12,12 @@ const LEAD_FIELDS: ImportFieldDef[] = [
   { key: 'email', label: 'Email' },
 ];
 
+const INVENTORY_LIKE_FIELDS: ImportFieldDef[] = [
+  { key: 'projectName', label: 'Project', aliases: ['project name', 'compound'], required: true },
+  { key: 'unitType', label: 'Unit Type', aliases: ['type'], required: true },
+  { key: 'areaSqmFrom', label: 'Area (sqm) — From', aliases: ['area from', 'bua from'] },
+];
+
 function service() {
   return new ImportSessionService(new InMemoryRepository<ImportSession>());
 }
@@ -157,4 +163,95 @@ test('markConfirmed advances status to confirmed', async () => {
   });
   const confirmed = await svc.markConfirmed(session.id, 'c1');
   assert.equal(confirmed.status, 'confirmed');
+});
+
+// ---- Multi-sheet import: a real broker/developer portfolio export
+// commonly puts one project per worksheet tab (e.g. "Stayn", "Connect4")
+// instead of one flat table with a Project column. sheetNameAsColumn is the
+// opt-in option that reads every sheet and injects the sheet's own name into
+// the given column for any row that doesn't already carry a real value
+// there — confirmed against a real 7-sheet user file. ----
+
+test('createSession with sheetNameAsColumn merges every sheet, injecting the sheet name as the Project for rows missing it', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type', 'Area (sqm) — From']);
+  stayn.addRow(['Apartment', '150']);
+  const connect4 = wb.addWorksheet('Connect4');
+  connect4.addRow(['Unit Type', 'Area (sqm) — From']);
+  connect4.addRow(['Duplex', '220']);
+  connect4.addRow(['Villa', '300']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.equal(session.rawRows.length, 3);
+  assert.ok(session.detectedColumns.includes('Project'));
+  assert.deepEqual(
+    session.rawRows.map((r) => r.Project),
+    ['Stayn', 'Connect4', 'Connect4'],
+  );
+  assert.equal(session.rawRows[0]!['Unit Type'], 'Apartment');
+  assert.equal(session.rawRows[1]!['Unit Type'], 'Duplex');
+});
+
+test('createSession with sheetNameAsColumn leaves a row alone when it already has a real value in that column', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet('Stayn');
+  sheet.addRow(['Project', 'Unit Type']);
+  sheet.addRow(['Stayn Phase 2', 'Apartment']); // explicit Project column, should win over the sheet name
+  sheet.addRow(['', 'Duplex']); // blank Project, should fall back to sheet name
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.deepEqual(
+    session.rawRows.map((r) => r.Project),
+    ['Stayn Phase 2', 'Stayn'],
+  );
+});
+
+test('createSession without sheetNameAsColumn only reads the first sheet (unchanged default behavior)', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type']);
+  stayn.addRow(['Apartment']);
+  const connect4 = wb.addWorksheet('Connect4');
+  connect4.addRow(['Unit Type']);
+  connect4.addRow(['Duplex']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+  });
+
+  assert.equal(session.rawRows.length, 1);
+  assert.equal(session.rawRows[0]!['Unit Type'], 'Apartment');
 });

@@ -69,36 +69,14 @@ function cellToString(value: unknown): string {
   return String(value);
 }
 
-/**
- * Parses a real .xlsx/.xls workbook buffer into header + row records, same
- * "headers -> Record<string,string> per row" shape parseCsvRecords already
- * produces, so every downstream consumer (field-mapping, dedupe, import
- * services) works identically regardless of whether the source file was a
- * CSV or an Excel workbook.
- *
- * `fields`, when supplied, lets the parser auto-detect which row is the
- * real header row instead of always assuming row 1 — see
- * detectHeaderRowIndex's own comment for why that matters.
- */
-export async function parseXlsx(buffer: Buffer, fields?: ImportFieldDef[]): Promise<ParsedSheet> {
-  const workbook = new ExcelJS.Workbook();
-  try {
-    // exceljs's own index.d.ts declares a bogus global `Buffer extends
-    // ArrayBuffer` that merges with (and corrupts) Node's real Buffer type
-    // program-wide the moment its types are imported anywhere — a known
-    // exceljs typings defect, not a real runtime incompatibility (the
-    // merged type is structurally broken enough that even `as unknown as
-    // Buffer` still fails the following assignability check, so this call
-    // site opts all the way out with `any` instead). The cast is scoped to
-    // this one call rather than weakening this module's own Buffer usage.
-    await workbook.xlsx.load(buffer as any);
-  } catch (err) {
-    throw new ValidationError(`could not read this file as an Excel workbook: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  const sheet = workbook.worksheets.find((s) => s.rowCount > 0);
-  if (!sheet) return { headers: [], rows: [] };
-
+/** Reads one worksheet's rows into dense string arrays, picks out the real
+ * header row (see detectHeaderRowIndex), and turns everything after it into
+ * header -> value records. The one-sheet building block both parseXlsx
+ * (first sheet only, for callers that only ever expect one) and
+ * parseXlsxAllSheets (every non-empty sheet, for a workbook that spreads
+ * its data across several — one tab per project is a common real-estate
+ * export shape) are built from. */
+function parseWorksheet(sheet: ExcelJS.Worksheet, fields?: ImportFieldDef[]): ParsedSheet {
   const allRows: string[][] = [];
   sheet.eachRow({ includeEmpty: false }, (row) => {
     const values = row.values as unknown[]; // exceljs pads index 0; real cells start at 1
@@ -131,4 +109,67 @@ export async function parseXlsx(buffer: Buffer, fields?: ImportFieldDef[]): Prom
   }
 
   return { headers: headers.filter(Boolean), rows };
+}
+
+async function loadWorkbook(buffer: Buffer): Promise<ExcelJS.Workbook> {
+  const workbook = new ExcelJS.Workbook();
+  try {
+    // exceljs's own index.d.ts declares a bogus global `Buffer extends
+    // ArrayBuffer` that merges with (and corrupts) Node's real Buffer type
+    // program-wide the moment its types are imported anywhere — a known
+    // exceljs typings defect, not a real runtime incompatibility (the
+    // merged type is structurally broken enough that even `as unknown as
+    // Buffer` still fails the following assignability check, so this call
+    // site opts all the way out with `any` instead). The cast is scoped to
+    // this one call rather than weakening this module's own Buffer usage.
+    await workbook.xlsx.load(buffer as any);
+  } catch (err) {
+    throw new ValidationError(`could not read this file as an Excel workbook: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return workbook;
+}
+
+/**
+ * Parses a real .xlsx/.xls workbook buffer into header + row records, same
+ * "headers -> Record<string,string> per row" shape parseCsvRecords already
+ * produces, so every downstream consumer (field-mapping, dedupe, import
+ * services) works identically regardless of whether the source file was a
+ * CSV or an Excel workbook. Only reads the first non-empty sheet — see
+ * parseXlsxAllSheets for a workbook whose data is split across several tabs.
+ *
+ * `fields`, when supplied, lets the parser auto-detect which row is the
+ * real header row instead of always assuming row 1 — see
+ * detectHeaderRowIndex's own comment for why that matters.
+ */
+export async function parseXlsx(buffer: Buffer, fields?: ImportFieldDef[]): Promise<ParsedSheet> {
+  const workbook = await loadWorkbook(buffer);
+  const sheet = workbook.worksheets.find((s) => s.rowCount > 0);
+  if (!sheet) return { headers: [], rows: [] };
+  return parseWorksheet(sheet, fields);
+}
+
+export interface ParsedWorkbookSheet extends ParsedSheet {
+  sheetName: string;
+}
+
+/**
+ * Same per-sheet parsing as parseXlsx, but for every non-empty sheet in the
+ * workbook instead of just the first — a real broker/developer portfolio
+ * export commonly puts one project per tab (e.g. sheets named "Stayn",
+ * "Connect4", "Jiran", ...) rather than one flat table with a Project
+ * column, and parseXlsx alone would silently import only the first tab and
+ * drop every other project with no error at all. The caller decides what
+ * to do with each sheet's name (e.g. ImportSessionService's
+ * sheetNameAsColumn option injects it as that sheet's Project value).
+ */
+export async function parseXlsxAllSheets(buffer: Buffer, fields?: ImportFieldDef[]): Promise<ParsedWorkbookSheet[]> {
+  const workbook = await loadWorkbook(buffer);
+  const sheets: ParsedWorkbookSheet[] = [];
+  for (const sheet of workbook.worksheets) {
+    if (sheet.rowCount === 0) continue;
+    const parsed = parseWorksheet(sheet, fields);
+    if (parsed.headers.length === 0) continue;
+    sheets.push({ sheetName: sheet.name, ...parsed });
+  }
+  return sheets;
 }

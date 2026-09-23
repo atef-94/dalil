@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
-import { parseXlsx } from './xlsx-parser.js';
+import { parseXlsx, parseXlsxAllSheets } from './xlsx-parser.js';
 import type { ImportFieldDef } from './field-mapping.js';
 
 const INVENTORY_LIKE_FIELDS: ImportFieldDef[] = [
@@ -157,4 +157,83 @@ test('parseXlsx does not crash on a row with a genuinely untouched (sparse) cell
   const { headers, rows } = await parseXlsx(buf, INVENTORY_LIKE_FIELDS);
   assert.deepEqual(headers, ['Project', 'Unit Type']);
   assert.equal(rows.length, 1);
+});
+
+// ---- Multi-sheet support: a real broker/developer portfolio export
+// commonly puts one project per worksheet tab (e.g. "Stayn", "Connect4",
+// "Jiran") instead of one flat table with a Project column. parseXlsx alone
+// only ever reads the first non-empty sheet, silently dropping every other
+// project with no error — confirmed against a real 7-sheet user file.
+// parseXlsxAllSheets reads every non-empty sheet with a detected header. ----
+
+async function buildMultiSheetWorkbook(sheets: { name: string; rows: unknown[][] }[]): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  for (const { name, rows } of sheets) {
+    const sheet = workbook.addWorksheet(name);
+    for (const row of rows) sheet.addRow(row);
+  }
+  const buf = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buf);
+}
+
+test('parseXlsxAllSheets reads every non-empty sheet, keyed by its sheet name', async () => {
+  const buf = await buildMultiSheetWorkbook([
+    {
+      name: 'Stayn',
+      rows: [
+        ['Unit Type', 'BUA From', 'BUA To'],
+        ['Apartment', '150', '180'],
+      ],
+    },
+    {
+      name: 'Connect4',
+      rows: [
+        ['Unit Type', 'BUA From', 'BUA To'],
+        ['Duplex', '220', '260'],
+        ['Villa', '300', '350'],
+      ],
+    },
+  ]);
+
+  const sheets = await parseXlsxAllSheets(buf, INVENTORY_LIKE_FIELDS);
+  assert.equal(sheets.length, 2);
+  assert.equal(sheets[0]!.sheetName, 'Stayn');
+  assert.deepEqual(sheets[0]!.headers, ['Unit Type', 'BUA From', 'BUA To']);
+  assert.equal(sheets[0]!.rows.length, 1);
+  assert.equal(sheets[1]!.sheetName, 'Connect4');
+  assert.equal(sheets[1]!.rows.length, 2);
+});
+
+test('parseXlsxAllSheets skips sheets with no data and sheets with no detectable headers', async () => {
+  const buf = await buildMultiSheetWorkbook([
+    { name: 'Empty', rows: [] },
+    {
+      name: 'Stayn',
+      rows: [
+        ['Unit Type', 'BUA From'],
+        ['Apartment', '150'],
+      ],
+    },
+  ]);
+
+  const sheets = await parseXlsxAllSheets(buf, INVENTORY_LIKE_FIELDS);
+  assert.equal(sheets.length, 1);
+  assert.equal(sheets[0]!.sheetName, 'Stayn');
+});
+
+test('parseXlsxAllSheets applies header auto-detection independently per sheet', async () => {
+  const buf = await buildMultiSheetWorkbook([
+    {
+      name: 'Stayn',
+      rows: [
+        ['Stayn Project - Sheikh Zayed', '', ''],
+        ['Unit Type', 'BUA From', 'BUA To'],
+        ['Apartment', '150', '180'],
+      ],
+    },
+  ]);
+  const sheets = await parseXlsxAllSheets(buf, INVENTORY_LIKE_FIELDS);
+  assert.equal(sheets.length, 1);
+  assert.deepEqual(sheets[0]!.headers, ['Unit Type', 'BUA From', 'BUA To']);
+  assert.equal(sheets[0]!.rows.length, 1);
 });

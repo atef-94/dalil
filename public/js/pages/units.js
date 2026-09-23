@@ -23,6 +23,7 @@ export async function renderUnits(container) {
         onImported: () => { load(); loadImportHistory(); },
         uploadOptions: [
           { key: 'fillDownBlankCells', label: 'My file has merged cells — repeat the value above into blank cells (e.g. a Project/Developer name shown once above a block of unit rows)', default: false },
+          { key: 'sheetNameAsProject', label: 'Each sheet (tab) in this file is a different project — use the sheet name as the Project (e.g. a sheet named "Stayn" → Project "Stayn")', default: false },
         ],
         mappingOptions: [
           {

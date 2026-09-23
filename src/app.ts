@@ -1585,6 +1585,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
         contentType: file.contentType,
         fields: INVENTORY_IMPORT_FIELDS,
         fillDownBlankCells: body?.fields?.fillDownBlankCells === 'true',
+        sheetNameAsColumn: body?.fields?.sheetNameAsProject === 'true' ? 'Project' : undefined,
       });
       return {
         status: 200,

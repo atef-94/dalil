@@ -3,7 +3,7 @@ import type { ImportSession, ImportFileType, ImportTargetType } from '../../doma
 import type { Repository } from '../../infra/repository.js';
 import { NotFoundError, ValidationError } from '../../infra/errors.js';
 import { parseCsvRecords } from '../../infra/csv.js';
-import { parseXlsx } from '../../infra/xlsx-parser.js';
+import { parseXlsx, parseXlsxAllSheets } from '../../infra/xlsx-parser.js';
 import { parsePdfTable } from '../../infra/pdf-parser.js';
 import { suggestMapping, type ImportFieldDef } from '../../infra/field-mapping.js';
 
@@ -27,6 +27,18 @@ export interface CreateImportSessionInput {
    * with the last non-blank value seen above it in the same column, which
    * is exactly what a merged cell visually means. */
   fillDownBlankCells?: boolean;
+  /** A real broker/developer portfolio export commonly puts one project per
+   * worksheet tab (e.g. sheets named "Stayn", "Connect4", "Jiran", ...)
+   * instead of one flat table with a Project column — parseXlsx alone only
+   * ever reads the first sheet, silently dropping every other project with
+   * no error. When set (to the exact column name the target field dictionary
+   * expects, e.g. "Project"), every non-empty sheet is read and merged into
+   * one row set, with that column filled in from the sheet's own name for
+   * any row that doesn't already have a real value there — so a sheet that
+   * happens to carry its own explicit Project column is left alone, and
+   * only a sheet with no such column at all gets its name injected. .xlsx
+   * only; ignored for CSV/PDF (which are always single-table anyway). */
+  sheetNameAsColumn?: string;
 }
 
 /** A blank cell in a merged-cell export means "same as the value above" —
@@ -78,6 +90,20 @@ export class ImportSessionService {
     if (fileType === 'csv') {
       rows = parseCsvRecords(input.fileBuffer.toString('utf8'));
       headers = rows.length > 0 ? Object.keys(rows[0]!) : [];
+    } else if (fileType === 'xlsx' && input.sheetNameAsColumn) {
+      const projectColumn = input.sheetNameAsColumn;
+      const sheets = await parseXlsxAllSheets(input.fileBuffer, input.fields);
+      const headerSet = new Set<string>([projectColumn]);
+      rows = [];
+      for (const sheet of sheets) {
+        for (const header of sheet.headers) headerSet.add(header);
+        for (const row of sheet.rows) {
+          const merged = { ...row };
+          if (!merged[projectColumn]?.trim()) merged[projectColumn] = sheet.sheetName;
+          rows.push(merged);
+        }
+      }
+      headers = sheets.length > 0 ? Array.from(headerSet) : [];
     } else if (fileType === 'xlsx') {
       const parsed = await parseXlsx(input.fileBuffer, input.fields);
       headers = parsed.headers;
