@@ -202,6 +202,36 @@ test('send dispatches a real-shaped WhatsApp API call using the stored credentia
   void connection;
 });
 
+test('send dispatches a real 2-step WhatsApp document upload + message when a documentBuffer is given (Offer PDF path)', async () => {
+  const h = freshHarness();
+  await h.integrations.connect({
+    companyId: 'c1', provider: 'whatsapp', displayName: 'My WhatsApp', config: { phoneNumberId: 'phone-123' },
+    credentials: { access_token: 'tok-abc' }, createdByUserId: 'u1',
+  });
+  h.setFetchImpl((async (url) => {
+    const urlStr = String(url);
+    h.fetchCalls.push({ url: urlStr });
+    if (urlStr.includes('/media')) return new Response(JSON.stringify({ id: 'media-abc' }), { status: 200 });
+    return new Response(JSON.stringify({ messages: [{ id: 'wamid.999' }] }), { status: 200 });
+  }) as typeof fetch);
+
+  const documentBuffer = Buffer.from('%PDF-1.4 fake offer pdf bytes');
+  const result = await h.integrations.send(
+    'c1',
+    'whatsapp',
+    'send_document',
+    { to: '+15551234', body: 'Here is your offer', documentBuffer, documentFilename: 'Offer-Q-1.pdf' },
+    'u1',
+  );
+  assert.equal((result as { status: number; providerMessageId?: string }).status, 200);
+  assert.equal((result as { providerMessageId?: string }).providerMessageId, 'wamid.999');
+
+  // Two real requests: the media upload, then the document message.
+  assert.equal(h.fetchCalls.length, 2);
+  assert.match(h.fetchCalls[0]!.url, /graph\.facebook\.com\/v20\.0\/phone-123\/media/);
+  assert.match(h.fetchCalls[1]!.url, /graph\.facebook\.com\/v20\.0\/phone-123\/messages/);
+});
+
 test('send retries on failure and eventually succeeds', async () => {
   const h = freshHarness(10);
   await h.integrations.connect({

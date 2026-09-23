@@ -55,6 +55,19 @@ export class QuotationService {
     return unit;
   }
 
+  /** Looks a unit up by its own code (case-insensitive) rather than its
+   * internal id — this is what "type a unit code, auto-fill everything"
+   * (the Offer builder's entry point) needs, since a salesperson knows the
+   * code printed on the price list, never the database id. */
+  async findUnitByCode(companyId: string, code: string): Promise<Unit> {
+    const trimmed = code.trim();
+    if (!trimmed) throw new ValidationError('a unit code is required');
+    const units = await this.units.findAll((u) => u.companyId === companyId && u.code.trim().toLowerCase() === trimmed.toLowerCase());
+    const unit = units[0];
+    if (!unit) throw new NotFoundError(`no unit found with code "${code}"`);
+    return unit;
+  }
+
   /** Live, no-commitment calculation — the interactive UI calls this on
    * every input change, and it is exactly what a persisted quotation's
    * `recompute()` replays later, so a saved quotation always matches what
@@ -83,12 +96,15 @@ export class QuotationService {
   /** Persists a new, immutable version — never overwrites a prior
    * quotation. A new call for the same unit (and, if given, the same
    * lead) always gets its own id, its own incrementing `version`, and its
-   * own unique `referenceNumber`. */
+   * own unique `referenceNumber`. The generated schedule is computed once,
+   * right here, and stored as scheduleSnapshot — never recomputed from a
+   * possibly-since-edited Unit/Template on later reads (see recompute()). */
   async generate(input: GenerateQuotationInput): Promise<Quotation> {
     const unit = await this.resolveUnit(input.companyId, input.unitId);
     const totalPrice = input.totalPriceOverride ?? unit.listPrice;
-    // Validates the template/inputs resolve to a real schedule before persisting anything.
-    await this.calculate(input.companyId, input);
+    const calculation = await this.calculate(input.companyId, input);
+    const template = await this.paymentPlans.getTemplate(input.paymentPlanTemplateId);
+    if (!template || template.companyId !== input.companyId) throw new NotFoundError('template not found');
 
     const priorVersions = await this.quotations.findAll(
       (q) => q.companyId === input.companyId && q.unitId === input.unitId && (!input.leadId || q.leadId === input.leadId),
@@ -105,6 +121,7 @@ export class QuotationService {
       projectId: unit.projectId,
       leadId: input.leadId,
       paymentPlanTemplateId: input.paymentPlanTemplateId,
+      sourceTemplateVersion: template.version,
       status: 'generated',
       inputs: {
         totalPrice,
@@ -112,6 +129,7 @@ export class QuotationService {
         escalationPercentPerYear: input.escalationPercentPerYear ?? 0,
         startDate: now,
       },
+      scheduleSnapshot: calculation.schedule.map((l) => ({ sequence: l.sequence, label: l.label, dueDate: l.dueDate, amount: l.amount, status: l.status })),
       createdByUserId: input.createdByUserId,
       createdAt: now,
       updatedAt: now,
@@ -125,23 +143,26 @@ export class QuotationService {
     return quotation;
   }
 
-  /** Replays a persisted quotation's exact stored inputs through the same
-   * engine `calculate()` uses — this is what the PDF/Excel export and the
-   * "view saved quotation" screen call, so a quotation reopened a month
-   * later reconciles exactly with what was generated (as long as the
-   * referenced PaymentPlanTemplate itself hasn't since been edited — the
-   * one honest limitation of not also snapshotting the template's own fee
-   * lines, matching how PaymentScheduleLine's sourceTemplateVersion
-   * exists for the same reason on a signed contract's real schedule). */
+  /** Rebuilds the QuotationCalculation view purely from the quotation's
+   * own stored scheduleSnapshot/inputs — this is what the PDF/Excel export
+   * and the "view saved quotation" screen call, so a quotation reopened a
+   * month later renders byte-for-byte what was generated, even if the
+   * unit's price or the payment plan template have since been edited or
+   * the unit deleted (unit is fetched only for display metadata — code,
+   * project, area — never for its current listPrice, which recompute
+   * never reads). */
   async recompute(id: string, companyId: string): Promise<{ quotation: Quotation; calculation: QuotationCalculation }> {
     const quotation = await this.getQuotation(id, companyId);
-    const calculation = await this.calculate(companyId, {
-      unitId: quotation.unitId,
-      paymentPlanTemplateId: quotation.paymentPlanTemplateId,
+    const unit = await this.resolveUnit(companyId, quotation.unitId);
+    const calculation: QuotationCalculation = {
+      unit,
+      totalPrice: quotation.inputs.totalPrice,
       discountPercent: quotation.inputs.discountPercent,
       escalationPercentPerYear: quotation.inputs.escalationPercentPerYear,
-      totalPriceOverride: quotation.inputs.totalPrice,
-    });
+      netValue: netContractValue(quotation.inputs.totalPrice, quotation.inputs.discountPercent),
+      downPayment: quotation.scheduleSnapshot.find((l) => l.label === 'Down Payment')?.amount ?? 0,
+      schedule: quotation.scheduleSnapshot,
+    };
     return { quotation, calculation };
   }
 

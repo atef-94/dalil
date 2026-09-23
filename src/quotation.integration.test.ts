@@ -102,7 +102,97 @@ test('quotation lifecycle: calculate -> generate -> version -> get -> status -> 
     assert.equal(share.status, 201);
     assert.equal((share.body as { channel: string }).channel, 'whatsapp');
     assert.equal((share.body as { relatedResource: string }).relatedResource, 'quotation');
+
+    // Real, server-rendered Offer PDF — real %PDF- magic bytes once base64-decoded.
+    const pdf = await call(base, 'GET', `/api/quotations/${q1.id}/pdf`, undefined, headers);
+    assert.equal(pdf.status, 200);
+    const pdfBody = pdf.body as { filename: string; contentType: string; base64: string };
+    assert.match(pdfBody.filename, /\.pdf$/);
+    assert.equal(pdfBody.contentType, 'application/pdf');
+    const decodedPdf = Buffer.from(pdfBody.base64, 'base64');
+    assert.equal(decodedPdf.subarray(0, 5).toString('latin1'), '%PDF-');
   });
+});
+
+test('unit-by-code lookup auto-fills unit + project for the Offer builder', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'x-demo-user': ceoUserId };
+    const suffix = `${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const project = await call(base, 'POST', '/api/inventory/projects', { name: `CodeLookupProj-${suffix}` }, headers);
+    const unit = await call(base, 'POST', '/api/inventory/units', {
+      projectId: (project.body as { id: string }).id, code: `CL-${suffix}`, listPrice: 3_000_000, unitType: 'apartment', areaSqm: 140,
+    }, headers);
+
+    const found = await call(base, 'GET', `/api/quotations/units/by-code/${(unit.body as { code: string }).code}`, undefined, headers);
+    assert.equal(found.status, 200);
+    const foundBody = found.body as { unit: { id: string }; project: { id: string; name: string } };
+    assert.equal(foundBody.unit.id, (unit.body as { id: string }).id);
+    assert.equal(foundBody.project.id, (project.body as { id: string }).id);
+
+    const missing = await call(base, 'GET', '/api/quotations/units/by-code/NO-SUCH-CODE', undefined, headers);
+    assert.equal(missing.status, 404);
+  });
+});
+
+test('sending an Offer via WhatsApp generates a real PDF, sends it as a document through the connected integration, and logs it on the lead\'s own timeline', async () => {
+  // Fakes only the network boundary (the real Meta Cloud API), exactly
+  // like the e-signature integration test — everything else (routes,
+  // PDF generation, RBAC, the Integration Layer, timeline aggregation)
+  // runs for real. Node's test runner isolates each test file in its own
+  // process, so this patch never leaks into other test files.
+  const realFetch = globalThis.fetch;
+  const graphCalls: string[] = [];
+  globalThis.fetch = (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes('graph.facebook.com')) {
+      graphCalls.push(urlStr);
+      if (urlStr.includes('/media')) return new Response(JSON.stringify({ id: 'media-fake-123' }), { status: 200 });
+      return new Response(JSON.stringify({ messages: [{ id: 'wamid.fake-456' }] }), { status: 200 });
+    }
+    return realFetch(url, init);
+  }) as typeof fetch;
+
+  try {
+    await withServer(async (base, app) => {
+      const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+      const headers = { 'x-demo-user': ceoUserId };
+      const { unitId, templateId } = await setupUnitAndTemplate(base, headers);
+
+      const lead = await call(base, 'POST', '/api/crm/leads', { fullName: 'Offer Recipient', phone: `0555-${Date.now()}` }, headers);
+      const leadId = (lead.body as { id: string }).id;
+
+      const gen = await call(base, 'POST', '/api/quotations', { unitId, paymentPlanTemplateId: templateId, leadId }, headers);
+      assert.equal(gen.status, 201);
+      const quotationId = (gen.body as { id: string }).id;
+
+      await call(base, 'POST', '/api/integrations/connections', {
+        provider: 'whatsapp', displayName: 'Demo WhatsApp',
+        config: { phoneNumberId: 'phone-demo' },
+        credentials: { access_token: 'tok-demo' },
+      }, headers);
+
+      const send = await call(base, 'POST', `/api/quotations/${quotationId}/send-whatsapp`, { to: '+201234567890' }, headers);
+      assert.equal(send.status, 201);
+      const sendBody = send.body as { message: { relatedResource: string; relatedResourceId: string }; providerResult: { providerMessageId?: string } };
+      assert.equal(sendBody.message.relatedResource, 'lead');
+      assert.equal(sendBody.message.relatedResourceId, leadId);
+      assert.equal(sendBody.providerResult.providerMessageId, 'wamid.fake-456');
+
+      // Real 2-step Cloud API flow: media upload, then the document message.
+      assert.equal(graphCalls.length, 2);
+      assert.match(graphCalls[0]!, /\/media/);
+      assert.match(graphCalls[1]!, /\/messages/);
+
+      // Shows up on the lead's own timeline, not hidden under 'quotation'.
+      const timeline = await call(base, 'GET', `/api/crm/leads/${leadId}/timeline`, undefined, headers);
+      assert.equal(timeline.status, 200);
+      const entries = (timeline.body as { entries: { type: string; summary: string }[] }).entries;
+      assert.ok(entries.some((e) => e.type === 'message' && /Offer/.test(e.summary)));
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('quotation routes reject cross-tenant access with 404, not leaking existence', async () => {
@@ -128,6 +218,10 @@ test('quotation routes reject cross-tenant access with 404, not leaking existenc
     assert.equal(crossStatus.status, 404);
     const crossExcel = await call(base, 'GET', `/api/quotations/${quotationId}/excel`, undefined, tenantBHeaders);
     assert.equal(crossExcel.status, 404);
+    const crossPdf = await call(base, 'GET', `/api/quotations/${quotationId}/pdf`, undefined, tenantBHeaders);
+    assert.equal(crossPdf.status, 404);
+    const crossWhatsapp = await call(base, 'POST', `/api/quotations/${quotationId}/send-whatsapp`, { to: '+1' }, tenantBHeaders);
+    assert.equal(crossWhatsapp.status, 404);
   });
 });
 

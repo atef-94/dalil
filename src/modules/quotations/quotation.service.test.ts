@@ -83,7 +83,7 @@ test('generate never mutates a prior version — both remain retrievable', async
   assert.equal(reloaded.version, 1);
 });
 
-test('recompute replays the stored inputs through the same engine as calculate', async () => {
+test('recompute renders the stored snapshot, matching a fresh calculate() call at generation time', async () => {
   const { quotations, unit, template } = await setup();
   const quotation = await quotations.generate({
     companyId: 'c1',
@@ -115,6 +115,42 @@ test('recompute replays the stored inputs through the same engine as calculate',
   assert.equal(calculation.netValue, direct.netValue);
 });
 
+// ---- Deep snapshot: a quotation/offer's schedule must stay byte-for-byte
+// reproducible even if the unit's listPrice or the payment plan template
+// are edited after generation — the same immutability guarantee
+// PaymentScheduleLine gives a signed contract's real schedule. Previously
+// recompute() replayed calculate() against the LIVE unit/template, so an
+// old quotation's numbers silently drifted whenever either was edited. ----
+
+test('recompute is immune to a later edit of the unit listPrice', async () => {
+  const { quotations, units, unit, template } = await setup();
+  const quotation = await quotations.generate({ companyId: 'c1', unitId: unit.id, paymentPlanTemplateId: template.id, createdByUserId: 'u1' });
+  const { calculation: before } = await quotations.recompute(quotation.id, 'c1');
+
+  await units.save({ ...unit, listPrice: 5_000_000 }); // a real, later price change
+
+  const { calculation: after } = await quotations.recompute(quotation.id, 'c1');
+  assert.equal(after.totalPrice, before.totalPrice);
+  assert.equal(after.totalPrice, 1_000_000); // still the original price, not the edited one
+  assert.deepEqual(after.schedule, before.schedule);
+});
+
+test('recompute is immune to a later edit of the payment plan template', async () => {
+  const { quotations, paymentPlans, unit, template } = await setup();
+  const quotation = await quotations.generate({ companyId: 'c1', unitId: unit.id, paymentPlanTemplateId: template.id, createdByUserId: 'u1' });
+  const { calculation: before } = await quotations.recompute(quotation.id, 'c1');
+  assert.equal(quotation.sourceTemplateVersion, template.version);
+
+  // A real, later edit to the template's own terms (different down payment,
+  // different term) — would completely reshape a freshly-generated
+  // schedule, but must never change an already-generated quotation's.
+  await paymentPlans.updateTemplate(template.id, { downPaymentValue: 50, termMonths: 12 });
+
+  const { calculation: after } = await quotations.recompute(quotation.id, 'c1');
+  assert.deepEqual(after.schedule, before.schedule);
+  assert.equal(after.schedule.length, quotation.scheduleSnapshot.length);
+});
+
 test('getQuotation rejects cross-tenant access', async () => {
   const { quotations, unit, template } = await setup();
   const quotation = await quotations.generate({ companyId: 'c1', unitId: unit.id, paymentPlanTemplateId: template.id, createdByUserId: 'u1' });
@@ -137,6 +173,14 @@ test('updateStatus transitions status and rejects cross-tenant access', async ()
   const sent = await quotations.updateStatus(quotation.id, 'c1', 'sent');
   assert.equal(sent.status, 'sent');
   await assert.rejects(() => quotations.updateStatus(quotation.id, 'other-company', 'accepted'));
+});
+
+test('findUnitByCode looks a unit up by its code (case-insensitive), scoped to the company', async () => {
+  const { quotations, unit } = await setup();
+  const found = await quotations.findUnitByCode('c1', 'a-101');
+  assert.equal(found.id, unit.id);
+  await assert.rejects(() => quotations.findUnitByCode('c1', 'no-such-code'));
+  await assert.rejects(() => quotations.findUnitByCode('other-company', 'A-101'));
 });
 
 test('generate rejects a nonexistent unit', async () => {

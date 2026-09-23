@@ -136,6 +136,7 @@ import { InventoryImportService, INVENTORY_IMPORT_FIELDS, type InventoryImportOp
 import { DocumentIntelligenceService } from './modules/documents/document-intelligence.service.js';
 import { QuotationService } from './modules/quotations/quotation.service.js';
 import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
+import { buildOfferPdf, fetchOfferImages } from './modules/quotations/offer-pdf.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
 import type { MultipartBody } from './infra/multipart.js';
 
@@ -1245,6 +1246,19 @@ export async function buildApplication(options: AppOptions): Promise<Application
     leadId?: string;
   }
 
+  // Unit-code lookup — the Offer builder's entry point ("type a unit code,
+  // auto-fill everything"): a salesperson knows the code on the price
+  // list, never the unit's internal id.
+  httpServer.get('/api/quotations/units/by-code/:code', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'quotation', { companyId: actor.companyId, ownerUserId: actor.userId }))) {
+      throw new ForbiddenError('missing create:quotation permission');
+    }
+    const unit = await quotations.findUnitByCode(actor.companyId, ctx.params.code!);
+    const project = await inventory.getProject(unit.projectId);
+    return { status: 200, body: { unit, project } };
+  });
+
   httpServer.post('/api/quotations/calculate', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'quotation', { companyId: actor.companyId, ownerUserId: actor.userId }))) {
@@ -1346,6 +1360,64 @@ export async function buildApplication(options: AppOptions): Promise<Application
       relatedResourceId: quotation.id,
     });
     return { status: 201, body: message };
+  });
+
+  // Real, server-rendered Offer PDF — cover with project images, unit
+  // info, the immutable payment schedule snapshot, master plan with this
+  // unit highlighted, and the unit's own floor plan. See
+  // offer-pdf.service.ts; any image URL that fails to resolve is simply
+  // skipped, never a reason to fail generating the document.
+  httpServer.get('/api/quotations/:id/pdf', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const project = await inventory.getProject(quotation.projectId);
+    if (!project) throw new NotFoundError('project not found for this quotation');
+    const images = await fetchOfferImages(calculation.unit, project);
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+    return {
+      status: 200,
+      body: { filename: `${quotation.referenceNumber}.pdf`, contentType: 'application/pdf', base64: buffer.toString('base64') },
+    };
+  });
+
+  // Generates the real Offer PDF and sends it as an actual WhatsApp
+  // document (not a link, not a log-only entry) via the connected Meta
+  // Cloud API integration, then logs it to the lead's own communication
+  // timeline (tagged relatedResource:'lead' — not 'quotation' — so it
+  // surfaces on LeadTimelineService like any other lead activity).
+  httpServer.post('/api/quotations/:id/send-whatsapp', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const body = parseJsonBody<{ to: string; message?: string }>(ctx.body);
+    if (!body.to?.trim()) throw new ValidationError('"to" (the recipient WhatsApp number) is required');
+
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const project = await inventory.getProject(quotation.projectId);
+    if (!project) throw new NotFoundError('project not found for this quotation');
+    const images = await fetchOfferImages(calculation.unit, project);
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+
+    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project.name}, Unit ${calculation.unit.code}`;
+    const result = await integrations.send(
+      actor.companyId,
+      'whatsapp',
+      'send_document',
+      { to: body.to.trim(), body: caption, documentBuffer: buffer, documentFilename: `${quotation.referenceNumber}.pdf`, leadId: quotation.leadId },
+      actor.userId,
+    );
+
+    const message = await communication.sendMessage({
+      companyId: actor.companyId,
+      fromUserId: actor.userId,
+      subject: `Offer ${quotation.referenceNumber}`,
+      body: caption,
+      channel: 'whatsapp',
+      relatedResource: quotation.leadId ? 'lead' : 'quotation',
+      relatedResourceId: quotation.leadId ?? quotation.id,
+    });
+
+    return { status: 201, body: { message, providerResult: result } };
   });
 
   // ---- Inventory ----

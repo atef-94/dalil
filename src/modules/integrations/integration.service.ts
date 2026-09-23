@@ -30,10 +30,10 @@ const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     provider: 'whatsapp',
     name: 'WhatsApp Business',
-    description: 'Send WhatsApp messages via the Meta Cloud API. Also accepts an optional "webhook_secret" credential (not required to connect) to HMAC-verify inbound delivery-status callbacks — see CommunicationDeliveryService.',
+    description: 'Send WhatsApp text messages or documents (e.g. a generated Offer PDF) via the Meta Cloud API. Also accepts an optional "webhook_secret" credential (not required to connect) to HMAC-verify inbound delivery-status callbacks — see CommunicationDeliveryService.',
     configFields: ['phoneNumberId'],
     credentialFields: ['access_token'],
-    actions: ['send_message'],
+    actions: ['send_message', 'send_document'],
   },
   {
     provider: 'email',
@@ -376,9 +376,19 @@ export class IntegrationService {
   // ---- WhatsApp Business (Meta Cloud API) ----
   private async sendWhatsApp(connection: IntegrationConnection, credentials: Record<string, string>, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const to = this.requireString(params.to, 'to');
-    const body = this.requireString(params.body, 'body');
     const phoneNumberId = this.requireString(connection.config.phoneNumberId, 'phoneNumberId');
     const token = this.requireString(credentials.access_token, 'access_token');
+
+    // A document (e.g. a generated Offer PDF) is a real, separate Cloud
+    // API flow — upload the file first to get a media id, then reference
+    // that id in the message — rather than the single-call text path.
+    if (params.documentBuffer instanceof Buffer) {
+      const filename = typeof params.documentFilename === 'string' && params.documentFilename.trim() ? params.documentFilename.trim() : 'document.pdf';
+      const caption = typeof params.body === 'string' && params.body.trim() ? params.body.trim() : undefined;
+      return this.sendWhatsAppDocument(phoneNumberId, token, to, params.documentBuffer, filename, caption);
+    }
+
+    const body = this.requireString(params.body, 'body');
     const res = await this.fetchImpl(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -387,6 +397,49 @@ export class IntegrationService {
     if (!res.ok) throw new Error(`WhatsApp API returned ${res.status}`);
     // Real shape: { messages: [{ id: "wamid.xxx" }] } — only trusted when
     // actually present; never fabricated when the response doesn't carry it.
+    const responseBody = (await res.json().catch(() => ({}))) as { messages?: { id?: string }[] };
+    const providerMessageId = responseBody.messages?.[0]?.id;
+    return { status: res.status, ...(providerMessageId ? { providerMessageId } : {}) };
+  }
+
+  /** The real 2-step Meta Cloud API document flow: upload the file's bytes
+   * to get back a media id (never guessed — only used when the API
+   * actually returns one), then send a "document" message referencing
+   * that id. Both requests use the same connected phone number and
+   * access token as the text path above. */
+  private async sendWhatsAppDocument(
+    phoneNumberId: string,
+    token: string,
+    to: string,
+    fileBuffer: Buffer,
+    filename: string,
+    caption: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    form.set('messaging_product', 'whatsapp');
+    form.set('file', new Blob([fileBuffer], { type: 'application/pdf' }), filename);
+
+    const uploadRes = await this.fetchImpl(`https://graph.facebook.com/v20.0/${phoneNumberId}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    if (!uploadRes.ok) throw new Error(`WhatsApp media upload returned ${uploadRes.status}`);
+    const uploadBody = (await uploadRes.json().catch(() => ({}))) as { id?: string };
+    const mediaId = uploadBody.id;
+    if (!mediaId) throw new Error('WhatsApp media upload did not return a media id');
+
+    const res = await this.fetchImpl(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'document',
+        document: { id: mediaId, filename, ...(caption ? { caption } : {}) },
+      }),
+    });
+    if (!res.ok) throw new Error(`WhatsApp API returned ${res.status}`);
     const responseBody = (await res.json().catch(() => ({}))) as { messages?: { id?: string }[] };
     const providerMessageId = responseBody.messages?.[0]?.id;
     return { status: res.status, ...(providerMessageId ? { providerMessageId } : {}) };

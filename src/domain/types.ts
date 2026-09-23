@@ -250,18 +250,34 @@ export interface Quotation {
   projectId: string;
   leadId?: string;
   paymentPlanTemplateId: string;
+  /** The template's own `version` at the moment this quotation/offer was
+   * generated — captured alongside scheduleSnapshot below purely for
+   * traceability (which exact template shape produced this schedule),
+   * matching PaymentScheduleLine.sourceTemplateVersion's same purpose on a
+   * signed contract's real schedule. */
+  sourceTemplateVersion: number;
   status: QuotationStatus;
-  /** The exact inputs the schedule was computed from — stored so the
-   * quotation stays byte-for-byte reproducible even if the unit's price or
-   * the template are edited later (see QuotationService.recompute, which
-   * always replays these inputs through the same generateSchedule engine
-   * rather than re-reading current, possibly-changed, Unit/Template data). */
+  /** The exact inputs the schedule was computed from. */
   inputs: {
     totalPrice: number;
     discountPercent: number;
     escalationPercentPerYear: number;
     startDate: string;
   };
+  /** The generated schedule lines, computed once at generate() time and
+   * never recomputed — a real deep snapshot, not a replay. Reading a
+   * quotation/offer (preview, PDF, Excel, "view saved") always renders
+   * this stored array directly, so it stays byte-for-byte reproducible
+   * even if the unit's price or the payment plan template are edited or
+   * deleted after the fact — the same immutability guarantee
+   * PaymentScheduleLine gives a signed contract's real schedule. */
+  scheduleSnapshot: Array<{
+    sequence: number;
+    label: string;
+    dueDate: string;
+    amount: number;
+    status: PaymentScheduleLineStatus;
+  }>;
   createdByUserId: string;
   createdAt: string;
   updatedAt: string;
@@ -413,10 +429,30 @@ export interface Project {
   cashDiscountEffectiveDate?: string;
   maintenanceFeePercent?: number;
   maintenanceFeeAmount?: number;
+  /** Gallery of already-hosted image URLs (rendering/exterior/amenity
+   * photos) shown on the Offer PDF's cover — same "paste a URL" convention
+   * as ministerialDecisionDocumentUrl/locationMapUrl; this system has no
+   * object-storage upload pipeline, so images live wherever the developer
+   * already hosts them (a CDN, Drive, etc). */
+  imageUrls?: string[];
+  /** The project's master-plan image URL — a Unit highlights itself on
+   * this image via its own masterPlanPosition. */
+  masterPlanImageUrl?: string;
   createdAt: string;
 }
 
 export type UnitStatus = 'available' | 'held' | 'reserved' | 'contracted' | 'cancelled';
+
+/** A unit's highlighted rectangle on its project's masterPlanImageUrl, as
+ * percentages (0-100) of the image's width/height — resolution-independent
+ * so the same coordinates highlight correctly regardless of how the master
+ * plan image itself is later re-exported/resized. */
+export interface MasterPlanPosition {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export interface Unit {
   id: string;
@@ -448,6 +484,12 @@ export interface Unit {
    * computed on read as listPrice/areaSqm, never stored (and so never
    * goes stale relative to listPrice/areaSqm edits). */
   pricePerMeterOverride?: number;
+  /** An already-hosted image URL of this unit's own floor plan — shown on
+   * the Offer PDF alongside the master-plan highlight. Same "paste a URL"
+   * convention as Project.imageUrls (see its own comment). */
+  floorPlanImageUrl?: string;
+  /** Where this unit highlights on its project's masterPlanImageUrl. */
+  masterPlanPosition?: MasterPlanPosition;
   createdAt: string;
 }
 
