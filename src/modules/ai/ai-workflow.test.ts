@@ -438,6 +438,45 @@ test('the full happy path runs every step, waits for a reply, then completes and
   assert.notEqual(updatedLead!.stageId, lead.stageId); // moved on from Qualified
 });
 
+test('a reply logged in the exact same millisecond as the outreach step still counts as a reply (no false escalation on a timing tie)', async () => {
+  // Both timestamps are millisecond-resolution ISO strings — a fast
+  // environment can genuinely produce the same millisecond for the
+  // outreach step finishing and the reply landing. Reproduced here
+  // deterministically (rather than relying on incidental timing) by
+  // writing a reply whose createdAt exactly matches the send step's
+  // finishedAt, instead of hoping the real clock lands on a tie.
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'human-1', FULL_GRANTS);
+  const lead = await createHighValueLead(h, 'c1');
+  await seedMatchingUnit(h, 'c1');
+  await seedAffordableTemplate(h, 'c1');
+  await h.ai.setPolicy('c1', 'create_task', 'auto_execute', 'human-1');
+  await h.ai.setPolicy('c1', 'send_message', 'auto_execute', 'human-1');
+  await h.ai.setPolicy('c1', 'update_lead_status', 'auto_execute', 'human-1');
+
+  const run = await h.aiWorkflow.startWorkflow('high_value_lead_followup', 'c1', lead.id, 'human-1');
+  const steps = await h.aiWorkflow.getSteps(run.id, 'c1');
+  const sendStep = steps.find((s) => s.stepName === 'send_message' || s.stepName === 'integration_call')!;
+
+  await h.messages.save({
+    id: randomUUID(),
+    companyId: 'c1',
+    fromUserId: 'agent-1',
+    toUserId: 'human-1',
+    subject: 'Re: interested',
+    body: 'Yes, I would like to view it',
+    channel: 'internal',
+    status: 'sent',
+    relatedResource: 'lead',
+    relatedResourceId: lead.id,
+    createdAt: sendStep.finishedAt, // exact tie, not "a bit after"
+  });
+
+  const resumed = await h.aiWorkflow.resumeWorkflow(run.id, 'c1', 'human-1');
+  assert.equal(resumed.status, 'completed');
+  assert.match(resumed.outcomeSummary ?? '', /replied and was moved to/);
+});
+
 test('resuming with no reply logged creates a manual follow-up task and escalates', async () => {
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'human-1', FULL_GRANTS);

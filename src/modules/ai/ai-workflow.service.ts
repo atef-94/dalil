@@ -296,8 +296,14 @@ export class AiWorkflowService {
     const sendStep = steps.find((s) => s.stepName === 'send_message' || s.stepName === 'integration_call');
     const sentAt = sendStep ? Date.parse(sendStep.finishedAt) : Date.parse(run.createdAt);
 
+    // >= rather than > — both timestamps are millisecond-resolution
+    // ISO strings, and a fast environment (a quick test run, a quick real
+    // reply) can genuinely produce the same millisecond for the outreach
+    // step finishing and a reply landing right after; treating that tie as
+    // "not a reply" is a real, observed race (not a hypothetical one),
+    // wrongly escalating a run that actually got a reply.
     const messages = await this.communication.listForResource('lead', lead.id, run.companyId);
-    const reply = messages.find((m) => Date.parse(m.createdAt) > sentAt && m.fromUserId !== run.requestedByUserId);
+    const reply = messages.find((m) => Date.parse(m.createdAt) >= sentAt && m.fromUserId !== run.requestedByUserId);
 
     if (reply) {
       await this.recordStep(run, ++sequence, 'check_response', 'succeeded', 'A real reply/activity was logged against this lead since the outreach was sent.', undefined, { replied: true, messageId: reply.id });
