@@ -48,6 +48,7 @@ import type {
   Consultant,
   SalesPhoneNumber,
   ProjectUnitSpec,
+  ProjectFavorite,
   ActionApproval,
   ApprovableActionType,
   DiscountApprovalPolicy,
@@ -272,6 +273,7 @@ function buildRepos(db?: DatabaseSync) {
     consultants: repo<Consultant>('consultants'),
     salesPhoneNumbers: repo<SalesPhoneNumber>('sales_phone_numbers'),
     projectUnitSpecs: repo<ProjectUnitSpec>('project_unit_specs'),
+    projectFavorites: repo<ProjectFavorite>('project_favorites'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
@@ -423,6 +425,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     repos.consultants,
     repos.salesPhoneNumbers,
     repos.projectUnitSpecs,
+    repos.projectFavorites,
   );
   const inventoryImport = new InventoryImportService(inventory);
   const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
@@ -1459,8 +1462,12 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const q = ctx.query.get('q') ?? undefined;
     const minPriceFromRaw = ctx.query.get('minPriceFrom');
     const maxPriceToRaw = ctx.query.get('maxPriceTo');
+    const bedroomsRaw = ctx.query.get('bedrooms');
+    const sortRaw = ctx.query.get('sort');
+    const sort = sortRaw === 'price_asc' || sortRaw === 'price_desc' || sortRaw === 'newest' ? sortRaw : undefined;
+    const onlyFavorites = ctx.query.get('favorites') === 'true';
     const projects =
-      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw
+      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw || bedroomsRaw || sort
         ? await inventory.searchProjects(actor.companyId, {
             destination,
             developerId,
@@ -1468,10 +1475,29 @@ export async function buildApplication(options: AppOptions): Promise<Application
             q,
             minPriceFrom: minPriceFromRaw ? Number(minPriceFromRaw) : undefined,
             maxPriceTo: maxPriceToRaw ? Number(maxPriceToRaw) : undefined,
+            bedrooms: bedroomsRaw ? Number(bedroomsRaw) : undefined,
+            sort,
             limit: 200,
           })
         : await inventory.listProjects(actor.companyId);
-    return { status: 200, body: paginate(projects, ctx.query) };
+    const favoriteIds = new Set(await inventory.listFavoriteProjectIds(actor.companyId, actor.userId));
+    const filtered = onlyFavorites ? projects.filter((p) => favoriteIds.has(p.id)) : projects;
+    const page = paginate(filtered, ctx.query);
+    return { status: 200, body: { ...page, items: page.items.map((p) => ({ ...p, isFavorite: favoriteIds.has(p.id) })) } };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/favorite', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    await inventory.addProjectFavorite(actor.companyId, actor.userId, ctx.params.projectId!);
+    return { status: 204 };
+  });
+
+  httpServer.delete('/api/inventory/projects/:projectId/favorite', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    await inventory.removeProjectFavorite(actor.companyId, actor.userId, ctx.params.projectId!);
+    return { status: 204 };
   });
 
   httpServer.get('/api/inventory/projects/:projectId', async (ctx) => {

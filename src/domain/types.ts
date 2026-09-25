@@ -438,6 +438,22 @@ export interface Project {
   /** The project's master-plan image URL — a Unit highlights itself on
    * this image via its own masterPlanPosition. */
   masterPlanImageUrl?: string;
+  /** The single image shown on a project card in the catalog browser —
+   * same "paste a URL" convention as imageUrls; falls back to
+   * imageUrls[0] at the presentation layer when unset, never required. */
+  coverImageUrl?: string;
+  createdAt: string;
+}
+
+/** A staff user's personal bookmark on a Project — purely a UI convenience
+ * (quick access from the catalog browser's "favorites" filter), scoped to
+ * the user who set it, not a shared/team concept. Gated on the same
+ * view:project permission as browsing itself; no dedicated RBAC resource. */
+export interface ProjectFavorite {
+  id: string;
+  companyId: string;
+  userId: string;
+  projectId: string;
   createdAt: string;
 }
 

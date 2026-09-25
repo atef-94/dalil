@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRepository, type Repository } from '../../infra/repository.js';
 import { InventoryService, computePricePerMeter } from './inventory.service.js';
-import type { Consultant, Developer, Facility, Launch, Project, ProjectPhase, ProjectUnitSpec, Reservation, SalesPhoneNumber, Unit, UnitHold } from '../../domain/types.js';
+import type { Consultant, Developer, Facility, Launch, Project, ProjectFavorite, ProjectPhase, ProjectUnitSpec, Reservation, SalesPhoneNumber, Unit, UnitHold } from '../../domain/types.js';
 
 function freshService() {
   return new InventoryService(
@@ -26,6 +26,7 @@ function freshFullService() {
     new InMemoryRepository<Consultant>(),
     new InMemoryRepository<SalesPhoneNumber>(),
     new InMemoryRepository<ProjectUnitSpec>(),
+    new InMemoryRepository<ProjectFavorite>(),
   );
 }
 
@@ -491,6 +492,62 @@ test('searchProjects is scoped to the company and clamps limit to [1,200]', asyn
   const results = await svc.searchProjects('c1', { limit: 0 });
   assert.equal(results.length, 1);
   assert.equal(results[0]!.name, 'Project A');
+});
+
+test('searchProjects sorts by newest, price ascending, and price descending', async () => {
+  const svc = freshFullService();
+  const cheap = await svc.createProject({ companyId: 'c1', name: 'Cheap', priceFrom: 1_000_000, priceTo: 2_000_000 });
+  await new Promise((r) => setTimeout(r, 2));
+  const pricey = await svc.createProject({ companyId: 'c1', name: 'Pricey', priceFrom: 9_000_000, priceTo: 12_000_000 });
+
+  const newest = await svc.searchProjects('c1', { sort: 'newest' });
+  assert.deepEqual(newest.map((p) => p.id), [pricey.id, cheap.id]);
+
+  const asc = await svc.searchProjects('c1', { sort: 'price_asc' });
+  assert.deepEqual(asc.map((p) => p.id), [cheap.id, pricey.id]);
+
+  const desc = await svc.searchProjects('c1', { sort: 'price_desc' });
+  assert.deepEqual(desc.map((p) => p.id), [pricey.id, cheap.id]);
+});
+
+test('searchProjects filters by bedrooms via the project catalog unit specs, falling back to physical units when no specs exist', async () => {
+  const svc = freshFullService();
+  const withSpec = await svc.createProject({ companyId: 'c1', name: 'Has Spec' });
+  await svc.createProjectUnitSpec({ companyId: 'c1', projectId: withSpec.id, unitType: 'apartment', bedrooms: 3 });
+  const withUnitOnly = await svc.createProject({ companyId: 'c1', name: 'Has Unit Only' });
+  await svc.createUnit({ companyId: 'c1', projectId: withUnitOnly.id, code: 'U1', unitType: 'apartment', areaSqm: 100, listPrice: 1_000_000, bedrooms: 2 });
+  await svc.createProject({ companyId: 'c1', name: 'No Match' });
+
+  const threeBed = await svc.searchProjects('c1', { bedrooms: 3 });
+  assert.deepEqual(threeBed.map((p) => p.name), ['Has Spec']);
+
+  const twoBed = await svc.searchProjects('c1', { bedrooms: 2 });
+  assert.deepEqual(twoBed.map((p) => p.name), ['Has Unit Only']);
+});
+
+// ---- Project favorites ----
+
+test('addProjectFavorite is idempotent, removeProjectFavorite un-favorites, and listFavoriteProjectIds is scoped per user+company', async () => {
+  const svc = freshFullService();
+  const project = await svc.createProject({ companyId: 'c1', name: 'Favorited Project' });
+
+  await svc.addProjectFavorite('c1', 'user-1', project.id);
+  await svc.addProjectFavorite('c1', 'user-1', project.id); // idempotent — no duplicate row
+  let ids = await svc.listFavoriteProjectIds('c1', 'user-1');
+  assert.deepEqual(ids, [project.id]);
+
+  const otherUserIds = await svc.listFavoriteProjectIds('c1', 'user-2');
+  assert.deepEqual(otherUserIds, []);
+
+  await svc.removeProjectFavorite('c1', 'user-1', project.id);
+  ids = await svc.listFavoriteProjectIds('c1', 'user-1');
+  assert.deepEqual(ids, []);
+});
+
+test('addProjectFavorite rejects a project belonging to a different company (cross-tenant IDOR)', async () => {
+  const svc = freshFullService();
+  const project = await svc.createProject({ companyId: 'c1', name: 'Project X' });
+  await assert.rejects(() => svc.addProjectFavorite('c2', 'user-1', project.id));
 });
 
 // ---- searchUnits ----

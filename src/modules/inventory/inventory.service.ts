@@ -8,6 +8,7 @@ import type {
   Launch,
   MasterPlanPosition,
   Project,
+  ProjectFavorite,
   ProjectPhase,
   ProjectUnitSpec,
   Reservation,
@@ -123,6 +124,7 @@ export interface CreateProjectInput {
   maintenanceFeeAmount?: number;
   imageUrls?: string[];
   masterPlanImageUrl?: string;
+  coverImageUrl?: string;
 }
 
 /** Every field is optional and only ever overwrites what's explicitly
@@ -193,6 +195,10 @@ export interface ProjectSearchFilters {
   maxPriceTo?: number;
   /** Matches against Project.typeOfUnits (any element). */
   unitType?: string;
+  /** Matches if any of the project's catalog unit specs (or, absent
+   * those, its physical units) carries this bedroom count. */
+  bedrooms?: number;
+  sort?: 'newest' | 'price_asc' | 'price_desc';
   q?: string;
   limit?: number;
 }
@@ -224,6 +230,7 @@ export class InventoryService {
     private readonly consultants?: Repository<Consultant>,
     private readonly salesPhones?: Repository<SalesPhoneNumber>,
     private readonly projectUnitSpecs?: Repository<ProjectUnitSpec>,
+    private readonly favorites?: Repository<ProjectFavorite>,
   ) {}
 
   /**
@@ -286,6 +293,7 @@ export class InventoryService {
     if (input.maintenanceFeeAmount !== undefined) out.maintenanceFeeAmount = this.nonNegative(input.maintenanceFeeAmount, 'maintenanceFeeAmount');
     if (input.imageUrls !== undefined) out.imageUrls = input.imageUrls.length ? input.imageUrls : undefined;
     if (input.masterPlanImageUrl !== undefined) out.masterPlanImageUrl = input.masterPlanImageUrl?.trim() || undefined;
+    if (input.coverImageUrl !== undefined) out.coverImageUrl = input.coverImageUrl?.trim() || undefined;
     return out;
   }
 
@@ -313,18 +321,39 @@ export class InventoryService {
   async searchProjects(companyId: string, filters: ProjectSearchFilters = {}): Promise<Project[]> {
     const q = filters.q?.trim().toLowerCase();
     const limit = Math.min(200, Math.max(1, filters.limit ?? 50));
-    return this.projects
-      .findAll((p) => {
-        if (p.companyId !== companyId) return false;
-        if (filters.destination && p.destination?.toLowerCase() !== filters.destination.toLowerCase()) return false;
-        if (filters.developerId && p.developerId !== filters.developerId) return false;
-        if (filters.minPriceFrom !== undefined && (p.priceFrom === undefined || p.priceFrom < filters.minPriceFrom)) return false;
-        if (filters.maxPriceTo !== undefined && (p.priceTo === undefined || p.priceTo > filters.maxPriceTo)) return false;
-        if (filters.unitType && !(p.typeOfUnits ?? []).some((t) => t.toLowerCase() === filters.unitType!.toLowerCase())) return false;
-        if (q && !(p.name.toLowerCase().includes(q) || p.destination?.toLowerCase().includes(q) || p.location?.toLowerCase().includes(q))) return false;
-        return true;
-      })
-      .then((rows) => rows.slice(0, limit));
+    let rows = await this.projects.findAll((p) => {
+      if (p.companyId !== companyId) return false;
+      if (filters.destination && p.destination?.toLowerCase() !== filters.destination.toLowerCase()) return false;
+      if (filters.developerId && p.developerId !== filters.developerId) return false;
+      if (filters.minPriceFrom !== undefined && (p.priceFrom === undefined || p.priceFrom < filters.minPriceFrom)) return false;
+      if (filters.maxPriceTo !== undefined && (p.priceTo === undefined || p.priceTo > filters.maxPriceTo)) return false;
+      if (filters.unitType && !(p.typeOfUnits ?? []).some((t) => t.toLowerCase() === filters.unitType!.toLowerCase())) return false;
+      if (q && !(p.name.toLowerCase().includes(q) || p.destination?.toLowerCase().includes(q) || p.location?.toLowerCase().includes(q))) return false;
+      return true;
+    });
+    if (filters.bedrooms !== undefined) {
+      const matches = await Promise.all(rows.map((p) => this.projectHasBedrooms(p.id, filters.bedrooms!)));
+      rows = rows.filter((_p, i) => matches[i]);
+    }
+    rows = this.sortProjects(rows, filters.sort);
+    return rows.slice(0, limit);
+  }
+
+  /** Whether any of a project's catalog unit specs — or, when none exist,
+   * its physical units — carries this bedroom count. Used only by the
+   * "rooms" filter in searchProjects; not a general-purpose lookup. */
+  private async projectHasBedrooms(projectId: string, bedrooms: number): Promise<boolean> {
+    const specs = this.projectUnitSpecs ? await this.projectUnitSpecs.findAll((s) => s.projectId === projectId) : [];
+    if (specs.length) return specs.some((s) => s.bedrooms === bedrooms);
+    const units = await this.units.findAll((u) => u.projectId === projectId);
+    return units.some((u) => u.bedrooms === bedrooms);
+  }
+
+  private sortProjects(rows: Project[], sort?: ProjectSearchFilters['sort']): Project[] {
+    if (sort === 'price_asc') return [...rows].sort((a, b) => (a.priceFrom ?? Infinity) - (b.priceFrom ?? Infinity));
+    if (sort === 'price_desc') return [...rows].sort((a, b) => (b.priceTo ?? -Infinity) - (a.priceTo ?? -Infinity));
+    if (sort === 'newest') return [...rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return rows;
   }
 
   /** Non-destructive: only fields explicitly present in `updates` are
@@ -341,6 +370,29 @@ export class InventoryService {
       name: updates.name?.trim() || project.name,
       location: updates.location !== undefined ? updates.location?.trim() || undefined : project.location,
     });
+  }
+
+  /** Idempotent: favoriting an already-favorited project is a no-op, not a
+   * duplicate row — the catalog browser's heart toggle can call this freely. */
+  async addProjectFavorite(companyId: string, userId: string, projectId: string): Promise<void> {
+    if (!this.favorites) return;
+    const project = await this.projects.findById(projectId);
+    if (!project || project.companyId !== companyId) throw new NotFoundError('project not found');
+    const existing = await this.favorites.findAll((f) => f.companyId === companyId && f.userId === userId && f.projectId === projectId);
+    if (existing.length) return;
+    await this.favorites.save({ id: randomUUID(), companyId, userId, projectId, createdAt: new Date().toISOString() });
+  }
+
+  async removeProjectFavorite(companyId: string, userId: string, projectId: string): Promise<void> {
+    if (!this.favorites) return;
+    const existing = await this.favorites.findAll((f) => f.companyId === companyId && f.userId === userId && f.projectId === projectId);
+    await Promise.all(existing.map((f) => this.favorites!.deleteById(f.id)));
+  }
+
+  async listFavoriteProjectIds(companyId: string, userId: string): Promise<string[]> {
+    if (!this.favorites) return [];
+    const rows = await this.favorites.findAll((f) => f.companyId === companyId && f.userId === userId);
+    return rows.map((f) => f.projectId);
   }
 
   async createUnit(input: CreateUnitInput): Promise<Unit> {
