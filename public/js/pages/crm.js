@@ -7,27 +7,26 @@ import { openImportWizard } from '../import-wizard.js';
 import { renderOpportunities } from './opportunities.js';
 import { renderTemplates } from './templates.js';
 import { renderQuotations } from './quotations.js';
-import { renderReservations } from './reservations.js';
-import { renderContracts } from './contracts.js';
 import { renderCommunication } from './communication.js';
 
 /**
- * Sales/CRM restructuring: Leads, Follow-ups, Offers, Payment Plans,
- * Quotations, Reservations, Contracts, Communications, and Tasks all live
- * inside this one CRM workspace instead of as separate top-level sidebar
- * sections (see app.js's NAV) — each tab below reuses the exact same page
- * component/API/RBAC gate that used to be a standalone route, so nothing is
- * duplicated or rebuilt, only re-navigated to. "Activities" (also named in
- * the restructuring spec) isn't a separate tab: it's a lead's own
- * timeline/composer, already in the lead detail panel below.
+ * Sales/CRM restructuring: Leads, Offers, Payment Plans, Quotations,
+ * Communications, and Tasks all live inside this one CRM workspace instead
+ * of as separate top-level sidebar sections (see app.js's NAV) — each tab
+ * below reuses the exact same page component/API/RBAC gate that used to be
+ * a standalone route, so nothing is duplicated or rebuilt, only
+ * re-navigated to. "Activities" (also named in the restructuring spec)
+ * isn't a separate tab: it's a lead's own timeline/composer, already in the
+ * lead detail panel below. Reservations, Contracts, and Follow-ups aren't
+ * tabs either — each duplicated a pipeline stage card the Dashboard already
+ * shows (Reservations/Contacts stages; Follow Up/Follow Up After Meeting
+ * stages), so a stage card is the only way into that stage's lead list now.
  */
 function reusedModuleTabs(locale) {
   return [
     { key: 'module:offers', label: t(locale, 'nav_offers'), resource: 'opportunity', render: renderOpportunities },
     { key: 'module:payment-plans', label: t(locale, 'nav_templates'), resource: 'payment_plan_template', render: renderTemplates },
     { key: 'module:quotations', label: t(locale, 'nav_quotations'), resource: 'quotation', render: renderQuotations },
-    { key: 'module:reservations', label: t(locale, 'nav_reservations'), resource: 'unit', render: renderReservations },
-    { key: 'module:contracts', label: t(locale, 'nav_contracts'), resource: 'contract', render: renderContracts },
     { key: 'module:communications', label: t(locale, 'nav_communication'), resource: 'message', render: renderCommunication },
   ];
 }
@@ -105,13 +104,11 @@ export async function renderCrm(container) {
     }
   }
 
-  // Follow-ups and Tasks reuse existing APIs (leads' own SLA due date;
-  // TaskService via /api/tasks/my) but had no dedicated list view before —
-  // everything else in moduleTabs reuses a page that already existed as
-  // its own top-level route.
+  // Tasks reuses the existing TaskService API but had no dedicated list
+  // view before — everything else in moduleTabs reuses a page that already
+  // existed as its own top-level route.
   const moduleTabs = [
     ...reusedModuleTabs(locale),
-    { key: 'module:followups', label: t(locale, 'nav_followups'), resource: 'lead', render: renderFollowUps },
     { key: 'module:tasks', label: t(locale, 'nav_tasks'), resource: 'task', render: renderTasksTab },
   ].filter((m) => can(m.resource, 'view'));
 
@@ -288,46 +285,6 @@ export async function renderCrm(container) {
     actions.appendChild(aiBtn);
 
     return actions;
-  }
-
-  // ---- Follow-ups tab (real leads whose first-contact SLA is due/overdue) ----
-
-  async function renderFollowUps(target) {
-    clear(target);
-    target.appendChild(loadingState());
-    try {
-      const [leadsPage, stagesNow] = await Promise.all([
-        api.get('/api/crm/leads', { limit: 200 }),
-        api.get('/api/crm/stages'),
-      ]);
-      const stageById = new Map(stagesNow.map((s) => [s.id, s]));
-      const now = Date.now();
-      const due = leadsPage.items
-        .filter((l) => {
-          const stage = stageById.get(l.stageId);
-          if (!l.firstContactSlaDueAt || stage?.isWon || stage?.isLost) return false;
-          return true;
-        })
-        .map((l) => ({ ...l, dueMs: Date.parse(l.firstContactSlaDueAt) }))
-        .sort((a, b) => a.dueMs - b.dueMs);
-
-      clear(target);
-      target.appendChild(el('p', { class: 'page-subtitle' }, 'Every active lead with a first-contact follow-up due, overdue first.'));
-      target.appendChild(table(
-        [
-          { label: 'Name', key: 'fullName' },
-          { label: 'Phone', key: 'phone' },
-          { label: 'Stage', render: (l) => stageById.get(l.stageId)?.name ?? '—' },
-          { label: 'Follow-up due', render: (l) => (l.dueMs < now ? badge(new Date(l.dueMs).toLocaleString(), 'red') : new Date(l.dueMs).toLocaleString()) },
-          { label: '', render: (l) => rowActions(l, () => renderFollowUps(target)) },
-        ],
-        due,
-        { empty: 'No follow-ups due — every active lead has been contacted on time.' },
-      ));
-    } catch (err) {
-      clear(target);
-      target.appendChild(errorBanner(err.message));
-    }
   }
 
   // ---- Tasks tab (reuses the existing TaskService/API — no new backend) ----
