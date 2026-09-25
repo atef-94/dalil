@@ -4,7 +4,6 @@ import { can, getLocale } from '../state.js';
 import { t } from '../i18n.js';
 import { setAiContext, clearAiContext } from './ai-panel.js';
 import { openImportWizard } from '../import-wizard.js';
-import { renderCustomers } from './customers.js';
 import { renderOpportunities } from './opportunities.js';
 import { renderTemplates } from './templates.js';
 import { renderQuotations } from './quotations.js';
@@ -13,21 +12,17 @@ import { renderContracts } from './contracts.js';
 import { renderCommunication } from './communication.js';
 
 /**
- * Sales/CRM restructuring: Leads, Follow-ups, Customers, Offers, Payment
- * Plans, Quotations, Reservations, Contracts, Communications, and Tasks all
- * live inside this one CRM workspace instead of as separate top-level
- * sidebar sections (see app.js's NAV) — each tab below reuses the exact
- * same page component/API/RBAC gate that used to be a standalone route, so
- * nothing is duplicated or rebuilt, only re-navigated to. "Activities" and
- * "Pipeline" (also named in the restructuring spec) aren't separate tabs:
- * Activities is a lead's own timeline/composer (already in the lead detail
- * panel below), and Pipeline is the Dashboard tab's real-time stage
- * breakdown — building distinct tabs for those would just duplicate what's
- * already here under another name.
+ * Sales/CRM restructuring: Leads, Follow-ups, Offers, Payment Plans,
+ * Quotations, Reservations, Contracts, Communications, and Tasks all live
+ * inside this one CRM workspace instead of as separate top-level sidebar
+ * sections (see app.js's NAV) — each tab below reuses the exact same page
+ * component/API/RBAC gate that used to be a standalone route, so nothing is
+ * duplicated or rebuilt, only re-navigated to. "Activities" (also named in
+ * the restructuring spec) isn't a separate tab: it's a lead's own
+ * timeline/composer, already in the lead detail panel below.
  */
 function reusedModuleTabs(locale) {
   return [
-    { key: 'module:customers', label: t(locale, 'nav_customers'), resource: 'portal_access', render: renderCustomers },
     { key: 'module:offers', label: t(locale, 'nav_offers'), resource: 'opportunity', render: renderOpportunities },
     { key: 'module:payment-plans', label: t(locale, 'nav_templates'), resource: 'payment_plan_template', render: renderTemplates },
     { key: 'module:quotations', label: t(locale, 'nav_quotations'), resource: 'quotation', render: renderQuotations },
@@ -120,17 +115,18 @@ export async function renderCrm(container) {
     { key: 'module:tasks', label: t(locale, 'nav_tasks'), resource: 'task', render: renderTasksTab },
   ].filter((m) => can(m.resource, 'view'));
 
-  // Only the reused-module tabs (Customers, Offers, Payment Plans, ...) live
-  // in the horizontal tab bar. Dashboard and per-stage entries used to sit
-  // here too, but they duplicated the real-time pipeline stage cards the
-  // Dashboard already renders — a stage card is now the way into that
-  // stage's lead list (see renderDashboard's statCard onClick below), and
-  // the Dashboard itself is the workspace's default/home view rather than a
-  // selectable tab.
+  // Dashboard is the first tab in the horizontal bar (it used to be the
+  // "Customers" module tab's slot) and renders the real-time pipeline
+  // view — the same stat cards renderDashboard always produced. Per-stage
+  // lead lists still aren't separate tabs: a pipeline stat card is the way
+  // into that stage's lead list (see renderDashboard's statCard onClick
+  // below).
   function renderTabsBar() {
     clear(tabsSlot);
-    if (moduleTabs.length === 0) return;
-    const items = moduleTabs.map((m) => ({ key: m.key, label: m.label }));
+    const items = [
+      { key: 'dashboard', label: t(locale, 'nav_dashboard') },
+      ...moduleTabs.map((m) => ({ key: m.key, label: m.label })),
+    ];
     tabsSlot.appendChild(tabs(items, activeTab, (key) => {
       activeTab = key;
       offset = 0;
@@ -140,10 +136,8 @@ export async function renderCrm(container) {
   }
 
   /** Leaves whatever's currently shown (a module tab or a stage's lead
-   * list) and returns to the Dashboard's pipeline view — the tab bar has
-   * no "active" entry for this, by design (see renderTabsBar above), so
-   * this is reached via a stage-list's own "Back to Pipeline" link or by
-   * re-opening CRM from the sidebar. */
+   * list) and returns to the Dashboard tab — reached via a stage-list's
+   * own "Back to Pipeline" link. */
   function goToDashboard() {
     activeTab = 'dashboard';
     offset = 0;
