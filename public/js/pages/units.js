@@ -27,6 +27,16 @@ export async function renderUnits(container) {
         ],
         mappingOptions: [
           {
+            key: 'mode',
+            type: 'select',
+            label: 'What does this file contain?',
+            options: [
+              { value: 'availability', label: 'Live Availability — real, individually-coded units (Code / Floor / Price / Status)' },
+              { value: 'catalog', label: 'Project Catalog — a market/product range, no unit codes (Developer / Project / Phase / BUA From-To / Price From-To)' },
+            ],
+            default: 'availability',
+          },
+          {
             key: 'rangeStrategy',
             type: 'select',
             label: "If a row has a range (e.g. Price From/To or BUA From/To) instead of one value, use:",
@@ -211,6 +221,14 @@ export async function renderUnits(container) {
         body.appendChild(errorBanner(err.message));
         return;
       }
+      let unitSpecs = [];
+      try {
+        unitSpecs = await api.get(`/api/inventory/projects/${project.id}/unit-specs`);
+      } catch (err) {
+        // view:project may be absent for this role — the rest of the panel
+        // still renders fine without it.
+      }
+
       clear(body);
       const { project: p, developer, phases, launches, facilities, engineeringConsultant, projectManagement, salesPhoneNumbers } = details;
 
@@ -336,6 +354,25 @@ export async function renderUnits(container) {
       body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
         el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, 'Launches'), addLaunchBtn]),
         table([{ label: 'Name', key: 'name' }, { label: 'Date', render: (l) => l.launchDate || '—' }], launches, { empty: 'No launches yet.' }),
+      ]));
+
+      // Unit Specs (Catalog) — the project's marketed product ranges (Unit
+      // Type + Bedrooms -> BUA/price ranges), populated by a Project
+      // Catalog import or added manually; distinct from real, physically
+      // coded Units below.
+      body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
+        el('h4', { style: 'margin:0 0 8px' }, 'Unit Specs (Catalog)'),
+        table(
+          [
+            { label: 'Unit Type', key: 'unitType' },
+            { label: 'Bedrooms', render: (s) => (s.bedrooms !== undefined && s.bedrooms !== null ? String(s.bedrooms) : '—') },
+            { label: 'BUA (sqm)', render: (s) => (s.buaFromSqm || s.buaToSqm ? `${s.buaFromSqm ?? '—'} – ${s.buaToSqm ?? '—'}` : '—') },
+            { label: 'Price', render: (s) => (s.priceFrom || s.priceTo ? `${s.priceFrom ? Number(s.priceFrom).toLocaleString() : '—'} – ${s.priceTo ? Number(s.priceTo).toLocaleString() : '—'}` : '—') },
+            { label: 'Finishing', render: (s) => s.finishingType || '—' },
+          ],
+          unitSpecs,
+          { empty: 'No catalog ranges yet — import a Project Catalog file, or none apply to this project.' },
+        ),
       ]));
 
       // Sales phone numbers

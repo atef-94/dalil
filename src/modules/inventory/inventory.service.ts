@@ -9,6 +9,7 @@ import type {
   MasterPlanPosition,
   Project,
   ProjectPhase,
+  ProjectUnitSpec,
   Reservation,
   SalesPhoneNumber,
   Unit,
@@ -38,11 +39,24 @@ export interface CreateUnitInput {
   pricePerMeterOverride?: number;
   floorPlanImageUrl?: string;
   masterPlanPosition?: MasterPlanPosition;
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
+  /** An initial status other than the default 'available' — used only when
+   * an availability import creates a unit that a source file already shows
+   * as e.g. sold/reserved (an existing inventory snapshot, not a fresh
+   * listing). Set directly at creation, bypassing the hold/reservation
+   * machinery entirely since there is no real internal hold/reservation to
+   * create for a unit whose non-available status came from an external
+   * source, not this system's own CRM flow. */
+  initialStatus?: UnitStatus;
+  sourceStatus?: string;
 }
 
 /** Fields updateUnitDetails() is allowed to touch — deliberately the same
  * "commercial/descriptive, never status" boundary as before, just widened
- * to the new real-estate attributes. */
+ * to the new real-estate attributes. Status (and its own provenance,
+ * sourceStatus) is intentionally excluded — see updateUnitAvailabilityFromImport. */
 export type UpdateUnitDetailsInput = Partial<
   Pick<
     CreateUnitInput,
@@ -61,6 +75,9 @@ export type UpdateUnitDetailsInput = Partial<
     | 'pricePerMeterOverride'
     | 'floorPlanImageUrl'
     | 'masterPlanPosition'
+    | 'sourceImportId'
+    | 'sourceSheet'
+    | 'sourceRow'
   >
 >;
 
@@ -112,6 +129,35 @@ export interface CreateProjectInput {
  * passed — updateProjectDetails() never blanks out an existing value just
  * because a caller (e.g. an import row) didn't happen to mention it. */
 export type UpdateProjectDetailsInput = Partial<Omit<CreateProjectInput, 'companyId' | 'name'>> & { name?: string };
+
+export interface CreateProjectUnitSpecInput {
+  companyId: string;
+  projectId: string;
+  phaseId?: string;
+  unitType: string;
+  bedrooms?: number;
+  landAreaFromSqm?: number;
+  landAreaToSqm?: number;
+  buaFromSqm?: number;
+  buaToSqm?: number;
+  gardenAreaFromSqm?: number;
+  gardenAreaToSqm?: number;
+  priceFrom?: number;
+  priceTo?: number;
+  pricePerMeter?: number;
+  finishingType?: string;
+  delivery?: DeliveryInfo;
+  paymentPlanTemplateIds?: string[];
+  cashDiscountPercent?: number;
+  maintenanceFeePercent?: number;
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
+}
+
+/** Non-destructive, same convention as UpdateProjectDetailsInput — an
+ * omitted field keeps its current value. */
+export type UpdateProjectUnitSpecInput = Partial<Omit<CreateProjectUnitSpecInput, 'companyId' | 'projectId' | 'unitType'>>;
 
 export interface UnitSearchFilters {
   projectId?: string;
@@ -177,6 +223,7 @@ export class InventoryService {
     private readonly facilities?: Repository<Facility>,
     private readonly consultants?: Repository<Consultant>,
     private readonly salesPhones?: Repository<SalesPhoneNumber>,
+    private readonly projectUnitSpecs?: Repository<ProjectUnitSpec>,
   ) {}
 
   /**
@@ -306,9 +353,14 @@ export class InventoryService {
     if (input.gardenAreaSqm !== undefined && !(input.gardenAreaSqm >= 0)) throw new ValidationError('gardenAreaSqm must be >= 0');
     const masterPlanPosition = this.sanitizeMasterPlanPosition(input.masterPlanPosition);
 
-    const existing = await this.units.findAll((u) => u.companyId === input.companyId && u.code === input.code.trim());
+    // Scoped per-project, not company-wide: two different projects (e.g. two
+    // different developers imported from two different availability sheets)
+    // commonly reuse the same short unit code, and that must not collide.
+    const existing = await this.units.findAll(
+      (u) => u.companyId === input.companyId && u.projectId === input.projectId.trim() && u.code.toLowerCase() === input.code.trim().toLowerCase(),
+    );
     if (existing.length > 0) {
-      throw new InventoryError(`unit code ${input.code} already exists`, 409);
+      throw new InventoryError(`unit code ${input.code} already exists in this project`, 409);
     }
 
     const unit: Unit = {
@@ -320,7 +372,8 @@ export class InventoryService {
       unitType: input.unitType.trim(),
       areaSqm: input.areaSqm,
       listPrice: input.listPrice,
-      status: 'available',
+      status: input.initialStatus ?? 'available',
+      sourceStatus: input.sourceStatus,
       floorLabel: input.floorLabel?.trim() || undefined,
       bedrooms: input.bedrooms,
       designType: input.designType?.trim() || undefined,
@@ -332,6 +385,9 @@ export class InventoryService {
       pricePerMeterOverride: input.pricePerMeterOverride,
       floorPlanImageUrl: input.floorPlanImageUrl?.trim() || undefined,
       masterPlanPosition,
+      sourceImportId: input.sourceImportId,
+      sourceSheet: input.sourceSheet,
+      sourceRow: input.sourceRow,
       createdAt: new Date().toISOString(),
     };
     return this.units.save(unit);
@@ -437,11 +493,57 @@ export class InventoryService {
       masterPlanPosition,
       delivery: updates.delivery ?? unit.delivery,
       pricePerMeterOverride: updates.pricePerMeterOverride ?? unit.pricePerMeterOverride,
+      sourceImportId: updates.sourceImportId ?? unit.sourceImportId,
+      sourceSheet: updates.sourceSheet ?? unit.sourceSheet,
+      sourceRow: updates.sourceRow ?? unit.sourceRow,
     });
   }
 
   async getUnit(id: string): Promise<Unit | undefined> {
     return this.units.findById(id);
+  }
+
+  /** Availability-import-driven status sync — distinct from
+   * updateUnitDetails() (which explicitly never touches status) and from
+   * holdUnit/reserveUnit/markContracted (which represent a real internal
+   * sales action taken through this system's own CRM flow). A live-
+   * availability re-import needs to reflect a developer's own external
+   * status changes (Available -> Hold -> Reserved -> Sold) without ever
+   * overwriting a status this system's own CRM flow set: if a real active
+   * UnitHold or Reservation currently exists for this unit, the import is
+   * refused — same "protected, never silently touched" precedent as
+   * updateUnitDetails already applies to any non-'available' unit. Only
+   * when no internal hold/reservation is backing the current status (i.e.
+   * it was itself set by a prior import, or the unit is already
+   * 'available') is a re-import allowed to move it again. */
+  async updateUnitAvailabilityFromImport(
+    unitId: string,
+    companyId: string,
+    status: UnitStatus,
+    sourceStatus: string,
+    provenance?: { sourceImportId?: string; sourceSheet?: string; sourceRow?: number },
+  ): Promise<Unit> {
+    return this.mutex.runExclusive(unitId, async () => {
+      const unit = await this.units.findById(unitId);
+      if (!unit || unit.companyId !== companyId) throw new NotFoundError('unit not found');
+      if (unit.status !== status && unit.status !== 'available') {
+        const [activeHolds, activeReservations] = await Promise.all([
+          this.holds.findAll((h) => h.unitId === unitId && h.active),
+          this.reservations.findAll((r) => r.unitId === unitId && r.status === 'active'),
+        ]);
+        if (activeHolds.length > 0 || activeReservations.length > 0) {
+          throw new InventoryError(`cannot update availability for unit "${unit.code}" — it has an active internal hold/reservation`, 409);
+        }
+      }
+      return this.units.save({
+        ...unit,
+        status,
+        sourceStatus,
+        sourceImportId: provenance?.sourceImportId ?? unit.sourceImportId,
+        sourceSheet: provenance?.sourceSheet ?? unit.sourceSheet,
+        sourceRow: provenance?.sourceRow ?? unit.sourceRow,
+      });
+    });
   }
 
   /** The entity/repo has existed since Reservations were introduced (via
@@ -817,5 +919,93 @@ export class InventoryService {
       this.listSalesPhoneNumbers(companyId, id),
     ]);
     return { project, developer, phases, launches, facilities, engineeringConsultant, projectManagement, salesPhoneNumbers };
+  }
+
+  // ---- Project Unit Specs (catalog / product ranges) ----
+  // "What a project markets" (a range of BUA/price for a unit type +
+  // bedroom count), as opposed to "what physically exists" (a real, coded
+  // Unit). Gated on the existing 'project' RBAC resource, same as every
+  // other project-master-data entity above.
+
+  private sanitizeProjectUnitSpecFields(input: UpdateProjectUnitSpecInput): Partial<ProjectUnitSpec> {
+    const out: Partial<ProjectUnitSpec> = {};
+    if (input.phaseId !== undefined) out.phaseId = input.phaseId || undefined;
+    if (input.bedrooms !== undefined) out.bedrooms = input.bedrooms;
+    if (input.landAreaFromSqm !== undefined) out.landAreaFromSqm = this.nonNegative(input.landAreaFromSqm, 'landAreaFromSqm');
+    if (input.landAreaToSqm !== undefined) out.landAreaToSqm = this.nonNegative(input.landAreaToSqm, 'landAreaToSqm');
+    if (input.buaFromSqm !== undefined) out.buaFromSqm = this.nonNegative(input.buaFromSqm, 'buaFromSqm');
+    if (input.buaToSqm !== undefined) out.buaToSqm = this.nonNegative(input.buaToSqm, 'buaToSqm');
+    if (input.gardenAreaFromSqm !== undefined) out.gardenAreaFromSqm = this.nonNegative(input.gardenAreaFromSqm, 'gardenAreaFromSqm');
+    if (input.gardenAreaToSqm !== undefined) out.gardenAreaToSqm = this.nonNegative(input.gardenAreaToSqm, 'gardenAreaToSqm');
+    if (input.priceFrom !== undefined) out.priceFrom = this.nonNegative(input.priceFrom, 'priceFrom');
+    if (input.priceTo !== undefined) out.priceTo = this.nonNegative(input.priceTo, 'priceTo');
+    if (input.pricePerMeter !== undefined) out.pricePerMeter = this.nonNegative(input.pricePerMeter, 'pricePerMeter');
+    if (input.finishingType !== undefined) out.finishingType = input.finishingType?.trim() || undefined;
+    if (input.delivery !== undefined) out.delivery = input.delivery;
+    if (input.paymentPlanTemplateIds !== undefined) out.paymentPlanTemplateIds = input.paymentPlanTemplateIds;
+    if (input.cashDiscountPercent !== undefined) out.cashDiscountPercent = this.percentInRange(input.cashDiscountPercent, 'cashDiscountPercent');
+    if (input.maintenanceFeePercent !== undefined) out.maintenanceFeePercent = this.percentInRange(input.maintenanceFeePercent, 'maintenanceFeePercent');
+    if (input.sourceImportId !== undefined) out.sourceImportId = input.sourceImportId;
+    if (input.sourceSheet !== undefined) out.sourceSheet = input.sourceSheet;
+    if (input.sourceRow !== undefined) out.sourceRow = input.sourceRow;
+    return out;
+  }
+
+  async createProjectUnitSpec(input: CreateProjectUnitSpecInput): Promise<ProjectUnitSpec> {
+    if (!input.projectId?.trim()) throw new ValidationError('projectId is required');
+    if (!input.unitType?.trim()) throw new ValidationError('unitType is required');
+    if (input.bedrooms !== undefined && !(input.bedrooms >= 0)) throw new ValidationError('bedrooms must be >= 0');
+    const now = new Date().toISOString();
+    const spec: ProjectUnitSpec = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      projectId: input.projectId.trim(),
+      unitType: input.unitType.trim(),
+      ...this.sanitizeProjectUnitSpecFields(input),
+      createdAt: now,
+      updatedAt: now,
+    };
+    return this.requireRepo(this.projectUnitSpecs, 'ProjectUnitSpec').save(spec);
+  }
+
+  async listProjectUnitSpecs(companyId: string, projectId?: string): Promise<ProjectUnitSpec[]> {
+    return this.requireRepo(this.projectUnitSpecs, 'ProjectUnitSpec').findAll(
+      (s) => s.companyId === companyId && (!projectId || s.projectId === projectId),
+    );
+  }
+
+  async getProjectUnitSpec(id: string): Promise<ProjectUnitSpec | undefined> {
+    return this.requireRepo(this.projectUnitSpecs, 'ProjectUnitSpec').findById(id);
+  }
+
+  /** Non-destructive, same convention as updateProjectDetails — an omitted
+   * field keeps its current value. */
+  async updateProjectUnitSpec(id: string, companyId: string, updates: UpdateProjectUnitSpecInput): Promise<ProjectUnitSpec> {
+    const repo = this.requireRepo(this.projectUnitSpecs, 'ProjectUnitSpec');
+    const spec = await repo.findById(id);
+    if (!spec || spec.companyId !== companyId) throw new NotFoundError('project unit spec not found');
+    return repo.save({
+      ...spec,
+      ...this.sanitizeProjectUnitSpecFields(updates),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  /** Finds-or-creates/updates a ProjectUnitSpec by its natural key
+   * (project + phase + unitType + bedrooms) — the Import Engine's entry
+   * point for a catalog row, mirroring the resolveOrCreateX pattern used
+   * for Developer/Facility/Consultant above. A second row for the same
+   * natural key updates the existing spec's ranges non-destructively
+   * rather than creating a duplicate. */
+  async resolveProjectUnitSpec(input: CreateProjectUnitSpecInput): Promise<ProjectUnitSpec> {
+    const existing = await this.listProjectUnitSpecs(input.companyId, input.projectId);
+    const match = existing.find(
+      (s) =>
+        (s.phaseId || undefined) === (input.phaseId || undefined) &&
+        s.unitType.toLowerCase() === input.unitType.trim().toLowerCase() &&
+        (s.bedrooms ?? null) === (input.bedrooms ?? null),
+    );
+    if (!match) return this.createProjectUnitSpec(input);
+    return this.updateProjectUnitSpec(match.id, input.companyId, input);
   }
 }

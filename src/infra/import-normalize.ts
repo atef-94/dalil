@@ -6,6 +6,50 @@
  * a recognizable value (returns undefined rather than inventing 0/false).
  */
 
+import type { UnitStatus } from '../domain/types.js';
+
+export interface NormalizedAvailabilityStatus {
+  status: UnitStatus;
+  sourceStatus: string;
+}
+
+// Every raw source value recognized so far, lowercased/trimmed -> UnitStatus.
+// "Blocked"/"Unavailable" map to 'cancelled' as the closest off-market
+// equivalent — this system has no separate "blocked" state. Multi-word
+// variants ("Not Available") are matched via the lowercased key directly.
+const AVAILABILITY_STATUS_MAP: Record<string, UnitStatus> = {
+  available: 'available',
+  hold: 'held',
+  held: 'held',
+  onhold: 'held',
+  reserved: 'reserved',
+  booked: 'reserved',
+  sold: 'contracted',
+  contracted: 'contracted',
+  blocked: 'cancelled',
+  unavailable: 'cancelled',
+  notavailable: 'cancelled',
+  cancelled: 'cancelled',
+  canceled: 'cancelled',
+};
+
+/** Normalizes a raw availability-status cell (any casing — "Available",
+ * "AVAILABLE", "Hold", "Booked", "Sold", ...) to this system's UnitStatus
+ * enum, keeping the original raw text for audit.
+ *
+ * Three distinct outcomes, so a caller can tell "no status column value at
+ * all" (undefined — nothing to do) apart from "a value was there but this
+ * system doesn't recognize it" ({ unknown: rawText } — must be surfaced as
+ * a warning for human review, never silently defaulted to 'available'). */
+export function normalizeAvailabilityStatus(raw: string | undefined): NormalizedAvailabilityStatus | { unknown: string } | undefined {
+  if (!raw?.trim()) return undefined;
+  const sourceStatus = raw.trim();
+  const key = sourceStatus.toLowerCase().replace(/[^a-z]/g, '');
+  const status = AVAILABILITY_STATUS_MAP[key];
+  if (!status) return { unknown: sourceStatus };
+  return { status, sourceStatus };
+}
+
 /** "3 Beds" / "3 Bedrooms" / "3 BR" / "3 غرف" / "Studio" / "5+" -> a number.
  * "Studio" normalizes to 0 (no separate bedroom). "5+" normalizes to 5 —
  * the numeric floor of an open-ended range, not a guess at the true count. */

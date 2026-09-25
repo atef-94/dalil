@@ -467,6 +467,10 @@ export interface Unit {
   areaSqm: number;
   listPrice: number;
   status: UnitStatus;
+  /** The raw status text a source file last used (e.g. "Available", "HOLD",
+   * "Booked") before normalization to `status` — kept for audit only; never
+   * read by business logic, which always uses the normalized `status`. */
+  sourceStatus?: string;
   floorLabel?: string;
   bedrooms?: number;
   /** Layout/model type (e.g. "Type A", "Garden", "Corner") — configurable
@@ -490,7 +494,58 @@ export interface Unit {
   floorPlanImageUrl?: string;
   /** Where this unit highlights on its project's masterPlanImageUrl. */
   masterPlanPosition?: MasterPlanPosition;
+  /** Import provenance — which import created/last updated this unit, and
+   * where in the source file. Optional: manually-created units have none. */
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
   createdAt: string;
+}
+
+/**
+ * A "Unit Specification / Product Range" — what a project catalog/market
+ * sheet describes (e.g. "Apartment, 2 Bedrooms, BUA 120-135, Price 8M-10M")
+ * as opposed to a real, individually-coded `Unit`. Deliberately its own
+ * entity rather than a Unit with fuzzy/range fields: a catalog row has no
+ * stable physical identity (no unit code, no single floor/building), so
+ * importing one must never fabricate a fake Unit row. Scoped one level
+ * finer than Project's own single land/BUA/garden/price range (which can
+ * only hold one range project-wide) — a project commonly markets several
+ * distinct unit-type/bedroom combinations, each with its own range, at the
+ * same time. Gated on the existing 'project' RBAC resource, matching every
+ * other project-master-data entity in this file (see the module comment
+ * above Developer). */
+export interface ProjectUnitSpec {
+  id: string;
+  companyId: string;
+  projectId: string;
+  phaseId?: string;
+  /** Free string, matching Unit.unitType's convention — never a hard enum. */
+  unitType: string;
+  bedrooms?: number;
+  landAreaFromSqm?: number;
+  landAreaToSqm?: number;
+  buaFromSqm?: number;
+  buaToSqm?: number;
+  gardenAreaFromSqm?: number;
+  gardenAreaToSqm?: number;
+  priceFrom?: number;
+  priceTo?: number;
+  pricePerMeter?: number;
+  /** Overrides Project.finishingType for this specific spec, same override
+   * convention as Unit.finishingType. */
+  finishingType?: string;
+  delivery?: DeliveryInfo;
+  paymentPlanTemplateIds?: string[];
+  cashDiscountPercent?: number;
+  maintenanceFeePercent?: number;
+  /** Import provenance — which import produced/last touched this spec, and
+   * where in the source file. Optional: manually-created specs have none. */
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface UnitHold {

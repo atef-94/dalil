@@ -322,3 +322,51 @@ test('createSession with sheetNameAsColumn canonicalizes differently-spelled hea
   );
   assert.equal(session.suggestedMapping.Type, 'unitType');
 });
+
+// ---- Hierarchy-aware fill-down: a blank cell in a merged-cell export means
+// "same as the value above" only for genuinely hierarchical columns
+// (Project/Developer/Phase) — a blank numeric cell (Area/Price/etc.) means
+// "not supplied", and must never silently inherit the row above it. ----
+
+test('fillDownBlankCells with hierarchicalFieldKeys only fills the hierarchical column, leaving a blank numeric column blank', async () => {
+  const svc = service();
+  const csv = Buffer.from(
+    'Project,Unit Type,Area (sqm) — From\n' +
+      'SODIC,Apartment,120\n' +
+      ',Apartment,\n' +
+      ',Villa,250\n',
+  );
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'catalog.csv',
+    fileBuffer: csv,
+    contentType: 'text/csv',
+    fields: INVENTORY_LIKE_FIELDS,
+    fillDownBlankCells: true,
+    hierarchicalFieldKeys: ['projectName'],
+  });
+  assert.equal(session.rawRows[0]!.Project, 'SODIC');
+  assert.equal(session.rawRows[1]!.Project, 'SODIC', 'a blank Project cell inherits the hierarchical value above it');
+  assert.equal(session.rawRows[1]!['Area (sqm) — From'], '', 'a blank numeric cell is never filled, even with fillDownBlankCells on');
+  assert.equal(session.rawRows[2]!.Project, 'SODIC');
+  assert.equal(session.rawRows[2]!['Area (sqm) — From'], '250', "a row's own real value is never overwritten");
+});
+
+test('fillDownBlankCells without hierarchicalFieldKeys fills every column, unchanged default behavior', async () => {
+  const svc = service();
+  const csv = Buffer.from('Full Name,Phone,Email\nAhmed Ali,0100000000,ahmed@example.com\n,,sara@example.com\n');
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'lead',
+    fileName: 'leads.csv',
+    fileBuffer: csv,
+    contentType: 'text/csv',
+    fields: LEAD_FIELDS,
+    fillDownBlankCells: true,
+  });
+  assert.equal(session.rawRows[1]!['Full Name'], 'Ahmed Ali', 'no hierarchicalFieldKeys means every column still fills down, as before');
+  assert.equal(session.rawRows[1]!.Phone, '0100000000');
+});

@@ -47,6 +47,7 @@ import type {
   Facility,
   Consultant,
   SalesPhoneNumber,
+  ProjectUnitSpec,
   ActionApproval,
   ApprovableActionType,
   DiscountApprovalPolicy,
@@ -132,7 +133,16 @@ import { ScenarioSimulationService } from './modules/forecasting/scenario-simula
 import { ImportSessionService } from './modules/imports/import-session.service.js';
 import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
 import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
-import { InventoryImportService, INVENTORY_IMPORT_FIELDS, type InventoryImportOptions } from './modules/inventory/inventory-import.service.js';
+import {
+  InventoryImportService,
+  INVENTORY_IMPORT_FIELDS,
+  CATALOG_IMPORT_FIELDS,
+  AVAILABILITY_IMPORT_FIELDS,
+  CATALOG_ANCHOR_KEYS,
+  AVAILABILITY_ANCHOR_KEYS,
+  type InventoryImportOptions,
+} from './modules/inventory/inventory-import.service.js';
+import { classifySheet } from './infra/field-mapping.js';
 import { DocumentIntelligenceService } from './modules/documents/document-intelligence.service.js';
 import { QuotationService } from './modules/quotations/quotation.service.js';
 import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
@@ -261,6 +271,7 @@ function buildRepos(db?: DatabaseSync) {
     facilities: repo<Facility>('facilities'),
     consultants: repo<Consultant>('consultants'),
     salesPhoneNumbers: repo<SalesPhoneNumber>('sales_phone_numbers'),
+    projectUnitSpecs: repo<ProjectUnitSpec>('project_unit_specs'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
@@ -411,6 +422,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     repos.facilities,
     repos.consultants,
     repos.salesPhoneNumbers,
+    repos.projectUnitSpecs,
   );
   const inventoryImport = new InventoryImportService(inventory);
   const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
@@ -1586,6 +1598,29 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: await inventory.deactivateSalesPhoneNumber(ctx.params.phoneId!, actor.companyId) };
   });
 
+  // Project Unit Specs — a project's marketed product ranges (Unit Type +
+  // Bedrooms -> BUA/price ranges), distinct from a physical Unit. Gated on
+  // 'project', same as every other project-master-data entity above.
+  httpServer.post('/api/inventory/projects/:projectId/unit-specs', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<Omit<Parameters<typeof inventory.createProjectUnitSpec>[0], 'companyId' | 'projectId'>>(ctx.body);
+    return { status: 201, body: await inventory.createProjectUnitSpec({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/unit-specs', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listProjectUnitSpecs(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.patch('/api/inventory/unit-specs/:specId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'project'))) throw new ForbiddenError('missing edit:project permission');
+    const body = parseJsonBody<Parameters<typeof inventory.updateProjectUnitSpec>[2]>(ctx.body);
+    return { status: 200, body: await inventory.updateProjectUnitSpec(ctx.params.specId!, actor.companyId, body) };
+  });
+
   httpServer.post('/api/inventory/units', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
@@ -1657,8 +1692,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
         contentType: file.contentType,
         fields: INVENTORY_IMPORT_FIELDS,
         fillDownBlankCells: body?.fields?.fillDownBlankCells === 'true',
+        // Only Developer/Project/Phase/Destination ever inherit a blank
+        // cell from the row above — Price/BUA/Garden/Bedrooms/Status never
+        // do, matching every real spreadsheet's actual merged-cell shape
+        // (a title column merged down a block of rows; a price column
+        // never is).
+        hierarchicalFieldKeys: ['projectName', 'developerName', 'phaseName', 'destination'],
         sheetNameAsColumn: body?.fields?.sheetNameAsProject === 'true' ? 'Project' : undefined,
       });
+      // Informational only — classifies the detected columns as a project-
+      // catalog table, a live-availability table, a summary/fact-sheet, or
+      // unrecognized, so the frontend can suggest the right import mode
+      // instead of the user having to guess. Never changes what gets
+      // imported; the user's own mode choice at the preview step does.
+      const detectedSheetKind = classifySheet(session.detectedColumns, CATALOG_IMPORT_FIELDS, AVAILABILITY_IMPORT_FIELDS, CATALOG_ANCHOR_KEYS, AVAILABILITY_ANCHOR_KEYS);
       return {
         status: 200,
         body: {
@@ -1670,6 +1717,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: INVENTORY_IMPORT_FIELDS,
+          detectedSheetKind,
         },
       };
     },
@@ -1681,10 +1729,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
       throw new ForbiddenError('missing create:unit permission');
     }
-    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions }>(ctx.body);
+    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions & { mode?: 'availability' | 'catalog' } }>(ctx.body);
     const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping, body.options as Record<string, unknown> | undefined);
     const mappedRows = importSessions.mapRows(session);
-    const preview = await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
+    // 'catalog' mode never writes a physical Unit — a Project Catalog
+    // workbook describes a product range (see inventory-import.service.ts's
+    // own top-of-file comment), not individually coded units.
+    const preview =
+      body.options?.mode === 'catalog'
+        ? await inventoryImport.buildProjectUnitSpecPreview(actor.companyId, mappedRows, body.options)
+        : await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
     return { status: 200, body: preview };
   });
 
@@ -1698,21 +1752,40 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ValidationError('this import session has not been mapped yet — call the preview step first');
     }
     const mappedRows = importSessions.mapRows(session);
-    const result = await inventoryImport.importRows(
-      actor.companyId,
-      mappedRows,
-      async (unit, action) => {
-        await auditLog.record({
-          companyId: actor.companyId,
-          actorUserId: actor.userId,
-          action: action === 'create' ? 'create' : 'edit',
-          resource: 'unit',
-          resourceId: unit.id,
-          metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
-        });
-      },
-      session.importOptions as InventoryImportOptions | undefined,
-    );
+    const options = session.importOptions as (InventoryImportOptions & { mode?: 'availability' | 'catalog' }) | undefined;
+    const result =
+      options?.mode === 'catalog'
+        ? await inventoryImport.importProjectUnitSpecRows(actor.companyId, mappedRows, options, { sourceImportId: session.id })
+        : await inventoryImport.importRows(
+            actor.companyId,
+            mappedRows,
+            async (unit, action) => {
+              await auditLog.record({
+                companyId: actor.companyId,
+                actorUserId: actor.userId,
+                action: action === 'create' ? 'create' : 'edit',
+                resource: 'unit',
+                resourceId: unit.id,
+                metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+              });
+            },
+            options,
+            { sourceImportId: session.id },
+          );
+    if (options?.mode === 'catalog') {
+      for (const r of (result as Awaited<ReturnType<typeof inventoryImport.importProjectUnitSpecRows>>).results) {
+        if (r.specId) {
+          await auditLog.record({
+            companyId: actor.companyId,
+            actorUserId: actor.userId,
+            action: r.status === 'created' ? 'create' : 'edit',
+            resource: 'project',
+            resourceId: r.specId,
+            metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName, entity: 'project_unit_spec' },
+          });
+        }
+      }
+    }
     await importSessions.markConfirmed(session.id, actor.companyId);
     return { status: 200, body: result };
   });
