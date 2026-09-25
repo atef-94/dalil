@@ -10,24 +10,27 @@ import { renderQuotations } from './quotations.js';
 import { renderCommunication } from './communication.js';
 
 /**
- * Sales/CRM restructuring: Leads, Offers, Payment Plans, Quotations,
- * Communications, and Tasks all live inside this one CRM workspace instead
- * of as separate top-level sidebar sections (see app.js's NAV) — each tab
- * below reuses the exact same page component/API/RBAC gate that used to be
- * a standalone route, so nothing is duplicated or rebuilt, only
- * re-navigated to. "Activities" (also named in the restructuring spec)
- * isn't a separate tab: it's a lead's own timeline/composer, already in the
- * lead detail panel below. Reservations, Contracts, and Follow-ups aren't
- * tabs either — each duplicated a pipeline stage card the Dashboard already
+ * Sales/CRM restructuring: Leads, Offers, and Tasks live inside this one CRM
+ * workspace instead of as separate top-level sidebar sections (see app.js's
+ * NAV). "Activities" (also named in the restructuring spec) isn't a
+ * separate tab: it's a lead's own timeline/composer, already in the lead
+ * detail panel below. Reservations, Contracts, and Follow-ups aren't tabs
+ * either — each duplicated a pipeline stage card the Dashboard already
  * shows (Reservations/Contacts stages; Follow Up/Follow Up After Meeting
  * stages), so a stage card is the only way into that stage's lead list now.
+ *
+ * Payment Plans, Quotations, and Communication used to be their own
+ * top-level tabs alongside Offers; they're now merged into a single
+ * "Offers" tab as internal sub-sections (see renderOffersHub below), each
+ * still reusing the exact same page component/API/RBAC gate as before —
+ * nothing here is duplicated or rebuilt, only re-nested one level deeper.
  */
-function reusedModuleTabs(locale) {
+function offersSubSections(locale) {
   return [
-    { key: 'module:offers', label: t(locale, 'nav_offers'), resource: 'opportunity', render: renderOpportunities },
-    { key: 'module:payment-plans', label: t(locale, 'nav_templates'), resource: 'payment_plan_template', render: renderTemplates },
-    { key: 'module:quotations', label: t(locale, 'nav_quotations'), resource: 'quotation', render: renderQuotations },
-    { key: 'module:communications', label: t(locale, 'nav_communication'), resource: 'message', render: renderCommunication },
+    { key: 'sub:offers', label: t(locale, 'nav_offers'), resource: 'opportunity', render: renderOpportunities },
+    { key: 'sub:payment-plans', label: t(locale, 'nav_templates'), resource: 'payment_plan_template', render: renderTemplates },
+    { key: 'sub:quotations', label: t(locale, 'nav_quotations'), resource: 'quotation', render: renderQuotations },
+    { key: 'sub:communications', label: t(locale, 'nav_communication'), resource: 'message', render: renderCommunication },
   ];
 }
 
@@ -104,13 +107,55 @@ export async function renderCrm(container) {
     }
   }
 
-  // Tasks reuses the existing TaskService API but had no dedicated list
-  // view before — everything else in moduleTabs reuses a page that already
-  // existed as its own top-level route.
+  // Offers, Payment Plans, Quotations, and Communication are one top-level
+  // "Offers" tab now, with the individual sections as an internal sub-tab
+  // bar (see renderOffersHub) — the Offers tab itself only appears if at
+  // least one of its sub-sections is visible to this user; each
+  // sub-section still respects its own RBAC gate inside the hub. Tasks
+  // reuses the existing TaskService API but had no dedicated list view
+  // before.
+  const offersSubTabs = offersSubSections(locale).filter((s) => can(s.resource, 'view'));
+  let offersActiveSubTab = offersSubTabs[0]?.key;
   const moduleTabs = [
-    ...reusedModuleTabs(locale),
+    ...(offersSubTabs.length > 0 ? [{ key: 'module:offers', label: t(locale, 'nav_offers'), render: renderOffersHub }] : []),
     { key: 'module:tasks', label: t(locale, 'nav_tasks'), resource: 'task', render: renderTasksTab },
-  ].filter((m) => can(m.resource, 'view'));
+  ].filter((m) => !m.resource || can(m.resource, 'view'));
+
+  /** The "Offers" tab's own internal sub-tab bar: Offers / Payment Plans /
+   * Quotations / Communication, each rendering the exact same page
+   * component it always did — only the outer navigation changed. */
+  async function renderOffersHub(target) {
+    clear(target);
+    const subTabsSlot = el('div');
+    const subBodySlot = el('div');
+    target.appendChild(subTabsSlot);
+    target.appendChild(subBodySlot);
+
+    function renderSubTabsBar() {
+      clear(subTabsSlot);
+      const items = offersSubTabs.map((s) => ({ key: s.key, label: s.label }));
+      subTabsSlot.appendChild(tabs(items, offersActiveSubTab, (key) => {
+        offersActiveSubTab = key;
+        renderSubBody();
+      }));
+    }
+
+    async function renderSubBody() {
+      clear(subBodySlot);
+      subBodySlot.appendChild(loadingState());
+      try {
+        const sub = offersSubTabs.find((s) => s.key === offersActiveSubTab);
+        clear(subBodySlot);
+        await sub.render(subBodySlot);
+      } catch (err) {
+        clear(subBodySlot);
+        subBodySlot.appendChild(errorBanner(err.message));
+      }
+    }
+
+    renderSubTabsBar();
+    await renderSubBody();
+  }
 
   // Dashboard is the first tab in the horizontal bar (it used to be the
   // "Customers" module tab's slot) and renders the real-time pipeline
