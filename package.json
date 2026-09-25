@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
     "start:prod": "node dist/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
@@ -16,8 +17,14 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/pdfkit": "^0.17.6",
     "playwright": "^1.63.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "pdfjs-dist": "^4.10.38",
+    "pdfkit": "^0.20.2"
   }
 }

@@ -7,22 +7,48 @@ import { AuditLog } from '../../infra/audit-log.js';
 import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
+import { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
+import { FinanceService } from '../finance/finance.service.js';
+import { SalesService } from '../sales/sales.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
+import { LeadScoringService } from '../ai/lead-scoring.service.js';
 import { AutomationService } from './automation.service.js';
 import type {
   ActionName,
   ApprovalRequest,
   AuditLogEntry,
   Campaign,
+  Consultant,
+  Contract,
+  CrmStage,
+  Developer,
   Employee,
+  Facility,
+  Launch,
   Lead,
   Message,
+  Opportunity,
+  Payment,
+  PaymentPlanTemplate,
+  PaymentScheduleLine,
   PermissionGrant,
   PermissionOverride,
+  Project,
+  ProjectPhase,
+  Quotation,
+  Receipt,
+  Refund,
   ResourceName,
   Role,
+  SalesPhoneNumber,
   Secret,
   Task,
+  Unit,
+  UnitHold,
+  Reservation,
   User,
   UserRole,
   WorkflowDefinition,
@@ -30,7 +56,7 @@ import type {
   WorkflowStepRun,
 } from '../../domain/types.js';
 
-function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
+async function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10, companyIds: string[] = ['c1', 'c2']) {
   const users = new InMemoryRepository<User>();
   const employees = new InMemoryRepository<Employee>();
   const roles = new InMemoryRepository<Role>();
@@ -51,11 +77,39 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
   const campaigns = new InMemoryRepository<Campaign>();
   const auditLogRepo = new InMemoryRepository<AuditLogEntry>();
 
+  const crmStages = new CrmStageService(new InMemoryRepository<CrmStage>());
+  for (const companyId of companyIds) {
+    await crmStages.seedDefaultStages(companyId);
+  }
   const tasks = new TaskService(tasksRepo);
   const communication = new CommunicationService(messages);
-  const crm = new CrmService(leads);
-  const marketing = new MarketingService(campaigns, leads);
+  const crm = new CrmService(leads, crmStages);
+  const marketing = new MarketingService(campaigns, leads, crmStages);
   const auditLog = new AuditLog(auditLogRepo);
+
+  const opportunities = new InMemoryRepository<Opportunity>();
+  const contracts = new InMemoryRepository<Contract>();
+  const payments = new InMemoryRepository<Payment>();
+  const receipts = new InMemoryRepository<Receipt>();
+  const refunds = new InMemoryRepository<Refund>();
+  const scheduleLines = new InMemoryRepository<PaymentScheduleLine>();
+  const units = new InMemoryRepository<Unit>();
+  const holds = new InMemoryRepository<UnitHold>();
+  const reservations = new InMemoryRepository<Reservation>();
+  const projects = new InMemoryRepository<Project>();
+  const templates = new InMemoryRepository<PaymentPlanTemplate>();
+  const developers = new InMemoryRepository<Developer>();
+  const phases = new InMemoryRepository<ProjectPhase>();
+  const launches = new InMemoryRepository<Launch>();
+  const facilities = new InMemoryRepository<Facility>();
+  const consultants = new InMemoryRepository<Consultant>();
+  const salesPhones = new InMemoryRepository<SalesPhoneNumber>();
+  const inventory = new InventoryService(units, holds, reservations, projects, developers, phases, launches, facilities, consultants, salesPhones);
+  const paymentPlans = new PaymentPlansService(templates, scheduleLines);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const leadScoring = new LeadScoringService(leads, crmStages);
+  const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
+  const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
   const fetchCalls: { url: string; init?: RequestInit }[] = [];
   let fetchImpl: typeof fetch = (async (url, init) => {
@@ -69,7 +123,14 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
     tasks,
     communication,
     crm,
+    crmStages,
     marketing,
+    finance,
+    sales,
+    inventory,
+    leadScoring,
+    quotations,
+    paymentPlans,
     auditLog,
     'test-encryption-secret-not-for-production',
     ((url: Parameters<typeof fetch>[0], init?: RequestInit) => fetchImpl(url, init)) as typeof fetch,
@@ -88,7 +149,20 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
     leads,
     campaigns,
     crm,
+    crmStages,
     marketing,
+    finance,
+    sales,
+    contracts,
+    scheduleLines,
+    units,
+    projects,
+    templates,
+    developers,
+    facilities,
+    consultants,
+    reservations,
+    inventory,
     runs,
     stepRuns,
     auditLogRepo,
@@ -100,7 +174,7 @@ function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10) {
 }
 
 async function seedUserWithGrants(
-  h: ReturnType<typeof freshHarness>,
+  h: Awaited<ReturnType<typeof freshHarness>>,
   companyId: string,
   userId: string,
   grantList: { action: ActionName; resource: ResourceName }[],
@@ -127,7 +201,7 @@ const CREATE_TASK_GRANT: { action: ActionName; resource: ResourceName } = { acti
 const APPROVE_GRANT: { action: ActionName; resource: ResourceName } = { action: 'approve', resource: 'approval' };
 
 test('an event-triggered workflow executes its action and completes', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   const workflow = await h.automation.createWorkflow({
     companyId: 'c1',
@@ -149,7 +223,7 @@ test('an event-triggered workflow executes its action and completes', async () =
 });
 
 test('emitting the same event twice only creates one run (idempotency)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -170,7 +244,7 @@ test('emitting the same event twice only creates one run (idempotency)', async (
 });
 
 test('a step whose conditions fail is skipped, not blocking; a matching step still runs', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -202,7 +276,7 @@ test('a step whose conditions fail is skipped, not blocking; a matching step sti
 });
 
 test('a step is retried up to maxRetries and succeeds on the final attempt', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
   let attempts = 0;
   h.setFetchImpl((async () => {
@@ -228,7 +302,7 @@ test('a step is retried up to maxRetries and succeeds on the final attempt', asy
 });
 
 test('onFailure "stop" halts the run; onFailure "continue" proceeds to the next step', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
 
   await h.automation.createWorkflow({
@@ -265,7 +339,7 @@ test('onFailure "stop" halts the run; onFailure "continue" proceeds to the next 
 });
 
 test('require_approval pauses the run; approving resumes and completes it', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await seedUserWithGrants(h, 'c1', 'approver-1', [APPROVE_GRANT]);
 
@@ -297,7 +371,7 @@ test('require_approval pauses the run; approving resumes and completes it', asyn
 });
 
 test('rejecting an approval cancels the run and never executes the remaining steps', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await seedUserWithGrants(h, 'c1', 'approver-1', [APPROVE_GRANT]);
 
@@ -325,7 +399,7 @@ test('rejecting an approval cancels the run and never executes the remaining ste
 });
 
 test('approving an approval request from a different company is rejected (cross-tenant)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await seedUserWithGrants(h, 'c2', 'approver-2', [APPROVE_GRANT]);
 
@@ -343,7 +417,7 @@ test('approving an approval request from a different company is rejected (cross-
 });
 
 test('a workflow step never bypasses RBAC: a creator without the required grant fails the step', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', []); // no grants at all
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -359,14 +433,35 @@ test('a workflow step never bypasses RBAC: a creator without the required grant 
   assert.match(steps[0]!.error ?? '', /permission/i);
 });
 
-test('update_lead_status action updates the real lead through CrmService', async () => {
-  const h = freshHarness();
+test('update_lead_status action moves the real lead through CrmService via a real stageId', async () => {
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'no_answer')!;
 
   await h.automation.createWorkflow({
     companyId: 'c1',
     name: 'Advance lead',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Mark contacted', action: { type: 'update_lead_status', params: { leadId: lead.id, stageId: contacted.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+
+  const updated = await h.crm.getLead(lead.id);
+  assert.equal(updated!.stageId, contacted.id);
+});
+
+test('update_lead_status action still resolves a legacy literal "status" param to the matching default stage', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client B', phone: '0200' });
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'no_answer')!;
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Advance lead (legacy status)',
     createdByUserId: 'owner-1',
     trigger: { type: 'event', eventType: 'lead.created' },
     steps: [{ name: 'Mark contacted', action: { type: 'update_lead_status', params: { leadId: lead.id, status: 'contacted' } } }],
@@ -375,11 +470,11 @@ test('update_lead_status action updates the real lead through CrmService', async
   assert.equal(run!.status, 'completed');
 
   const updated = await h.crm.getLead(lead.id);
-  assert.equal(updated!.status, 'contacted');
+  assert.equal(updated!.stageId, contacted.id);
 });
 
 test('assign_lead_owner action reassigns the lead through CrmService', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
 
@@ -397,7 +492,7 @@ test('assign_lead_owner action reassigns the lead through CrmService', async () 
 });
 
 test('ai_decide dispatches to the configured AI decider and returns its decision', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'ai_action' }]);
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
 
@@ -414,6 +509,7 @@ test('ai_decide dispatches to the configured AI decider and returns its decision
       reasoning: 'stubbed decision',
       alternatives: [],
       status: 'proceeded',
+      nextRecommendedStep: 'stubbed next step',
       requestedByUserId,
       createdAt: new Date().toISOString(),
     };
@@ -435,7 +531,7 @@ test('ai_decide dispatches to the configured AI decider and returns its decision
 });
 
 test('ai_decide fails clearly when no AI decider is configured for this deployment', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'ai_action' }]);
 
   await h.automation.createWorkflow({
@@ -451,7 +547,7 @@ test('ai_decide fails clearly when no AI decider is configured for this deployme
 });
 
 test('update_campaign_status action updates the real campaign through MarketingService', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'campaign' }]);
   const campaign = await h.marketing.createCampaign({ companyId: 'c1', name: 'Spring Push', channel: 'digital', budget: 1000, startDate: '2026-01-01' });
 
@@ -468,8 +564,185 @@ test('update_campaign_status action updates the real campaign through MarketingS
   assert.equal(updated!.status, 'active');
 });
 
+test('record_payment action records a real payment through FinanceService and advances the schedule line', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'payment_schedule' }]);
+  await h.contracts.save({ id: 'contract-1', companyId: 'c1', reservationId: 'r1', unitId: 'u1', clientId: 'lead-1', creditedEmployeeUserId: 'owner-1', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+  await h.scheduleLines.save({ id: 'line-1', companyId: 'c1', contractId: 'contract-1', sourceTemplateId: 't1', sourceTemplateVersion: 1, sequence: 0, label: 'Down payment', dueDate: new Date().toISOString(), amount: 1000, amountPaid: 0, status: 'upcoming' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Record collected payment',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'payment.recorded' },
+    steps: [{ name: 'Record it', action: { type: 'record_payment', params: { contractId: 'contract-1', paymentScheduleLineId: 'line-1', amount: 1000, method: 'transfer' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'payment.recorded', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const line = await h.scheduleLines.findById('line-1');
+  assert.equal(line!.status, 'paid');
+  assert.equal(line!.amountPaid, 1000);
+});
+
+test('record_payment action rejects a contract belonging to a different company (cross-tenant)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'payment_schedule' }]);
+  await h.contracts.save({ id: 'contract-2', companyId: 'c2', reservationId: 'r2', unitId: 'u2', clientId: 'lead-2', creditedEmployeeUserId: 'owner-2', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Record collected payment',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'payment.recorded' },
+    steps: [{ name: 'Record it', action: { type: 'record_payment', params: { contractId: 'contract-2', paymentScheduleLineId: 'line-1', amount: 1000, method: 'transfer' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'payment.recorded', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /contract not found/);
+});
+
+test('cancel_contract action cancels a real contract through SalesService', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'contract' }]);
+  await h.units.save({ id: 'u3', companyId: 'c1', projectId: 'p1', code: 'A-101', unitType: 'apartment', areaSqm: 120, listPrice: 900000, status: 'contracted', createdAt: new Date().toISOString() });
+  await h.reservations.save({ id: 'r3', companyId: 'c1', unitId: 'u3', clientId: 'lead-3', status: 'converted', createdAt: new Date().toISOString(), expiresAt: new Date().toISOString() });
+  await h.contracts.save({ id: 'contract-3', companyId: 'c1', reservationId: 'r3', unitId: 'u3', clientId: 'lead-3', creditedEmployeeUserId: 'owner-1', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Cancel stale contract',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Cancel it', action: { type: 'cancel_contract', params: { contractId: 'contract-3' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const cancelled = await h.contracts.findById('contract-3');
+  assert.equal(cancelled!.status, 'cancelled');
+});
+
+test('cancel_contract action fails when the workflow creator lacks edit:contract permission', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', []);
+  await h.contracts.save({ id: 'contract-4', companyId: 'c1', reservationId: 'r4', unitId: 'u4', clientId: 'lead-4', creditedEmployeeUserId: 'owner-1', paymentPlanTemplateId: 't1', status: 'signed', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Cancel stale contract',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'contract.signed' },
+    steps: [{ name: 'Cancel it', action: { type: 'cancel_contract', params: { contractId: 'contract-4' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'contract.signed', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lacks edit:contract permission/);
+});
+
+test('search_units action returns real matching units, filtered and RBAC-gated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'unit' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Test Project', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: '2BR', areaSqm: 120, listPrice: 900_000, status: 'available', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-2', companyId: 'c1', projectId: 'proj-1', code: 'A-102', unitType: '3BR', areaSqm: 160, listPrice: 1_400_000, status: 'available', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-3', companyId: 'c1', projectId: 'proj-1', code: 'A-103', unitType: '2BR', areaSqm: 118, listPrice: 850_000, status: 'reserved', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search units', action: { type: 'search_units', params: { projectId: 'proj-1', maxPrice: 1_000_000 } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { units: { id: string }[]; matchCount: number };
+  // unit-2 is above maxPrice, unit-3 is reserved (not 'available') — only unit-1 matches.
+  assert.equal(output.matchCount, 1);
+  assert.equal(output.units[0]!.id, 'unit-1');
+});
+
+test('search_units action fails when the workflow creator lacks view:unit permission', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', []);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search units', action: { type: 'search_units', params: {} } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lacks view:unit permission/);
+});
+
+test('score_lead action returns the real LeadScoringService result for the lead, RBAC-gated and tenant-isolated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'lead' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client', phone: '0100', ownerEmployeeUserId: 'owner-1' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Score',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Score lead', action: { type: 'score_lead', params: { leadId: lead.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { leadId: string; score: number };
+  assert.equal(output.leadId, lead.id);
+  assert.ok(output.score >= 0 && output.score <= 100);
+});
+
+test('score_lead action rejects a lead belonging to a different company (cross-tenant)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'lead' }]);
+  const otherLead = await h.crm.createLead({ companyId: 'c2', fullName: 'Other', phone: '0200', ownerEmployeeUserId: 'owner-2' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Score',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Score lead', action: { type: 'score_lead', params: { leadId: otherLead.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lead not found/);
+});
+
+test('compare_payment_plans action computes real comparisons through QuotationService for the unit', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'quotation' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Test Project', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: '2BR', areaSqm: 120, listPrice: 1_000_000, status: 'available', createdAt: new Date().toISOString() });
+  await h.templates.save({
+    id: 'tpl-1', companyId: 'c1', projectId: 'proj-1', name: 'Standard Plan', version: 1,
+    downPaymentType: 'percentage', downPaymentValue: 10, frequency: 'monthly', termMonths: 24, fees: [], createdAt: new Date().toISOString(), archived: false,
+  });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Compare',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Compare plans', action: { type: 'compare_payment_plans', params: { unitId: 'unit-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { unitId: string; comparisons: { templateId: string; downPayment: number }[] };
+  assert.equal(output.unitId, 'unit-1');
+  assert.equal(output.comparisons.length, 1);
+  assert.equal(output.comparisons[0]!.templateId, 'tpl-1');
+  assert.equal(output.comparisons[0]!.downPayment, 100_000);
+});
+
 test('webhook_call sends a bearer token resolved from the encrypted secret store', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
   await h.automation.setSecret('c1', 'zapier_token', 'super-secret-value', 'owner-1');
 
@@ -488,7 +761,7 @@ test('webhook_call sends a bearer token resolved from the encrypted secret store
 });
 
 test('secrets are never exposed in plaintext by listSecrets', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const saved = await h.automation.setSecret('c1', 'api_key', 'plaintext-value', 'owner-1');
   assert.equal((saved as unknown as Record<string, unknown>).encryptedValue, undefined);
   assert.equal((saved as unknown as Record<string, unknown>).value, undefined);
@@ -500,13 +773,13 @@ test('secrets are never exposed in plaintext by listSecrets', async () => {
 });
 
 test('deleteSecret rejects a secret belonging to a different company (cross-tenant)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const saved = await h.automation.setSecret('c1', 'api_key', 'value', 'owner-1');
   await assert.rejects(() => h.automation.deleteSecret(saved.id, 'c2'));
 });
 
 test('runDueScheduledWorkflows only fires once per interval window', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -532,7 +805,7 @@ test('runDueScheduledWorkflows only fires once per interval window', async () =>
 });
 
 test('receiveWebhook triggers the matching workflow and dedupes repeated deliveries', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -551,7 +824,7 @@ test('receiveWebhook triggers the matching workflow and dedupes repeated deliver
 });
 
 test('a workflow with a duplicate webhook slug in the same company is rejected', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await h.automation.createWorkflow({
     companyId: 'c1',
     name: 'First',
@@ -571,7 +844,7 @@ test('a workflow with a duplicate webhook slug in the same company is rejected',
 });
 
 test('getWorkflow rejects a workflow belonging to a different company (cross-tenant)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const workflow = await h.automation.createWorkflow({
     companyId: 'c1',
     name: 'Private workflow',
@@ -583,7 +856,7 @@ test('getWorkflow rejects a workflow belonging to a different company (cross-ten
 });
 
 test('creating a workflow with no steps is rejected', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await assert.rejects(() =>
     h.automation.createWorkflow({
       companyId: 'c1',
@@ -596,7 +869,7 @@ test('creating a workflow with no steps is rejected', async () => {
 });
 
 test('creating a scheduled workflow without intervalMinutes is rejected', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await assert.rejects(() =>
     h.automation.createWorkflow({
       companyId: 'c1',
@@ -609,7 +882,7 @@ test('creating a scheduled workflow without intervalMinutes is rejected', async 
 });
 
 test('pausing a workflow stops it from reacting to new events', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   const workflow = await h.automation.createWorkflow({
     companyId: 'c1',
@@ -623,8 +896,8 @@ test('pausing a workflow stops it from reacting to new events', async () => {
   assert.equal(results.length, 0);
 });
 
-test('listTemplates returns a non-empty catalogue of built-in templates', () => {
-  const h = freshHarness();
+test('listTemplates returns a non-empty catalogue of built-in templates', async () => {
+  const h = await freshHarness();
   const templates = h.automation.listTemplates();
   assert.ok(templates.length > 0);
   for (const t of templates) {
@@ -633,17 +906,44 @@ test('listTemplates returns a non-empty catalogue of built-in templates', () => 
   }
 });
 
-test('listTemplates includes the new HR/onboarding starting points', () => {
-  const h = freshHarness();
+test('listTemplates includes the new HR/onboarding starting points', async () => {
+  const h = await freshHarness();
   const keys = h.automation.listTemplates().map((t) => t.key);
   assert.ok(keys.includes('new-employee-onboarding-task'));
   assert.ok(keys.includes('leave-request-notification'));
 });
 
+// ---- Event-to-AI activation control: instantiate a real workflow from a
+// built-in template in one call, company-scoped, never auto-activated. ----
+
+test('activateTemplate creates a real, active workflow matching the template — it actually fires on the real event', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'create', resource: 'task' }]);
+  const workflow = await h.automation.activateTemplate('new-lead-welcome-task', 'c1', 'owner-1');
+  assert.equal(workflow.companyId, 'c1');
+  assert.equal(workflow.status, 'active');
+  assert.equal(workflow.name, 'New Lead Welcome Task');
+  assert.equal(workflow.trigger.eventType, 'lead.created');
+
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: { fullName: 'Ada', sourceId: 's1' } });
+  assert.equal(run!.status, 'completed');
+});
+
+test('activateTemplate rejects an unknown template key', async () => {
+  const h = await freshHarness();
+  await assert.rejects(() => h.automation.activateTemplate('not-a-real-template', 'c1', 'owner-1'));
+});
+
+test('activateTemplate never activates the same template twice with the same webhook slug (surfaces the real collision, same as manual creation)', async () => {
+  const h = await freshHarness();
+  await h.automation.activateTemplate('customer-response-ai-followup', 'c1', 'owner-1');
+  await assert.rejects(() => h.automation.activateTemplate('customer-response-ai-followup', 'c1', 'owner-1'));
+});
+
 // ---- Phase 1 hardening: idempotency race protection ----
 
 test('two concurrent duplicate event deliveries are serialized into exactly one run', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -664,7 +964,7 @@ test('two concurrent duplicate event deliveries are serialized into exactly one 
 // ---- Phase 1 hardening: retry backoff ----
 
 test('retried step attempts wait with exponential backoff between attempts', async () => {
-  const h = freshHarness(20);
+  const h = await freshHarness(20);
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
   let attempts = 0;
   const timestamps: number[] = [];
@@ -692,7 +992,7 @@ test('retried step attempts wait with exponential backoff between attempts', asy
 // ---- Phase 1 hardening: concurrency-bounded execution ----
 
 test('executeRun respects the configured process-wide concurrency limit', async () => {
-  const h = freshHarness(0, 1);
+  const h = await freshHarness(0, 1);
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
   let concurrent = 0;
   let maxObserved = 0;
@@ -729,7 +1029,7 @@ test('executeRun respects the configured process-wide concurrency limit', async 
 // ---- Phase 1 hardening: failure audit logging ----
 
 test('a failed step is written to the audit log, not just the step-run record', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -749,7 +1049,7 @@ test('a failed step is written to the audit log, not just the step-run record', 
 // ---- Phase 1 hardening: manual failure recovery (retryRun) ----
 
 test('retryRun resumes a failed run and can succeed once the external failure is fixed', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'secret' }]);
   h.setFetchImpl((async () => new Response('down', { status: 500 })) as typeof fetch);
 
@@ -769,7 +1069,7 @@ test('retryRun resumes a failed run and can succeed once the external failure is
 });
 
 test('retryRun rejects a run that is not currently failed', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -784,7 +1084,7 @@ test('retryRun rejects a run that is not currently failed', async () => {
 });
 
 test('retryRun rejects a failed run belonging to a different company (cross-tenant)', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -801,7 +1101,7 @@ test('retryRun rejects a failed run belonging to a different company (cross-tena
 // ---- Phase 1 hardening: crash recovery ----
 
 test('recoverStuckRuns resumes a run left running by a simulated process crash', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   const workflow = await h.automation.createWorkflow({
     companyId: 'c1',
@@ -831,7 +1131,7 @@ test('recoverStuckRuns resumes a run left running by a simulated process crash',
 // ---- Phase 1 hardening: execution monitoring stats ----
 
 test('getStats returns accurate counts across workflows, runs, and pending approvals', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [CREATE_TASK_GRANT]);
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -852,7 +1152,7 @@ test('getStats returns accurate counts across workflows, runs, and pending appro
 // ---- Phase 1 hardening: secret deletion safety ----
 
 test('deleteSecret blocks deleting a secret referenced by an active workflow unless forced', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const secret = await h.automation.setSecret('c1', 'in_use_key', 'value', 'owner-1');
   await h.automation.createWorkflow({
     companyId: 'c1',
@@ -868,9 +1168,226 @@ test('deleteSecret blocks deleting a secret referenced by an active workflow unl
 });
 
 test('deleteSecret succeeds without force when no active workflow references it', async () => {
-  const h = freshHarness();
+  const h = await freshHarness();
   const secret = await h.automation.setSecret('c1', 'unused_key', 'value', 'owner-1');
   await h.automation.deleteSecret(secret.id, 'c1');
   const remaining = await h.automation.listSecrets('c1');
   assert.equal(remaining.length, 0);
+});
+
+// ---- Inventory AI tools: search_projects, get_project_details, get_project_payment_plans,
+// get_developer_portfolio, get_project_facilities, get_project_location ----
+
+test('search_projects action returns real matching projects, filtered and RBAC-gated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Zed Towers', destination: 'New Zayed', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-2', companyId: 'c1', name: 'Marina Heights', destination: 'North Coast', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search projects',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search', action: { type: 'search_projects', params: { destination: 'New Zayed' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { projects: { id: string }[]; matchCount: number };
+  assert.equal(output.matchCount, 1);
+  assert.equal(output.projects[0]!.id, 'proj-1');
+});
+
+test('search_projects action fails when the workflow creator lacks view:project permission', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', []);
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search projects',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search', action: { type: 'search_projects', params: {} } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+  assert.match(run!.error ?? '', /lacks view:project permission/);
+});
+
+test('get_project_details action returns a real join of developer/phases/launches/facilities/consultants/sales numbers, tenant-isolated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  const developer = await h.developers.save({ id: 'dev-1', companyId: 'c1', name: 'Emaar', createdAt: new Date().toISOString() });
+  const pool = await h.facilities.save({ id: 'fac-1', companyId: 'c1', name: 'Pool', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Marassi', developerId: developer.id, facilityIds: [pool.id], createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-other', companyId: 'c2', name: 'Other Co Project', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Details',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Details', action: { type: 'get_project_details', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { project: { id: string }; developer?: { id: string }; facilities: { id: string }[] };
+  assert.equal(output.project.id, 'proj-1');
+  assert.equal(output.developer?.id, developer.id);
+  assert.equal(output.facilities.length, 1);
+});
+
+test('get_project_details action rejects a project belonging to a different company (cross-tenant IDOR)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.projects.save({ id: 'proj-other', companyId: 'c2', name: 'Other Co Project', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Details',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Details', action: { type: 'get_project_details', params: { projectId: 'proj-other' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+});
+
+test('get_project_payment_plans action returns real templates scoped to the project (or company-wide, projectId-less templates)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'payment_plan_template' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Marassi', createdAt: new Date().toISOString() });
+  const baseTemplate = { version: 1, downPaymentType: 'percentage' as const, downPaymentValue: 10, frequency: 'monthly' as const, termMonths: 60, fees: [], archived: false, createdAt: new Date().toISOString() };
+  await h.templates.save({ ...baseTemplate, id: 'tpl-1', companyId: 'c1', projectId: 'proj-1', name: 'Standard 5yr' });
+  await h.templates.save({ ...baseTemplate, id: 'tpl-2', companyId: 'c1', name: 'Company-wide plan' });
+  await h.templates.save({ ...baseTemplate, id: 'tpl-3', companyId: 'c1', projectId: 'proj-other', name: 'Different project plan' });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Plans',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Plans', action: { type: 'get_project_payment_plans', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { templates: { id: string }[] };
+  assert.deepEqual(output.templates.map((t) => t.id).sort(), ['tpl-1', 'tpl-2']);
+});
+
+test('get_developer_portfolio action returns the developer and their real Projects, tenant-isolated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  const developer = await h.developers.save({ id: 'dev-1', companyId: 'c1', name: 'Sodic', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Villette', developerId: developer.id, createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-2', companyId: 'c1', name: 'Unrelated', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Portfolio',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Portfolio', action: { type: 'get_developer_portfolio', params: { developerId: developer.id } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { developer: { id: string }; projects: { id: string }[] };
+  assert.equal(output.developer.id, developer.id);
+  assert.equal(output.projects.length, 1);
+  assert.equal(output.projects[0]!.id, 'proj-1');
+});
+
+test('get_developer_portfolio action rejects a developer belonging to a different company', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.developers.save({ id: 'dev-other', companyId: 'c2', name: 'Other Co Developer', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Portfolio',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Portfolio', action: { type: 'get_developer_portfolio', params: { developerId: 'dev-other' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'failed');
+});
+
+test('get_project_facilities action resolves Project.facilityIds to real Facility rows, RBAC-gated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  const pool = await h.facilities.save({ id: 'fac-1', companyId: 'c1', name: 'Pool', createdAt: new Date().toISOString() });
+  const gym = await h.facilities.save({ id: 'fac-2', companyId: 'c1', name: 'Gym', createdAt: new Date().toISOString() });
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Marassi', facilityIds: [pool.id, gym.id], createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Facilities',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Facilities', action: { type: 'get_project_facilities', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { facilities: { name: string }[] };
+  assert.deepEqual(output.facilities.map((f) => f.name).sort(), ['Gym', 'Pool']);
+});
+
+test('get_project_location action returns real location/address/coordinates from the Project, never fabricated', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'project' }]);
+  await h.projects.save({
+    id: 'proj-1',
+    companyId: 'c1',
+    name: 'Marassi',
+    destination: 'North Coast',
+    address: 'KM 124 Alexandria Desert Road',
+    locationLat: 30.9,
+    locationLng: 28.7,
+    locationMapUrl: 'https://maps.example.com/marassi',
+    createdAt: new Date().toISOString(),
+  });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Location',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Location', action: { type: 'get_project_location', params: { projectId: 'proj-1' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { destination?: string; address?: string; locationLat?: number; locationLng?: number; locationMapUrl?: string };
+  assert.equal(output.destination, 'North Coast');
+  assert.equal(output.address, 'KM 124 Alexandria Desert Road');
+  assert.equal(output.locationLat, 30.9);
+  assert.equal(output.locationLng, 28.7);
+  assert.equal(output.locationMapUrl, 'https://maps.example.com/marassi');
+});
+
+test('search_units action supports the new bedrooms/finishing/destination filters (single source of truth with InventoryService.searchUnits)', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'view', resource: 'unit' }]);
+  await h.projects.save({ id: 'proj-1', companyId: 'c1', name: 'Zed Towers', destination: 'New Zayed', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-1', companyId: 'c1', projectId: 'proj-1', code: 'A-101', unitType: 'apartment', areaSqm: 180, listPrice: 8_000_000, bedrooms: 3, finishingType: 'Fully Finished', status: 'available', createdAt: new Date().toISOString() });
+  await h.units.save({ id: 'unit-2', companyId: 'c1', projectId: 'proj-1', code: 'A-102', unitType: 'apartment', areaSqm: 250, listPrice: 15_000_000, bedrooms: 4, finishingType: 'Core & Shell', status: 'available', createdAt: new Date().toISOString() });
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Search',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Search units', action: { type: 'search_units', params: { destination: 'New Zayed', bedrooms: 3, finishingType: 'Fully Finished' } } }],
+  });
+  const [run] = await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+  assert.equal(run!.status, 'completed');
+  const [stepRun] = await h.automation.listStepRuns(run!.id, 'c1');
+  const output = stepRun!.output as { units: { id: string }[]; matchCount: number };
+  assert.equal(output.matchCount, 1);
+  assert.equal(output.units[0]!.id, 'unit-1');
 });

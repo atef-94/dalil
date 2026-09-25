@@ -1,9 +1,15 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, confirmModal, selectInput, paginationControls, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderBrokers(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Brokers')));
+  const locale = getLocale();
+  let leadsOffset = 0;
+  let leadsQuery = '';
+  let commissionsOffset = 0;
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_brokers'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
@@ -34,7 +40,13 @@ export async function renderBrokers(container) {
   ]));
 
   const companiesSlot = el('div', { class: 'card' });
-  const leadsSlot = el('div', { class: 'card' });
+  const leadsTableSlot = el('div');
+  const leadsSearch = searchInput('Search by name, phone, or email…', (value) => { leadsQuery = value; leadsOffset = 0; load(); });
+  const leadsSlot = el('div', { class: 'card' }, [
+    el('h3', { style: 'margin-top:0' }, 'Broker-submitted leads (quarantine queue)'),
+    el('div', { class: 'form-row', style: 'max-width:320px;margin-bottom:10px' }, [leadsSearch]),
+    leadsTableSlot,
+  ]);
   const commissionsSlot = el('div', { class: 'card' });
 
   const rateBrokerSelect = selectInput([{ value: '', label: 'Company-wide default' }]);
@@ -191,14 +203,13 @@ export async function renderBrokers(container) {
       companiesSlot.appendChild(errorBanner(err.message));
     }
 
-    clear(leadsSlot);
-    leadsSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Broker-submitted leads (quarantine queue)'));
+    clear(leadsTableSlot);
     const leadsLoading = loadingState();
-    leadsSlot.appendChild(leadsLoading);
+    leadsTableSlot.appendChild(leadsLoading);
     try {
-      const page = await api.get('/api/brokers/leads', { limit: 50 });
+      const page = await api.get('/api/brokers/leads', { limit: 20, offset: leadsOffset, q: leadsQuery });
       leadsLoading.remove();
-      leadsSlot.appendChild(table(
+      leadsTableSlot.appendChild(table(
         [
           { label: 'Name', key: 'fullName' },
           { label: 'Phone', key: 'phone' },
@@ -213,9 +224,10 @@ export async function renderBrokers(container) {
         page.items,
         { empty: 'No broker-submitted leads yet — they land here only after a broker_user account submits one.' },
       ));
+      leadsTableSlot.appendChild(paginationControls(page, (next) => { leadsOffset = next; load(); }));
     } catch (err) {
       leadsLoading.remove();
-      leadsSlot.appendChild(errorBanner(err.message));
+      leadsTableSlot.appendChild(errorBanner(err.message));
     }
 
     clear(commissionsSlot);
@@ -248,7 +260,7 @@ export async function renderBrokers(container) {
     const commissionsLoading = loadingState();
     commissionsSlot.appendChild(commissionsLoading);
     try {
-      const page = await api.get('/api/brokers/commissions', { limit: 50 });
+      const page = await api.get('/api/brokers/commissions', { limit: 20, offset: commissionsOffset });
       commissionsLoading.remove();
       commissionsSlot.appendChild(table(
         [
@@ -266,6 +278,7 @@ export async function renderBrokers(container) {
         page.items,
         { empty: 'No commissions recorded yet — record one above against a signed contract.' },
       ));
+      commissionsSlot.appendChild(paginationControls(page, (next) => { commissionsOffset = next; load(); }));
     } catch (err) {
       commissionsLoading.remove();
       commissionsSlot.appendChild(errorBanner(err.message));

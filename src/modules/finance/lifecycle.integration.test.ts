@@ -8,14 +8,17 @@ async function freshApp() {
 
 test('full lifecycle: Lead -> Opportunity -> Reservation -> Contract -> Payment Schedule -> Payment -> Overdue -> Repayment', async () => {
   const app = await freshApp();
-  const { crm, sales, inventory, paymentPlans, finance } = app.services;
+  const { crm, crmStages, sales, inventory, paymentPlans, finance } = app.services;
   const companyId = app.seedResult!.companyId;
   const agentUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Sales Agent')!.userId;
   const financeUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Finance')!.userId;
 
   const lead = await crm.createLead({ companyId, fullName: 'Lifecycle Client', phone: '0555-9001', ownerEmployeeUserId: agentUserId });
-  await crm.updateStatus(lead.id, 'contacted');
-  await crm.updateStatus(lead.id, 'qualified');
+  const stages = await crmStages.listStages(companyId, true);
+  const contacted = stages.find((s) => s.key === 'no_answer')!;
+  const qualified = stages.find((s) => s.key === 'meeting')!;
+  await crm.moveToStage(lead.id, companyId, contacted.id);
+  await crm.moveToStage(lead.id, companyId, qualified.id);
 
   const opportunity = await sales.createOpportunity({ companyId, leadId: lead.id, ownerEmployeeUserId: agentUserId });
   const unit = await inventory.createUnit({ companyId, projectId: 'proj-lifecycle', code: 'L-001', unitType: 'villa', areaSqm: 300, listPrice: 3_000_000 });

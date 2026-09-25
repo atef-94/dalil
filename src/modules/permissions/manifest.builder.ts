@@ -5,8 +5,10 @@ export const ACTIONS: ActionName[] = ['view', 'create', 'edit', 'delete', 'appro
 export const RESOURCES: ResourceName[] = [
   'employee',
   'lead',
+  'crm_stage',
   'opportunity',
   'unit',
+  'quotation',
   'payment_plan_template',
   'payment_schedule',
   'contract',
@@ -31,7 +33,12 @@ export const RESOURCES: ResourceName[] = [
   'secret',
   'task',
   'ai_action',
+  'ai_memory',
+  'ai_llm_config',
   'integration_connection',
+  'sales_commission',
+  'forecast',
+  'signature_envelope',
 ];
 
 export interface PermissionManifestEntry {

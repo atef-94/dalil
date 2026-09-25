@@ -1,8 +1,18 @@
 import type {
+  ActionName,
   AgentDecision,
   AiActionRequest,
+  AiLlmUsage,
+  AiMemory,
+  AiModelConfig,
   AiPolicy,
+  AiWorkflowGoalType,
+  AiWorkflowRun,
+  AiWorkflowStepRun,
   ApprovalRequest,
+  CommunicationDeliveryEvent,
+  DocumentExtractedField,
+  DocumentExtractionRun,
   IntegrationConnection,
   IntegrationEvent,
   AuditLogEntry,
@@ -14,25 +24,47 @@ import type {
   CommissionRule,
   Company,
   Contract,
+  CrmStage,
   Customer,
   Department,
   Employee,
   Lead,
+  LeadDistributionPool,
   LeaveRequest,
   LegalDocument,
   MaintenanceTicket,
   Message,
   Opportunity,
   Payment,
+  PaymentFrequency,
   PaymentPlanTemplate,
   PaymentScheduleLine,
   PermissionGrant,
   Project,
+  Developer,
+  ProjectPhase,
+  Launch,
+  Facility,
+  Consultant,
+  SalesPhoneNumber,
+  ActionApproval,
+  ApprovableActionType,
+  DiscountApprovalPolicy,
+  ImportSession,
   PurchaseOrder,
+  Quotation,
+  QuotationStatus,
   Receipt,
+  Refund,
   Reservation,
+  ResourceName,
   Role,
+  SalesCommission,
+  SalesCommissionRule,
+  ScopeName,
   Secret,
+  SensitivityTier,
+  SignatureEnvelope,
   Task,
   Unit,
   UnitHold,
@@ -43,12 +75,16 @@ import type {
   WorkflowRun,
   WorkflowStepRun,
 } from './domain/types.js';
+import { netContractValue } from './domain/money.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { InMemoryRepository, type Repository } from './infra/repository.js';
 import { SqliteRepository } from './infra/sqlite-repository.js';
 import { HttpServer, type RequestContext } from './infra/http-server.js';
 import { SlidingWindowRateLimiter } from './infra/rate-limiter.js';
 import { paginate } from './infra/pagination.js';
+import { searchFilter } from './infra/search.js';
+import { parseCsvRecords } from './infra/csv.js';
+import { runImport, SkipRow } from './infra/csv-import.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
@@ -61,11 +97,16 @@ import { filterByListScope, type ScopeOwnerKeys } from './modules/permissions/sc
 import { OrganizationService } from './modules/organization/organization.service.js';
 import { AuthService } from './modules/auth/auth.service.js';
 import { CrmService } from './modules/crm/crm.service.js';
+import { CrmStageService } from './modules/crm/crm-stage.service.js';
+import { LeadDistributionService } from './modules/crm/lead-distribution.service.js';
+import { LeadTimelineService } from './modules/crm/lead-timeline.service.js';
 import { InventoryService } from './modules/inventory/inventory.service.js';
 import { PaymentPlansService } from './modules/payment-plans/payment-plans.service.js';
 import { SalesService } from './modules/sales/sales.service.js';
 import { FinanceService } from './modules/finance/finance.service.js';
 import { BrokersService } from './modules/brokers/brokers.service.js';
+import { SalesCommissionService } from './modules/commissions/sales-commission.service.js';
+import { ApprovalEngineService } from './modules/approvals/approval-engine.service.js';
 import { RoleManagementService } from './modules/permissions/role-management.service.js';
 import { OnboardingService } from './modules/onboarding/onboarding.service.js';
 import { HrService } from './modules/hr/hr.service.js';
@@ -80,7 +121,24 @@ import { PortalService } from './modules/portal/portal.service.js';
 import { TaskService } from './modules/tasks/task.service.js';
 import { AutomationService, type WorkflowStepInput } from './modules/automation/automation.service.js';
 import { AiAgentService } from './modules/ai/ai-agent.service.js';
+import { AiMemoryService } from './modules/ai/ai-memory.service.js';
+import { LlmOrchestratorService } from './modules/ai/llm-orchestrator.service.js';
+import { AiWorkflowService } from './modules/ai/ai-workflow.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
+import { SignatureService } from './modules/integrations/e-signature.service.js';
+import { CommunicationDeliveryService } from './modules/integrations/communication-delivery.service.js';
+import { ForecastingService } from './modules/forecasting/forecasting.service.js';
+import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
+import { ImportSessionService } from './modules/imports/import-session.service.js';
+import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
+import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
+import { InventoryImportService, INVENTORY_IMPORT_FIELDS, type InventoryImportOptions } from './modules/inventory/inventory-import.service.js';
+import { DocumentIntelligenceService } from './modules/documents/document-intelligence.service.js';
+import { QuotationService } from './modules/quotations/quotation.service.js';
+import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
+import { buildOfferPdf, fetchOfferImages } from './modules/quotations/offer-pdf.service.js';
+import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
+import type { MultipartBody } from './infra/multipart.js';
 
 export interface AppOptions {
   nodeEnv: string;
@@ -107,6 +165,12 @@ export interface AppOptions {
   /** Max workflow runs the Automation Engine executes concurrently,
    * process-wide. Defaults to 10. */
   automationMaxConcurrentRuns?: number;
+  /** Whether to trust X-Forwarded-For for client-IP-based rate limiting —
+   * see HttpServerOptions.trustProxy for why this defaults to false (an
+   * untrusted client can otherwise spoof a fresh rate-limit bucket on every
+   * request). Only set true when genuinely deployed behind a trusted single
+   * reverse proxy. */
+  trustProxy?: boolean;
 }
 
 export interface Application {
@@ -117,11 +181,23 @@ export interface Application {
     organization: OrganizationService;
     auth: AuthService;
     crm: CrmService;
+    crmStages: CrmStageService;
+    leadDistribution: LeadDistributionService;
+    leadTimeline: LeadTimelineService;
     inventory: InventoryService;
     paymentPlans: PaymentPlansService;
+    quotations: QuotationService;
     sales: SalesService;
     finance: FinanceService;
     brokers: BrokersService;
+    salesCommissions: SalesCommissionService;
+    approvalEngine: ApprovalEngineService;
+    forecasting: ForecastingService;
+    scenarioSimulation: ScenarioSimulationService;
+    importSessions: ImportSessionService;
+    leadImport: LeadImportService;
+    paymentImport: PaymentImportService;
+    inventoryImport: InventoryImportService;
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
@@ -138,14 +214,33 @@ export interface Application {
     automation: AutomationService;
     eventBus: EventBus;
     aiAgent: AiAgentService;
+    aiMemory: AiMemoryService;
+    llmOrchestrator: LlmOrchestratorService;
+    documentIntelligence: DocumentIntelligenceService;
+    aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
+    signatures: SignatureService;
     /** Sweeps overdue payment schedule lines AND emits one
      * `payment.overdue_swept` domain event per swept line — use this
      * instead of `finance.sweepOverdue()` wherever the sweep should also
      * feed the Automation Engine (the HTTP route and main.ts's tick both
      * do). `finance.sweepOverdue()` itself stays event-free for existing
      * callers/tests that only care about the count. */
-    sweepOverdueAndEmit: () => Promise<number>;
+    /** `companyId` optional — omit it (as main.ts's tick does) to sweep
+     * every tenant; a per-tenant HTTP caller must always pass its own. */
+    sweepOverdueAndEmit: (companyId?: string) => Promise<number>;
+    /** Auto-reassigns leads that breached their first-contact SLA and
+     * emits one `lead.sla_breached` event per breach — use this instead
+     * of `leadDistribution.sweepSlaBreaches()` wherever the sweep should
+     * also feed the Automation Engine (the HTTP route and main.ts's tick
+     * both do), mirroring sweepOverdueAndEmit above. `companyId` optional,
+     * same rule as sweepOverdueAndEmit. */
+    sweepSlaBreachesAndEmit: (companyId?: string) => Promise<number>;
+    /** Expires active Reservations past their expiresAt and emits one
+     * `reservation.expired` domain event per reservation, mirroring
+     * sweepOverdueAndEmit/sweepSlaBreachesAndEmit above, including the
+     * optional `companyId` rule. */
+    sweepExpiredReservationsAndEmit: (companyId?: string) => Promise<number>;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -160,12 +255,19 @@ function buildRepos(db?: DatabaseSync) {
     branches: repo<Branch>('branches'),
     departments: repo<Department>('departments'),
     projects: repo<Project>('projects'),
+    developers: repo<Developer>('developers'),
+    projectPhases: repo<ProjectPhase>('project_phases'),
+    launches: repo<Launch>('launches'),
+    facilities: repo<Facility>('facilities'),
+    consultants: repo<Consultant>('consultants'),
+    salesPhoneNumbers: repo<SalesPhoneNumber>('sales_phone_numbers'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
     userRoles: repo<UserRole>('user_roles'),
     overrides: repo<import('./domain/types.js').PermissionOverride>('permission_overrides'),
     leads: repo<Lead>('leads'),
+    crmStages: repo<CrmStage>('crm_stages'),
     units: repo<Unit>('units'),
     unitHolds: repo<UnitHold>('unit_holds'),
     reservations: repo<Reservation>('reservations'),
@@ -197,8 +299,25 @@ function buildRepos(db?: DatabaseSync) {
     aiActionRequests: repo<AiActionRequest>('ai_action_requests'),
     aiPolicies: repo<AiPolicy>('ai_policies'),
     agentDecisions: repo<AgentDecision>('agent_decisions'),
+    aiMemory: repo<AiMemory>('ai_memory'),
+    aiModelConfigs: repo<AiModelConfig>('ai_model_configs'),
+    aiLlmUsage: repo<AiLlmUsage>('ai_llm_usage'),
+    documentExtractionRuns: repo<DocumentExtractionRun>('document_extraction_runs'),
+    documentExtractedFields: repo<DocumentExtractedField>('document_extracted_fields'),
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
+    communicationDeliveryEvents: repo<CommunicationDeliveryEvent>('communication_delivery_events'),
+    leadDistributionPools: repo<LeadDistributionPool>('lead_distribution_pools'),
+    salesCommissionRules: repo<SalesCommissionRule>('sales_commission_rules'),
+    salesCommissions: repo<SalesCommission>('sales_commissions'),
+    actionApprovals: repo<ActionApproval>('action_approvals'),
+    discountApprovalPolicies: repo<DiscountApprovalPolicy>('discount_approval_policies'),
+    refunds: repo<Refund>('refunds'),
+    importSessions: repo<ImportSession>('import_sessions'),
+    quotations: repo<Quotation>('quotations'),
+    aiWorkflowRuns: repo<AiWorkflowRun>('ai_workflow_runs'),
+    aiWorkflowStepRuns: repo<AiWorkflowStepRun>('ai_workflow_step_runs'),
+    signatureEnvelopes: repo<SignatureEnvelope>('signature_envelopes'),
   };
 }
 
@@ -275,23 +394,47 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const auditLog = new AuditLog(repos.auditEntries);
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
   const auth = new AuthService(repos.users, options.tokenSecret);
-  const crm = new CrmService(repos.leads);
-  const inventory = new InventoryService(repos.units, repos.unitHolds, repos.reservations, repos.projects);
+  const crmStages = new CrmStageService(repos.crmStages);
+  const crm = new CrmService(repos.leads, crmStages);
+  const importSessions = new ImportSessionService(repos.importSessions);
+  const leadImport = new LeadImportService(repos.leads, repos.users, crm);
+  const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
+  const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
+  const inventory = new InventoryService(
+    repos.units,
+    repos.unitHolds,
+    repos.reservations,
+    repos.projects,
+    repos.developers,
+    repos.projectPhases,
+    repos.launches,
+    repos.facilities,
+    repos.consultants,
+    repos.salesPhoneNumbers,
+  );
+  const inventoryImport = new InventoryImportService(inventory);
+  const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
-  const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans);
-  const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines);
+  const quotations = new QuotationService(repos.quotations, repos.units, paymentPlans);
+  const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
+  const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
+  const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
+  const paymentImport = new PaymentImportService(repos.leads, inventory, sales, paymentPlans, finance);
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
+  const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
-  const onboarding = new OnboardingService(organization, auth, roleManagement);
+  const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
   const hr = new HrService(repos.leaveRequests, repos.employees);
   const operations = new OperationsService(repos.maintenanceTickets, repos.units);
   const legal = new LegalService(repos.legalDocuments, repos.contracts);
   const purchasing = new PurchasingService(repos.vendors, repos.purchaseOrders);
-  const marketing = new MarketingService(repos.campaigns, repos.leads);
+  const marketing = new MarketingService(repos.campaigns, repos.leads, crmStages);
   const communication = new CommunicationService(repos.messages);
-  const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions);
-  const leadScoring = new LeadScoringService(repos.leads);
-  const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth);
+  const analytics = new AnalyticsService(repos.leads, repos.opportunities, repos.contracts, repos.scheduleLines, repos.units, repos.commissions, repos.auditEntries, repos.campaigns, crmStages);
+  const forecasting = new ForecastingService(repos.contracts, repos.scheduleLines, repos.payments, repos.units);
+  const scenarioSimulation = new ScenarioSimulationService(repos.templates);
+  const leadScoring = new LeadScoringService(repos.leads, crmStages);
+  const portal = new PortalService(repos.customers, repos.leads, repos.contracts, repos.scheduleLines, auth, repos.opportunities, repos.legalDocuments, repos.messages, repos.tasks);
   const tasks = new TaskService(repos.tasks);
   const eventBus = new EventBus();
   const automation = new AutomationService(
@@ -300,7 +443,14 @@ export async function buildApplication(options: AppOptions): Promise<Application
     tasks,
     communication,
     crm,
+    crmStages,
     marketing,
+    finance,
+    sales,
+    inventory,
+    leadScoring,
+    quotations,
+    paymentPlans,
     auditLog,
     options.secretStoreKey ?? options.tokenSecret,
     undefined,
@@ -315,7 +465,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     await automation.handleEvent(event);
   });
   const integrations = new IntegrationService(
-    { connections: repos.integrationConnections, events: repos.integrationEvents },
+    { connections: repos.integrationConnections, events: repos.integrationEvents, deliveryEvents: repos.communicationDeliveryEvents },
     automation,
     auditLog,
   );
@@ -326,12 +476,33 @@ export async function buildApplication(options: AppOptions): Promise<Application
   automation.setIntegrationSender((companyId, provider, action, params, userId) =>
     integrations.send(companyId, provider as IntegrationConnection['provider'], action, params, userId),
   );
+  const signatures = new SignatureService(repos.signatureEnvelopes, repos.contracts, integrations, automation);
+  const communicationDelivery = new CommunicationDeliveryService(repos.communicationDeliveryEvents, integrations, automation);
+  // Wires the real delivery-status lookup in as the executor for the
+  // `get_delivery_status` AI tool — see the deliveryStatusGetter field
+  // comment in automation.service.ts for why this is late-bound.
+  automation.setDeliveryStatusGetter((companyId, relatedResourceId) => integrations.getLatestDeliveryStatusForResource(companyId, relatedResourceId));
+
+  const aiMemory = new AiMemoryService(repos.aiMemory);
+  // Wires the `recall_memory` AI tool — see the memoryRecaller field
+  // comment in automation.service.ts.
+  automation.setMemoryRecaller((companyId, filter) =>
+    aiMemory.recall(companyId, {
+      category: filter.category as AiMemory['category'] | undefined,
+      subjectType: filter.subjectType as string | undefined,
+      subjectId: filter.subjectId as string | undefined,
+      query: filter.query as string | undefined,
+    }),
+  );
+
+  const llmOrchestrator = new LlmOrchestratorService(repos.aiModelConfigs, repos.aiLlmUsage, automation);
 
   const aiAgent = new AiAgentService(
     { actionRequests: repos.aiActionRequests, policies: repos.aiPolicies, approvals: repos.approvals, agentDecisions: repos.agentDecisions },
     rbac,
     automation,
     crm,
+    crmStages,
     leadScoring,
     auditLog,
     marketing,
@@ -339,6 +510,12 @@ export async function buildApplication(options: AppOptions): Promise<Application
     hr,
     finance,
     integrations,
+    legal,
+    brokers,
+    inventory,
+    analytics,
+    tasks,
+    communication,
   );
   // Wires the `ai_decide` action type — a workflow step (or a manual
   // trigger) can hand a subject off to a specialized agent and let it
@@ -351,6 +528,22 @@ export async function buildApplication(options: AppOptions): Promise<Application
     aiAgent.decide(agentKey, companyId, subjectId, requestedByUserId),
   );
 
+  const aiWorkflow = new AiWorkflowService(
+    { runs: repos.aiWorkflowRuns, steps: repos.aiWorkflowStepRuns },
+    automation,
+    aiAgent,
+    crm,
+    crmStages,
+    leadScoring,
+    leadTimeline,
+    inventory,
+    paymentPlans,
+    leadDistribution,
+    communication,
+    integrations,
+    auditLog,
+  );
+
   let seedResult: Awaited<ReturnType<typeof seedDemoData>> | undefined;
   if (options.seed !== false) {
     seedResult = await seedDemoData({
@@ -360,6 +553,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       roles: repos.roles,
       grants: repos.grants,
       userRoles: repos.userRoles,
+      crmStages: repos.crmStages,
+      leads: repos.leads,
     });
   }
 
@@ -371,6 +566,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     nodeEnv: options.nodeEnv,
     globalRateLimiter,
     authRateLimiter,
+    trustProxy: options.trustProxy ?? false,
   });
 
   const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv);
@@ -393,9 +589,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
 
   // Shared by the manual sweep route below and main.ts's periodic tick, so
   // both paths emit the same `payment.overdue_swept` event per line instead
-  // of duplicating the sweep-then-emit logic.
-  const sweepOverdueAndEmit = async (): Promise<number> => {
-    const swept = await finance.sweepOverdueDetailed();
+  // of duplicating the sweep-then-emit logic. `companyId` omitted (main.ts's
+  // tick) sweeps every tenant; the manual HTTP route always passes its own.
+  const sweepOverdueAndEmit = async (companyId?: string): Promise<number> => {
+    const swept = await finance.sweepOverdueDetailed(new Date(), companyId);
     for (const line of swept) {
       await emitEvent({
         companyId: line.companyId,
@@ -405,6 +602,38 @@ export async function buildApplication(options: AppOptions): Promise<Application
       });
     }
     return swept.length;
+  };
+
+  // Same shared-by-manual-route-and-tick shape as sweepOverdueAndEmit
+  // above, for the SLA sweep instead of the payment-overdue sweep.
+  const sweepSlaBreachesAndEmit = async (companyId?: string): Promise<number> => {
+    const breaches = await leadDistribution.sweepSlaBreaches(new Date(), companyId);
+    for (const breach of breaches) {
+      await emitEvent({
+        companyId: breach.companyId,
+        type: 'lead.sla_breached',
+        payload: { ...breach },
+        dedupeKey: `lead.sla_breached:${breach.leadId}:${breach.reassignmentCount}`,
+      });
+    }
+    return breaches.length;
+  };
+
+  // Same shared-by-manual-route-and-tick shape as sweepOverdueAndEmit above,
+  // for expired reservations — closes the previously-open gap where a
+  // reservation past its expiresAt never released its unit back onto the
+  // market unless something else happened to touch that unit.
+  const sweepExpiredReservationsAndEmit = async (companyId?: string): Promise<number> => {
+    const expired = await inventory.sweepExpiredReservationsDetailed(new Date(), companyId);
+    for (const reservation of expired) {
+      await emitEvent({
+        companyId: reservation.companyId,
+        type: 'reservation.expired',
+        payload: { ...reservation },
+        dedupeKey: `reservation.expired:${reservation.id}`,
+      });
+    }
+    return expired.length;
   };
 
   const employeeScopeKeys = async (ownerUserId: string | undefined): Promise<ScopeOwnerKeys> => {
@@ -420,17 +649,158 @@ export async function buildApplication(options: AppOptions): Promise<Application
     };
   };
 
+  // The 60-day lead-ownership protection law: at contract-signing time,
+  // resolve who actually gets commission credit — the lead's original
+  // first-contact owner if still inside the 60-day window, otherwise
+  // whoever is actually signing. Best-effort: if the reservation/lead
+  // can't be resolved for any reason, falls back to the signer, exactly
+  // like this route always behaved before this law existed — signContract
+  // itself still does the real reservation validation.
+  const resolveCreditedEmployee = async (companyId: string, reservationId: string, signingUserId: string): Promise<string> => {
+    const reservation = await inventory.getReservation(reservationId);
+    if (!reservation || reservation.companyId !== companyId) return signingUserId;
+    const protectedOwner = await crm.resolveCommissionOwner(reservation.clientId, companyId).catch(() => undefined);
+    return protectedOwner ?? signingUserId;
+  };
+
+  // Records base/override internal sales commission lines for a freshly
+  // signed contract and emits one sales_commission.recorded event per
+  // line, so the Automation Engine can react (e.g. notify the earner) the
+  // same way it reacts to any other domain event. Never blocks or fails
+  // the contract-signing response — a commission-recording issue must
+  // never undo or block a signed contract.
+  const recordSalesCommissionsAndEmit = async (companyId: string, contract: Contract, actorUserId: string): Promise<void> => {
+    if (contract.totalPrice === undefined) return;
+    // Commission is earned on what the company actually stands to collect,
+    // not the pre-discount list price — a discounted deal is a smaller
+    // deal. Without this, an agent would earn the same commission on a
+    // heavily discounted contract as on a full-price one.
+    try {
+      const recorded = await salesCommissions.recordCommissionsForContract(companyId, contract.id, contract.creditedEmployeeUserId, netContractValue(contract.totalPrice, contract.discountPercent));
+      for (const commission of recorded) {
+        await emitEvent({
+          companyId,
+          type: 'sales_commission.recorded',
+          payload: { ...commission },
+          actorUserId,
+          dedupeKey: `sales_commission.recorded:${commission.id}`,
+        });
+      }
+    } catch (err) {
+      process.stderr.write(`sales commission recording failed for contract ${contract.id}: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  };
+
+  // The one real place a signed contract actually gets created — used
+  // both by the direct POST /api/sales/contracts route and by the
+  // discount-override approval resume path below, so approval never
+  // takes a shortcut around audit/event/commission recording.
+  const finishContractSigning = async (
+    companyId: string,
+    input: { reservationId: string; creditedEmployeeUserId: string; paymentPlanTemplateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number },
+    actorUserId: string,
+  ): Promise<Contract> => {
+    const contract = await sales.signContract({ companyId, ...input });
+    await auditLog.record({ companyId, actorUserId, action: 'create', resource: 'contract', resourceId: contract.id });
+    await emitEvent({ companyId, type: 'contract.signed', payload: { ...contract }, actorUserId, dedupeKey: `contract.signed:${contract.id}` });
+    await recordSalesCommissionsAndEmit(companyId, contract, actorUserId);
+    return contract;
+  };
+
+  // Same reuse principle as finishContractSigning above: a contract
+  // amendment is identical whether it happens immediately (no policy
+  // gate configured — see the route below) or after approval.
+  const finishContractAmendment = async (
+    companyId: string,
+    input: { contractId: string; newTotalPrice: number; discountPercent?: number },
+    actorUserId: string,
+  ): Promise<Contract> => {
+    const contract = await sales.amendContract({ companyId, ...input });
+    await auditLog.record({ companyId, actorUserId, action: 'edit', resource: 'contract', resourceId: contract.id, metadata: { amended: true, newTotalPrice: input.newTotalPrice, discountPercent: input.discountPercent } });
+    await emitEvent({ companyId, type: 'contract.amended', payload: { ...contract }, actorUserId, dedupeKey: `contract.amended:${contract.id}:${Date.now()}` });
+    return contract;
+  };
+
+  const finishRefund = async (
+    companyId: string,
+    input: { contractId: string; paymentScheduleLineId: string; amount: number; reason: string },
+    actorUserId: string,
+  ) => {
+    const result = await finance.recordRefund({ companyId, recordedByUserId: actorUserId, ...input });
+    await auditLog.record({ companyId, actorUserId, action: 'edit', resource: 'payment_schedule', resourceId: result.line.id, metadata: { refunded: true, amount: input.amount, reason: input.reason } });
+    await emitEvent({ companyId, type: 'payment.refunded', payload: { ...result.refund }, actorUserId, dedupeKey: `payment.refunded:${result.refund.id}` });
+    return result;
+  };
+
+  // Dispatch table for resuming an approved ActionApproval — the
+  // Universal Approval Engine itself knows nothing about contracts or
+  // discounts; this is the one place that maps an actionType to what
+  // "finishing" it actually means. Add a case here for each new
+  // actionType this engine gates.
+  const resumeApprovedAction = async (approval: ActionApproval, actorUserId: string): Promise<unknown> => {
+    if (approval.actionType === 'discount_override') {
+      const ctx = approval.context as {
+        reservationId: string;
+        creditedEmployeeUserId: string;
+        paymentPlanTemplateId: string;
+        totalPrice: number;
+        discountPercent?: number;
+        escalationPercentPerYear?: number;
+      };
+      return finishContractSigning(approval.companyId, ctx, actorUserId);
+    }
+    if (approval.actionType === 'contract_amendment') {
+      const ctx = approval.context as { contractId: string; newTotalPrice: number; discountPercent?: number };
+      return finishContractAmendment(approval.companyId, ctx, actorUserId);
+    }
+    if (approval.actionType === 'refund') {
+      const ctx = approval.context as { contractId: string; paymentScheduleLineId: string; amount: number; reason: string };
+      return finishRefund(approval.companyId, ctx, actorUserId);
+    }
+    throw new ValidationError(`no resume handler registered for action type "${String(approval.actionType)}"`);
+  };
+
   // ---- Auth ----
+  // Fixed real security gap found during audit: this route previously had
+  // no auth check at all — anyone, unauthenticated, could create a login
+  // account inside ANY company by companyId (including the well-known
+  // "company-demo"), for any userType. The resulting account held zero
+  // RBAC grants so couldn't read/write real data, but it still broke
+  // tenant isolation (an outsider could inject an account into a company
+  // they don't belong to) and let requests authenticate as a "real" user
+  // of that tenant. Now: requires an authenticated staff member with
+  // create:employee (the same permission that already gates provisioning
+  // an org-chart Employee), always registers into the ACTOR's own
+  // company (the companyId in the body is ignored, never trusted), and —
+  // filling a real completeness gap — is now the only way to actually
+  // provision a broker_user login for an approved BrokerCompany, since no
+  // route did that at all before (the broker-lead-submission flow was
+  // otherwise unreachable in practice).
   httpServer.post('/api/auth/register', async (ctx) => {
-    const body = parseJsonBody<{ companyId: string; email: string; password: string; userType: string; locale: 'en' | 'ar' }>(ctx.body);
-    if (!body.companyId?.trim()) throw new ValidationError('companyId is required');
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'employee'))) {
+      throw new ForbiddenError('missing create:employee permission');
+    }
+    const body = parseJsonBody<{ email: string; password: string; userType: string; locale?: 'en' | 'ar'; employeeId?: string; brokerCompanyId?: string; customerId?: string }>(ctx.body);
+    const userType = body.userType as User['userType'];
+    if (userType === 'broker_user') {
+      if (!body.brokerCompanyId) throw new ValidationError('brokerCompanyId is required for a broker_user account');
+      const brokerCompanies = await brokers.listBrokerCompanies(actor.companyId);
+      const brokerCompany = brokerCompanies.find((bc) => bc.id === body.brokerCompanyId);
+      if (!brokerCompany) throw new NotFoundError('broker company not found');
+      if (brokerCompany.status !== 'approved') throw new ForbiddenError('broker company must be approved before it can have login accounts');
+    }
     const user = await auth.register({
-      companyId: body.companyId,
+      companyId: actor.companyId,
       email: body.email,
       password: body.password,
-      userType: body.userType as User['userType'],
+      userType,
       locale: body.locale ?? 'en',
+      employeeId: body.employeeId,
+      brokerCompanyId: userType === 'broker_user' ? body.brokerCompanyId : undefined,
+      customerId: body.customerId,
     });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'employee', resourceId: user.id, metadata: { userType, accountCreation: true } });
     return { status: 201, body: { id: user.id, email: user.email, userType: user.userType } };
   });
 
@@ -505,7 +875,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       // record's subject — so 'own' resolves against the employee's own user.
       ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
     }));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    const searched = searchFilter(filtered, ['fullName', 'email', 'title'], ctx.query.get('q'));
+    return { status: 200, body: paginate(searched, ctx.query) };
   });
 
   httpServer.post('/api/organization/employees/:employeeId/reassign-manager', async (ctx) => {
@@ -664,6 +1035,45 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 204 };
   });
 
+  // Bulk CSV import for roles + grants. A permission matrix is too
+  // security-sensitive to derive from a loosely-worded prose column like
+  // "Create, View All, Edit, Delete" — one wrong guess there is a real
+  // access-control bug. So this uses one row per exact (Role, Action,
+  // Resource, Scope) grant instead: unambiguous, and validated the same
+  // way the manual "Add grant" screen already validates it (RbacEvaluator
+  // rejects an invalid resource/action/scope at check time, same as any
+  // other grant). The role itself is created on its first occurrence and
+  // reused for subsequent rows with the same name.
+  httpServer.post('/api/roles/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'role'))) {
+      throw new ForbiddenError('missing create:role permission');
+    }
+    if (!(await rbac.can(actor.userId, 'edit', 'role'))) {
+      throw new ForbiddenError('missing edit:role permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const existingRoles = await roleManagement.listRoles(actor.companyId);
+    const roleByName = new Map<string, Role>(existingRoles.map((r) => [r.name, r]));
+    const result = await runImport(records, [], async (record) => {
+      const roleName = record['Role Name']?.trim();
+      const action = record['Action']?.trim() as ActionName;
+      const resource = record['Resource']?.trim() as ResourceName;
+      const scope = record['Scope']?.trim() as ScopeName;
+      const sensitivity = (record['Sensitivity']?.trim() || undefined) as SensitivityTier | undefined;
+      if (!roleName) throw new ValidationError('"Role Name" is required');
+      if (!action || !resource || !scope) throw new ValidationError('"Action", "Resource", and "Scope" are required');
+      let role = roleByName.get(roleName);
+      if (!role) {
+        role = await roleManagement.createRole(actor.companyId, roleName);
+        roleByName.set(roleName, role);
+      }
+      return roleManagement.addGrant(actor.companyId, role.id, { action, resource, scope, sensitivity });
+    });
+    return { status: 200, body: result };
+  });
+
   // ---- Users & role assignment ----
   httpServer.get('/api/users', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -723,6 +1133,61 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 201, body: template };
   });
 
+  // Bulk CSV import — one real paymentPlans.createTemplate() call per row.
+  // Discount/maintenance-fee/delivery-payment percentages aren't fields on
+  // PaymentPlanTemplate (discount is applied per-contract at signing time,
+  // not stored on the template), so they're reported as unsupportedColumns
+  // rather than silently accepted and dropped.
+  httpServer.post('/api/payment-plan-templates/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'payment_plan_template'))) {
+      throw new ForbiddenError('missing create:payment_plan_template permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const projects = await inventory.listProjects(actor.companyId);
+    const FREQUENCY_MAP: Record<string, PaymentFrequency> = {
+      monthly: 'monthly',
+      quarterly: 'quarterly',
+      'semi-annually': 'semiannual',
+      semiannual: 'semiannual',
+      annually: 'annual',
+      annual: 'annual',
+      'one time': 'monthly', // cash plans: termMonths will be 0, so frequency is moot
+    };
+    const result = await runImport(
+      records,
+      ['Plan ID', 'Delivery Payment (%)', 'Discount Rate (%)', 'Maintenance Fee (%)', 'Status'],
+      async (record) => {
+        const name = record['Plan Name']?.trim();
+        if (!name) throw new ValidationError('"Plan Name" is required');
+        const downPaymentValue = Number((record['Down Payment (%)'] ?? '').replace('%', ''));
+        if (!Number.isFinite(downPaymentValue)) throw new ValidationError('"Down Payment (%)" must be a number');
+        const years = Number(record['Installment Years'] ?? '0');
+        // A pure cash/one-time plan (0 installment years) still needs a
+        // valid termMonths >= 1 (see schedule-generator.ts's real
+        // validation) — mapped to 1 month, with the down payment already
+        // covering the full amount for a 100%-down cash plan.
+        const termMonths = Math.max(1, Number.isFinite(years) ? Math.round(years * 12) : 1);
+        const frequencyKey = (record['Payment Frequency'] ?? '').trim().toLowerCase();
+        const frequency = FREQUENCY_MAP[frequencyKey] ?? 'monthly';
+        const applicableProjects = (record['Applicable Projects'] ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+        const projectId = applicableProjects.length === 1 ? projects.find((p) => p.name === applicableProjects[0])?.id : undefined;
+        return paymentPlans.createTemplate({
+          companyId: actor.companyId,
+          projectId,
+          name,
+          downPaymentType: 'percentage',
+          downPaymentValue,
+          frequency,
+          termMonths,
+          fees: [],
+        });
+      },
+    );
+    return { status: 200, body: result };
+  });
+
   httpServer.get('/api/payment-plan-templates', async (ctx) => {
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'payment_plan_template');
@@ -769,24 +1234,356 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: lines };
   });
 
+  // ---- Quotations (Dynamic Payment Plan & Quotation Generator) ----
+  // Reuses PaymentPlansService.previewSchedule under the hood (see
+  // quotation.service.ts) — never a second calculation engine.
+  interface QuotationRequestBody {
+    unitId: string;
+    paymentPlanTemplateId: string;
+    discountPercent?: number;
+    escalationPercentPerYear?: number;
+    totalPriceOverride?: number;
+    leadId?: string;
+  }
+
+  // Unit-code lookup — the Offer builder's entry point ("type a unit code,
+  // auto-fill everything"): a salesperson knows the code on the price
+  // list, never the unit's internal id.
+  httpServer.get('/api/quotations/units/by-code/:code', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'quotation', { companyId: actor.companyId, ownerUserId: actor.userId }))) {
+      throw new ForbiddenError('missing create:quotation permission');
+    }
+    const unit = await quotations.findUnitByCode(actor.companyId, ctx.params.code!);
+    const project = await inventory.getProject(unit.projectId);
+    return { status: 200, body: { unit, project } };
+  });
+
+  httpServer.post('/api/quotations/calculate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'quotation', { companyId: actor.companyId, ownerUserId: actor.userId }))) {
+      throw new ForbiddenError('missing create:quotation permission');
+    }
+    const body = parseJsonBody<QuotationRequestBody>(ctx.body);
+    const calculation = await quotations.calculate(actor.companyId, body);
+    return { status: 200, body: calculation };
+  });
+
+  httpServer.post('/api/quotations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'quotation', { companyId: actor.companyId, ownerUserId: actor.userId }))) {
+      throw new ForbiddenError('missing create:quotation permission');
+    }
+    const body = parseJsonBody<QuotationRequestBody>(ctx.body);
+    const quotation = await quotations.generate({ ...body, companyId: actor.companyId, createdByUserId: actor.userId });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'quotation', resourceId: quotation.id });
+    return { status: 201, body: quotation };
+  });
+
+  httpServer.get('/api/quotations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'quotation');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:quotation permission' } };
+    const all = await quotations.listForCompany(actor.companyId, {
+      unitId: ctx.query.get('unitId') ?? undefined,
+      leadId: ctx.query.get('leadId') ?? undefined,
+    });
+    const filtered = await filterByListScope(all, scope, (q) => employeeScopeKeys(q.createdByUserId));
+    return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  const quotationScopeCheck = async (actor: Actor, action: ActionName, quotationId: string) => {
+    const quotation = await quotations.getQuotation(quotationId, actor.companyId);
+    const ownerKeys = await employeeScopeKeys(quotation.createdByUserId);
+    const allowed = await rbac.can(actor.userId, action, 'quotation', {
+      companyId: quotation.companyId,
+      ownerUserId: quotation.createdByUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError(`missing ${action}:quotation permission for this quotation`);
+    return quotation;
+  };
+
+  httpServer.get('/api/quotations/:id', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    return { status: 200, body: { quotation, calculation } };
+  });
+
+  httpServer.patch('/api/quotations/:id/status', async (ctx) => {
+    const actor = await actorOf(ctx);
+    await quotationScopeCheck(actor, 'edit', ctx.params.id!);
+    const body = parseJsonBody<{ status: QuotationStatus }>(ctx.body);
+    const updated = await quotations.updateStatus(ctx.params.id!, actor.companyId, body.status);
+    return { status: 200, body: updated };
+  });
+
+  httpServer.get('/api/quotations/:id/excel', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const buffer = await buildQuotationWorkbook(quotation, calculation);
+    return {
+      status: 200,
+      body: { filename: `${quotation.referenceNumber}.xlsx`, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', base64: buffer.toString('base64') },
+    };
+  });
+
+  // Returns a print-ready HTML document rather than a server-rendered PDF —
+  // the frontend opens it and calls window.print() so the browser's own
+  // "Save as PDF" produces the file; see quotation-export.service.ts for
+  // why this avoids a fabricated server PDF pipeline.
+  httpServer.get('/api/quotations/:id/print', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const html = buildQuotationPrintHtml(quotation, calculation, calculation.unit);
+    return { status: 200, body: { html } };
+  });
+
+  httpServer.post('/api/quotations/:id/share', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const body = parseJsonBody<{ channel: 'whatsapp' | 'email'; message: string; toUserId?: string }>(ctx.body);
+    if (body.channel !== 'whatsapp' && body.channel !== 'email') throw new ValidationError('channel must be "whatsapp" or "email"');
+    const message = await communication.sendMessage({
+      companyId: actor.companyId,
+      fromUserId: actor.userId,
+      toUserId: body.toUserId,
+      subject: `Quotation ${quotation.referenceNumber}`,
+      body: body.message,
+      channel: body.channel,
+      relatedResource: 'quotation',
+      relatedResourceId: quotation.id,
+    });
+    return { status: 201, body: message };
+  });
+
+  // Real, server-rendered Offer PDF — cover with project images, unit
+  // info, the immutable payment schedule snapshot, master plan with this
+  // unit highlighted, and the unit's own floor plan. See
+  // offer-pdf.service.ts; any image URL that fails to resolve is simply
+  // skipped, never a reason to fail generating the document.
+  httpServer.get('/api/quotations/:id/pdf', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const project = await inventory.getProject(quotation.projectId);
+    if (!project) throw new NotFoundError('project not found for this quotation');
+    const images = await fetchOfferImages(calculation.unit, project);
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+    return {
+      status: 200,
+      body: { filename: `${quotation.referenceNumber}.pdf`, contentType: 'application/pdf', base64: buffer.toString('base64') },
+    };
+  });
+
+  // Generates the real Offer PDF and sends it as an actual WhatsApp
+  // document (not a link, not a log-only entry) via the connected Meta
+  // Cloud API integration, then logs it to the lead's own communication
+  // timeline (tagged relatedResource:'lead' — not 'quotation' — so it
+  // surfaces on LeadTimelineService like any other lead activity).
+  httpServer.post('/api/quotations/:id/send-whatsapp', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
+    const body = parseJsonBody<{ to: string; message?: string }>(ctx.body);
+    if (!body.to?.trim()) throw new ValidationError('"to" (the recipient WhatsApp number) is required');
+
+    const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
+    const project = await inventory.getProject(quotation.projectId);
+    if (!project) throw new NotFoundError('project not found for this quotation');
+    const images = await fetchOfferImages(calculation.unit, project);
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+
+    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project.name}, Unit ${calculation.unit.code}`;
+    const result = await integrations.send(
+      actor.companyId,
+      'whatsapp',
+      'send_document',
+      { to: body.to.trim(), body: caption, documentBuffer: buffer, documentFilename: `${quotation.referenceNumber}.pdf`, leadId: quotation.leadId },
+      actor.userId,
+    );
+
+    const message = await communication.sendMessage({
+      companyId: actor.companyId,
+      fromUserId: actor.userId,
+      subject: `Offer ${quotation.referenceNumber}`,
+      body: caption,
+      channel: 'whatsapp',
+      relatedResource: quotation.leadId ? 'lead' : 'quotation',
+      relatedResourceId: quotation.leadId ?? quotation.id,
+    });
+
+    return { status: 201, body: { message, providerResult: result } };
+  });
+
   // ---- Inventory ----
   httpServer.post('/api/inventory/projects', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'project'))) {
       throw new ForbiddenError('missing create:project permission');
     }
-    const body = parseJsonBody<{ name: string; location?: string }>(ctx.body);
-    const project = await inventory.createProject({ companyId: actor.companyId, ...body });
+    const body = parseJsonBody<Parameters<typeof inventory.createProject>[0]>(ctx.body);
+    const project = await inventory.createProject({ ...body, companyId: actor.companyId });
     return { status: 201, body: project };
   });
 
+  // Real, server-side project search (destination/developer/price-range/
+  // unit-type) — the same InventoryService.searchProjects the AI's
+  // search_projects tool calls, so results never diverge. Falls back to
+  // the plain list (no filters) when no query params are given, matching
+  // the previous behavior exactly.
   httpServer.get('/api/inventory/projects', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'view', 'project'))) {
       throw new ForbiddenError('missing view:project permission');
     }
-    const projects = await inventory.listProjects(actor.companyId);
+    const destination = ctx.query.get('destination') ?? undefined;
+    const developerId = ctx.query.get('developerId') ?? undefined;
+    const unitType = ctx.query.get('unitType') ?? undefined;
+    const q = ctx.query.get('q') ?? undefined;
+    const minPriceFromRaw = ctx.query.get('minPriceFrom');
+    const maxPriceToRaw = ctx.query.get('maxPriceTo');
+    const projects =
+      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw
+        ? await inventory.searchProjects(actor.companyId, {
+            destination,
+            developerId,
+            unitType,
+            q,
+            minPriceFrom: minPriceFromRaw ? Number(minPriceFromRaw) : undefined,
+            maxPriceTo: maxPriceToRaw ? Number(maxPriceToRaw) : undefined,
+            limit: 200,
+          })
+        : await inventory.listProjects(actor.companyId);
     return { status: 200, body: paginate(projects, ctx.query) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) {
+      throw new ForbiddenError('missing view:project permission');
+    }
+    return { status: 200, body: await inventory.getProjectFullDetails(ctx.params.projectId!, actor.companyId) };
+  });
+
+  httpServer.patch('/api/inventory/projects/:projectId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'project'))) {
+      throw new ForbiddenError('missing edit:project permission');
+    }
+    const body = parseJsonBody<Parameters<typeof inventory.updateProjectDetails>[2]>(ctx.body);
+    const project = await inventory.updateProjectDetails(ctx.params.projectId!, actor.companyId, body);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'project', resourceId: project.id, metadata: { fields: Object.keys(body) } });
+    return { status: 200, body: project };
+  });
+
+  // ---- Project master data: Developer / Phase / Launch / Facility /
+  // Consultant / Sales Phone Number — all gated on the existing 'project'
+  // RBAC resource (create/edit/view) rather than six new near-identical
+  // resources, since these are project master data, not a separate
+  // permission surface. ----
+  httpServer.post('/api/inventory/developers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; description?: string; website?: string; logoUrl?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createDeveloper({ ...body, companyId: actor.companyId }) };
+  });
+
+  httpServer.get('/api/inventory/developers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: paginate(await inventory.listDevelopers(actor.companyId), ctx.query) };
+  });
+
+  httpServer.get('/api/inventory/developers/:developerId/portfolio', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    const developer = await inventory.getDeveloper(ctx.params.developerId!);
+    if (!developer || developer.companyId !== actor.companyId) throw new NotFoundError('developer not found');
+    const projects = await inventory.getDeveloperPortfolio(ctx.params.developerId!, actor.companyId);
+    return { status: 200, body: { developer, projects } };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/phases', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; order?: number }>(ctx.body);
+    return { status: 201, body: await inventory.createProjectPhase({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/phases', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listProjectPhases(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/launches', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<Omit<Parameters<typeof inventory.createLaunch>[0], 'companyId' | 'projectId'>>(ctx.body);
+    return { status: 201, body: await inventory.createLaunch({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/launches', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listLaunches(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.post('/api/inventory/facilities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; category?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createFacility({ ...body, companyId: actor.companyId }) };
+  });
+
+  httpServer.get('/api/inventory/facilities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: paginate(await inventory.listFacilities(actor.companyId), ctx.query) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/facilities', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.getProjectFacilities(ctx.params.projectId!, actor.companyId) };
+  });
+
+  httpServer.post('/api/inventory/consultants', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ name: string; role: Consultant['role']; contactInfo?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createConsultant({ ...body, companyId: actor.companyId }) };
+  });
+
+  httpServer.get('/api/inventory/consultants', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    const role = (ctx.query.get('role') as Consultant['role'] | null) ?? undefined;
+    return { status: 200, body: paginate(await inventory.listConsultants(actor.companyId, role), ctx.query) };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/sales-phone-numbers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<{ phoneNumber: string; countryCode?: string; type?: string; source?: string }>(ctx.body);
+    return { status: 201, body: await inventory.createSalesPhoneNumber({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/sales-phone-numbers', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listSalesPhoneNumbers(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.post('/api/inventory/sales-phone-numbers/:phoneId/deactivate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'project'))) throw new ForbiddenError('missing edit:project permission');
+    return { status: 200, body: await inventory.deactivateSalesPhoneNumber(ctx.params.phoneId!, actor.companyId) };
   });
 
   httpServer.post('/api/inventory/units', async (ctx) => {
@@ -794,18 +1591,303 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
       throw new ForbiddenError('missing create:unit permission');
     }
-    const body = parseJsonBody<{ projectId: string; code: string; unitType: string; areaSqm: number; listPrice: number }>(ctx.body);
-    const unit = await inventory.createUnit({ companyId: actor.companyId, ...body });
+    const body = parseJsonBody<Omit<Parameters<typeof inventory.createUnit>[0], 'companyId'>>(ctx.body);
+    const unit = await inventory.createUnit({ ...body, companyId: actor.companyId });
     return { status: 201, body: unit };
   });
 
+  // Bulk CSV import — one real inventory.createUnit() call per row, same
+  // permission as the manual route above. Columns beyond the real Unit
+  // schema (Building/Block, Floor, Bedrooms, etc.) aren't stored anywhere
+  // yet, so they're reported back as unsupportedColumns rather than
+  // silently dropped.
+  httpServer.post('/api/inventory/units/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const projects = await inventory.listProjects(actor.companyId);
+    const result = await runImport(
+      records,
+      ['Building/Block', 'Floor', 'Bedrooms', 'Bathrooms', 'Finishing Type', 'View', 'Price per SQM (EGP)', 'Maintenance Fee (%)', 'Delivery Date', 'Status'],
+      async (record) => {
+        const projectName = record['Project Name']?.trim();
+        const project = projects.find((p) => p.name === projectName);
+        if (!project) throw new ValidationError(`project "${projectName}" not found — create it first`);
+        const code = record['Unit ID']?.trim();
+        const unitType = record['Unit Type']?.trim();
+        const areaSqm = Number(record['Area (SQM)']);
+        const listPrice = Number((record['Total Price (EGP)'] ?? '').replace(/,/g, ''));
+        if (!code) throw new ValidationError('"Unit ID" is required');
+        if (!unitType) throw new ValidationError('"Unit Type" is required');
+        if (!Number.isFinite(areaSqm) || areaSqm <= 0) throw new ValidationError('"Area (SQM)" must be a positive number');
+        if (!Number.isFinite(listPrice) || listPrice <= 0) throw new ValidationError('"Total Price (EGP)" must be a positive number');
+        return inventory.createUnit({ companyId: actor.companyId, projectId: project.id, code, unitType, areaSqm, listPrice });
+      },
+    );
+    return { status: 200, body: result };
+  });
+
+  // ---- Inventory Import pipeline (staged: upload -> preview -> confirm) ----
+  // The richer alternative to the bulk-CSV route above, for real
+  // Excel/PDF exports with unpredictable headers. Every row still only
+  // ever writes through inventory.createUnit()/updateUnitDetails() — a
+  // sold/reserved/contracted unit is always shown as a protected conflict,
+  // never silently changed.
+
+  httpServer.post(
+    '/api/inventory/units/import/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+        throw new ForbiddenError('missing create:unit permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+
+      const session = await importSessions.createSession({
+        companyId: actor.companyId,
+        createdByUserId: actor.userId,
+        targetType: 'inventory_unit',
+        fileName: file.filename,
+        fileBuffer: file.data,
+        contentType: file.contentType,
+        fields: INVENTORY_IMPORT_FIELDS,
+        fillDownBlankCells: body?.fields?.fillDownBlankCells === 'true',
+        sheetNameAsColumn: body?.fields?.sheetNameAsProject === 'true' ? 'Project' : undefined,
+      });
+      return {
+        status: 200,
+        body: {
+          sessionId: session.id,
+          fileName: session.fileName,
+          fileType: session.fileType,
+          detectedColumns: session.detectedColumns,
+          suggestedMapping: session.suggestedMapping,
+          sampleRows: session.rawRows.slice(0, 5),
+          totalRows: session.rawRows.length,
+          fields: INVENTORY_IMPORT_FIELDS,
+        },
+      };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.post('/api/inventory/units/import/:sessionId/preview', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions }>(ctx.body);
+    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping, body.options as Record<string, unknown> | undefined);
+    const mappedRows = importSessions.mapRows(session);
+    const preview = await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
+    return { status: 200, body: preview };
+  });
+
+  httpServer.post('/api/inventory/units/import/:sessionId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const session = await importSessions.getSession(ctx.params.sessionId!, actor.companyId);
+    if (!session.confirmedMapping) {
+      throw new ValidationError('this import session has not been mapped yet — call the preview step first');
+    }
+    const mappedRows = importSessions.mapRows(session);
+    const result = await inventoryImport.importRows(
+      actor.companyId,
+      mappedRows,
+      async (unit, action) => {
+        await auditLog.record({
+          companyId: actor.companyId,
+          actorUserId: actor.userId,
+          action: action === 'create' ? 'create' : 'edit',
+          resource: 'unit',
+          resourceId: unit.id,
+          metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+        });
+      },
+      session.importOptions as InventoryImportOptions | undefined,
+    );
+    await importSessions.markConfirmed(session.id, actor.companyId);
+    return { status: 200, body: result };
+  });
+
+  // Import History — lists past import sessions for this company across all
+  // targets (lead/inventory_unit/payment), newest first. Gated on view:unit
+  // since inventory is the primary consumer today; a company with no
+  // create:unit access sees an empty toolbar entry point instead (see
+  // frontend), never a 403 surprise on an otherwise-visible page.
+  httpServer.get('/api/imports/history', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'unit'))) {
+      throw new ForbiddenError('missing view:unit permission');
+    }
+    const targetTypeParam = ctx.query.get('targetType');
+    const validTargetTypes = ['lead', 'inventory_unit', 'payment'] as const;
+    const targetType = validTargetTypes.find((t) => t === targetTypeParam);
+    const sessions = await importSessions.listForCompany(actor.companyId, targetType);
+    return { status: 200, body: sessions };
+  });
+
+  // ---- Document Intelligence (bounded) ----
+  // Real field extraction from a text-bearing PDF (a unit spec sheet,
+  // reservation form) — distinct from the tabular CSV/Excel importers
+  // above. Gated on the same create/view:unit grants as inventory import
+  // since its only import target is a Unit. Never auto-imports: every run
+  // requires an explicit confirm step, and confirmExtraction() itself
+  // refuses when a required field is missing or unreviewed low-confidence
+  // (see DocumentIntelligenceService's class doc comment).
+  httpServer.post(
+    '/api/documents/extract/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+        throw new ForbiddenError('missing create:unit permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+      const { run, fields } = await documentIntelligence.extractFromPdf(actor.companyId, actor.userId, file.filename, file.data);
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'create',
+        resource: 'unit',
+        resourceId: run.id,
+        metadata: { documentExtraction: true, fileName: run.fileName, status: run.status },
+      });
+      return { status: 201, body: { run, fields } };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.get('/api/documents/extract', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'unit'))) {
+      throw new ForbiddenError('missing view:unit permission');
+    }
+    const runs = await documentIntelligence.listRuns(actor.companyId);
+    return { status: 200, body: paginate(runs, ctx.query) };
+  });
+
+  httpServer.get('/api/documents/extract/:runId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'unit'))) {
+      throw new ForbiddenError('missing view:unit permission');
+    }
+    const run = await documentIntelligence.getRun(ctx.params.runId!, actor.companyId);
+    const fields = await documentIntelligence.listFields(run.id, actor.companyId);
+    return { status: 200, body: { run, fields } };
+  });
+
+  httpServer.post('/api/documents/extract/fields/:fieldId/correct', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ correctedValue: string }>(ctx.body);
+    const field = await documentIntelligence.correctField(ctx.params.fieldId!, actor.companyId, body.correctedValue);
+    return { status: 200, body: field };
+  });
+
+  httpServer.post('/api/documents/extract/:runId/review', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const run = await documentIntelligence.markReviewed(ctx.params.runId!, actor.companyId, actor.userId);
+    return { status: 200, body: run };
+  });
+
+  httpServer.post('/api/documents/extract/:runId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const run = await documentIntelligence.rejectExtraction(ctx.params.runId!, actor.companyId, actor.userId);
+    return { status: 200, body: run };
+  });
+
+  httpServer.post('/api/documents/extract/:runId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
+      throw new ForbiddenError('missing create:unit permission');
+    }
+    const body = parseJsonBody<{ options?: InventoryImportOptions }>(ctx.body);
+    const result = await documentIntelligence.confirmExtraction(
+      ctx.params.runId!,
+      actor.companyId,
+      actor.userId,
+      async (unit, action) => {
+        await auditLog.record({
+          companyId: actor.companyId,
+          actorUserId: actor.userId,
+          action: action === 'create' ? 'create' : 'edit',
+          resource: 'unit',
+          resourceId: unit.id,
+          metadata: { importedViaDocumentExtraction: true, extractionRunId: ctx.params.runId },
+        });
+      },
+      body.options,
+    );
+    return { status: 200, body: result };
+  });
+
+  // Real, server-side advanced search — the same InventoryService.searchUnits
+  // the AI's search_units tool calls, so a human's filter results and the
+  // AI's never quietly diverge. `status` defaults to 'any' here (unlike the
+  // AI tool's 'available' default) to preserve this route's previous
+  // behavior of listing every unit regardless of status when unfiltered.
   httpServer.get('/api/inventory/units', async (ctx) => {
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'unit');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:unit permission' } };
-    const projectId = ctx.query.get('projectId') ?? undefined;
-    const units = await inventory.listUnits(actor.companyId, projectId);
-    return { status: 200, body: paginate(units, ctx.query) };
+    const numOrUndef = (v: string | null) => (v ? Number(v) : undefined);
+    const units = await inventory.searchUnits(actor.companyId, {
+      projectId: ctx.query.get('projectId') ?? undefined,
+      phaseId: ctx.query.get('phaseId') ?? undefined,
+      unitType: ctx.query.get('unitType') ?? undefined,
+      status: (ctx.query.get('status') as 'available' | 'held' | 'reserved' | 'contracted' | 'cancelled' | 'any' | null) ?? 'any',
+      minPrice: numOrUndef(ctx.query.get('minPrice')),
+      maxPrice: numOrUndef(ctx.query.get('maxPrice')),
+      minAreaSqm: numOrUndef(ctx.query.get('minAreaSqm')),
+      maxAreaSqm: numOrUndef(ctx.query.get('maxAreaSqm')),
+      minGardenAreaSqm: numOrUndef(ctx.query.get('minGardenAreaSqm')),
+      maxGardenAreaSqm: numOrUndef(ctx.query.get('maxGardenAreaSqm')),
+      bedrooms: numOrUndef(ctx.query.get('bedrooms')),
+      minBedrooms: numOrUndef(ctx.query.get('minBedrooms')),
+      maxBedrooms: numOrUndef(ctx.query.get('maxBedrooms')),
+      finishingType: ctx.query.get('finishingType') ?? undefined,
+      view: ctx.query.get('view') ?? undefined,
+      floorLabel: ctx.query.get('floorLabel') ?? undefined,
+      designType: ctx.query.get('designType') ?? undefined,
+      destination: ctx.query.get('destination') ?? undefined,
+      developerId: ctx.query.get('developerId') ?? undefined,
+      limit: 500,
+    });
+    const filtered = searchFilter(units, ['code', 'unitType'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  // Manual unit edit route — previously updateUnitDetails() was only ever
+  // reachable through the bulk import pipeline, with no way to correct a
+  // single unit's commercial/descriptive fields (or set its floor-plan
+  // image / master-plan highlight position, both otherwise write-only
+  // dead fields) outside of a full re-import.
+  httpServer.patch('/api/inventory/units/:unitId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {
+      throw new ForbiddenError('missing edit:unit permission');
+    }
+    const body = parseJsonBody<Parameters<typeof inventory.updateUnitDetails>[2]>(ctx.body);
+    const unit = await inventory.updateUnitDetails(ctx.params.unitId!, actor.companyId, body);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'unit', resourceId: unit.id, metadata: { fields: Object.keys(body) } });
+    return { status: 200, body: unit };
   });
 
   httpServer.post('/api/inventory/units/:unitId/hold', async (ctx) => {
@@ -837,28 +1919,318 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: paginate(reservations, ctx.query) };
   });
 
+  // Manual trigger for the same sweep main.ts's 60s tick runs — mirrors
+  // POST /api/finance/sweep-overdue's shape for expired reservations.
+  httpServer.post('/api/inventory/sweep-expired-reservations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {
+      throw new ForbiddenError('missing edit:unit permission');
+    }
+    const count = await sweepExpiredReservationsAndEmit(actor.companyId);
+    return { status: 200, body: { swept: count } };
+  });
+
   // ---- CRM ----
   httpServer.post('/api/crm/leads', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
       throw new ForbiddenError('missing create:lead permission');
     }
-    const body = parseJsonBody<{ fullName: string; phone: string; email?: string; sourceId?: string }>(ctx.body);
-    const lead = await crm.createLead({ companyId: actor.companyId, ownerEmployeeUserId: actor.userId, ...body });
+    const body = parseJsonBody<{
+      fullName: string;
+      phone: string;
+      email?: string;
+      nationalId?: string;
+      sourceId?: string;
+      stageId?: string;
+      tags?: string[];
+      priority?: Lead['priority'];
+      ownerEmployeeUserId?: string;
+      requiredSkill?: string;
+    }>(ctx.body);
+    // An explicit ownerEmployeeUserId always wins. Otherwise, if this
+    // company has configured a Lead Distribution pool, hand the lead to
+    // whichever employee is next in rotation (round-robin, or the next
+    // matching skill_based candidate) and start its first-contact SLA
+    // clock; a company that never configures a pool sees the exact same
+    // "creator owns it" behavior this route always had.
+    let ownerEmployeeUserId = body.ownerEmployeeUserId;
+    let firstContactSlaDueAt: string | undefined;
+    if (!ownerEmployeeUserId) {
+      const assignment = await leadDistribution.pickOwnerForNewLead(actor.companyId, body.requiredSkill);
+      if (assignment) {
+        ownerEmployeeUserId = assignment.ownerUserId;
+        firstContactSlaDueAt = assignment.firstContactSlaDueAt;
+      }
+    }
+    const lead = await crm.createLead({
+      companyId: actor.companyId,
+      fullName: body.fullName,
+      phone: body.phone,
+      email: body.email,
+      nationalId: body.nationalId,
+      sourceId: body.sourceId,
+      stageId: body.stageId,
+      tags: body.tags,
+      priority: body.priority,
+      requiredSkill: body.requiredSkill,
+      ownerEmployeeUserId: ownerEmployeeUserId ?? actor.userId,
+      firstContactSlaDueAt,
+    });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
+  });
+
+  // ---- CRM Stages ----
+  // The configurable pipeline behind the CRM workspace's tabs/cards — an
+  // admin can add, edit, reorder, and archive stages with zero code
+  // changes; every place that classifies a Lead (scoring, automation, AI,
+  // analytics) reads the isDefault/isWon/isLost/order flags, never a
+  // hardcoded stage name, so a custom stage behaves correctly immediately.
+  httpServer.get('/api/crm/stages', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'crm_stage'))) {
+      throw new ForbiddenError('missing view:crm_stage permission');
+    }
+    const includeInactive = ctx.query.get('includeInactive') === 'true';
+    const stages = await crmStages.listStages(actor.companyId, includeInactive);
+    return { status: 200, body: stages };
+  });
+
+  httpServer.post('/api/crm/stages', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'crm_stage'))) {
+      throw new ForbiddenError('missing create:crm_stage permission');
+    }
+    const body = parseJsonBody<Parameters<CrmStageService['createStage']>[0]>(ctx.body);
+    const stage = await crmStages.createStage({ ...body, companyId: actor.companyId });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'crm_stage', resourceId: stage.id });
+    return { status: 201, body: stage };
+  });
+
+  httpServer.patch('/api/crm/stages/:stageId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'crm_stage'))) {
+      throw new ForbiddenError('missing edit:crm_stage permission');
+    }
+    const body = parseJsonBody<Parameters<CrmStageService['updateStage']>[2]>(ctx.body);
+    const stage = await crmStages.updateStage(ctx.params.stageId!, actor.companyId, body);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'crm_stage', resourceId: stage.id });
+    return { status: 200, body: stage };
+  });
+
+  httpServer.post('/api/crm/stages/reorder', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'crm_stage'))) {
+      throw new ForbiddenError('missing edit:crm_stage permission');
+    }
+    const body = parseJsonBody<{ orderedStageIds: string[] }>(ctx.body);
+    const stages = await crmStages.reorderStages(actor.companyId, body.orderedStageIds);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'crm_stage', resourceId: actor.companyId, metadata: { reordered: true } });
+    return { status: 200, body: stages };
+  });
+
+  httpServer.post('/api/crm/stages/:stageId/set-default', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'crm_stage'))) {
+      throw new ForbiddenError('missing edit:crm_stage permission');
+    }
+    const stage = await crmStages.setDefaultStage(ctx.params.stageId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'crm_stage', resourceId: stage.id, metadata: { setDefault: true } });
+    return { status: 200, body: stage };
+  });
+
+  httpServer.post('/api/crm/stages/:stageId/archive', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'delete', 'crm_stage'))) {
+      throw new ForbiddenError('missing delete:crm_stage permission');
+    }
+    const stage = await crmStages.archiveStage(ctx.params.stageId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'delete', resource: 'crm_stage', resourceId: stage.id });
+    return { status: 200, body: stage };
+  });
+
+  // ---- Lead Distribution + SLA ----
+  // Configuring/viewing the pool is a company-wide edit on the lead
+  // resource — the same permission assign_lead_owner already maps to
+  // (see automation.service.ts ACTION_RESOURCE/ACTION_VERB) — rather than
+  // a new resource, since this is still "how leads get owned," just
+  // automated instead of manual.
+  httpServer.post('/api/crm/lead-distribution/pool', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'lead'))) {
+      throw new ForbiddenError('missing edit:lead permission');
+    }
+    const body = parseJsonBody<{ mode: 'round_robin' | 'skill_based'; memberUserIds: string[]; slaMinutes: number }>(ctx.body);
+    const pool = await leadDistribution.configurePool({ companyId: actor.companyId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'lead', resourceId: pool.id, metadata: { leadDistributionPool: true } });
+    return { status: 200, body: pool };
+  });
+
+  httpServer.get('/api/crm/lead-distribution/pool', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'lead'))) {
+      throw new ForbiddenError('missing view:lead permission');
+    }
+    const pool = await leadDistribution.getPool(actor.companyId);
+    if (!pool) return { status: 404, body: { error: 'no lead distribution pool configured for this company' } };
+    return { status: 200, body: pool };
+  });
+
+  // Manual trigger for the same sweep main.ts's periodic tick runs — lets
+  // an admin (or a test) force an immediate pass instead of waiting for
+  // leads to actually breach on the clock.
+  httpServer.post('/api/crm/lead-distribution/sweep', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'lead'))) {
+      throw new ForbiddenError('missing edit:lead permission');
+    }
+    const swept = await sweepSlaBreachesAndEmit(actor.companyId);
+    return { status: 200, body: { swept } };
+  });
+
+  // Bulk CSV import — one real crm.createLead() call per row, same
+  // permission and the same audit/event trail (lead.created) as the
+  // manual route above, so imported leads flow through the Automation
+  // Engine and AI Execution Layer exactly like manually-entered ones.
+  httpServer.post('/api/crm/leads/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const companyUsers = await repos.users.findAll((u) => u.companyId === actor.companyId);
+    const result = await runImport(
+      records,
+      ['Lead ID', 'Lead Source', 'Interested Project', 'Interested Unit Type', 'Budget Min (EGP)', 'Budget Max (EGP)', 'Preferred Payment Plan', 'Lead Status', 'Priority', 'Notes'],
+      async (record) => {
+        const fullName = `${record['First Name'] ?? ''} ${record['Last Name'] ?? ''}`.trim();
+        const phone = record['Phone']?.trim();
+        const email = record['Email']?.trim() || undefined;
+        if (!fullName) throw new ValidationError('"First Name"/"Last Name" are required');
+        if (!phone) throw new ValidationError('"Phone" is required');
+        const agentEmail = record['Assigned Sales Agent']?.trim();
+        const owner = agentEmail ? companyUsers.find((u) => u.email === agentEmail) : undefined;
+        const lead = await crm.createLead({ companyId: actor.companyId, fullName, phone, email, ownerEmployeeUserId: owner?.id ?? actor.userId });
+        await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id, metadata: { importedViaCsv: true } });
+        await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
+        return lead;
+      },
+    );
+    return { status: 200, body: result };
+  });
+
+  // ---- Lead Import pipeline (staged: upload -> preview -> confirm) ----
+  // A richer alternative to the one-shot bulk-CSV route above, for real
+  // Excel/CSV/PDF exports with unpredictable column headers: upload parses
+  // the file and suggests a mapping, preview shows exactly what would be
+  // imported (including duplicates/invalid rows) without writing anything,
+  // and confirm is the only step that actually calls crm.createLead.
+
+  httpServer.post(
+    '/api/crm/leads/import/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+        throw new ForbiddenError('missing create:lead permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+
+      const session = await importSessions.createSession({
+        companyId: actor.companyId,
+        createdByUserId: actor.userId,
+        targetType: 'lead',
+        fileName: file.filename,
+        fileBuffer: file.data,
+        contentType: file.contentType,
+        fields: LEAD_IMPORT_FIELDS,
+      });
+      return {
+        status: 200,
+        body: {
+          sessionId: session.id,
+          fileName: session.fileName,
+          fileType: session.fileType,
+          detectedColumns: session.detectedColumns,
+          suggestedMapping: session.suggestedMapping,
+          sampleRows: session.rawRows.slice(0, 5),
+          totalRows: session.rawRows.length,
+          fields: LEAD_IMPORT_FIELDS,
+        },
+      };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.post('/api/crm/leads/import/:sessionId/preview', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const body = parseJsonBody<{ mapping: Record<string, string | null> }>(ctx.body);
+    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping);
+    const mappedRows = importSessions.mapRows(session);
+    const preview = await leadImport.buildPreview(actor.companyId, mappedRows);
+    return { status: 200, body: preview };
+  });
+
+  httpServer.post('/api/crm/leads/import/:sessionId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const session = await importSessions.getSession(ctx.params.sessionId!, actor.companyId);
+    if (!session.confirmedMapping) {
+      throw new ValidationError('this import session has not been mapped yet — call the preview step first');
+    }
+    const mappedRows = importSessions.mapRows(session);
+    const result = await leadImport.importRows(actor.companyId, actor.userId, mappedRows, async (lead) => {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'create',
+        resource: 'lead',
+        resourceId: lead.id,
+        metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+      });
+      await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
+    });
+    await importSessions.markConfirmed(session.id, actor.companyId);
+    return { status: 200, body: result };
   });
 
   httpServer.get('/api/crm/leads', async (ctx) => {
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'lead');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:lead permission' } };
-    const leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
-    return { status: 200, body: paginate(leads, ctx.query) };
+    let leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
+    const stageId = ctx.query.get('stageId');
+    if (stageId) leads = leads.filter((l) => l.stageId === stageId);
+    const filtered = searchFilter(leads, ['fullName', 'phone', 'email'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
-  httpServer.patch('/api/crm/leads/:leadId/status', async (ctx) => {
+  httpServer.get('/api/crm/leads/:leadId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'view', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing view:lead permission for this lead');
+    return { status: 200, body: lead };
+  });
+
+  httpServer.patch('/api/crm/leads/:leadId/stage', async (ctx) => {
     const actor = await actorOf(ctx);
     const lead = await crm.getLead(ctx.params.leadId!);
     if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
@@ -871,16 +2243,136 @@ export async function buildApplication(options: AppOptions): Promise<Application
       managerEmployeeId: ownerKeys.managerEmployeeId,
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
-    const body = parseJsonBody<{ status: Lead['status']; lostReason?: string }>(ctx.body);
-    const updated = await crm.updateStatus(ctx.params.leadId!, body.status, body.lostReason);
+    const body = parseJsonBody<{ stageId: string; lostReason?: string }>(ctx.body);
+    const fromStageId = lead.stageId;
+    const updated = await crm.moveToStage(ctx.params.leadId!, actor.companyId, body.stageId, body.lostReason);
+    const stage = await crmStages.getStage(updated.stageId, actor.companyId);
+    // Previously-unfixed gap: this route never wrote to the audit trail at
+    // all, so a lead's stage history had no persisted record beyond its
+    // current value — the Lead Timeline (GET .../timeline below) and
+    // AnalyticsService.speedToFirstContact both read this `toStageId`
+    // metadata to reconstruct that history.
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'lead',
+      resourceId: updated.id,
+      // toStatus is kept (as the new stage's display name, not a legacy
+      // enum value) purely so LeadTimelineService's existing
+      // `typeof meta.toStatus === 'string'` detection — intentionally left
+      // unmodified, see the CRM restructuring plan — still renders a
+      // readable "Status changed to ..." timeline entry for stage moves.
+      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason },
+    });
+    // Both events fire together during the transition period: 'status_changed'
+    // keeps any pre-existing workflow/AiPolicy row triggered on the legacy
+    // name working unchanged, while 'stage_changed' (carrying the
+    // human-readable stageKey/stageName at the top level, for simple
+    // workflow-condition matching) is what new templates should target.
     await emitEvent({
       companyId: actor.companyId,
       type: 'lead.status_changed',
       payload: { ...updated },
       actorUserId: actor.userId,
-      dedupeKey: `lead.status_changed:${updated.id}:${updated.status}`,
+      dedupeKey: `lead.status_changed:${updated.id}:${updated.stageId}`,
+    });
+    await emitEvent({
+      companyId: actor.companyId,
+      type: 'lead.stage_changed',
+      payload: { ...updated, stageKey: stage.key, stageName: stage.name },
+      actorUserId: actor.userId,
+      dedupeKey: `lead.stage_changed:${updated.id}:${updated.stageId}`,
     });
     return { status: 200, body: updated };
+  });
+
+  // Progressive custom-field capture: an agent fills these real-estate/
+  // financial qualifying details in as they learn more, not all at once.
+  httpServer.patch('/api/crm/leads/:leadId/details', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'edit', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
+    const body = parseJsonBody<{
+      propertyTypeWanted?: string;
+      purchaseGoal?: string;
+      preferredLocation?: string;
+      minAreaSqm?: number;
+      maxAreaSqm?: number;
+      expectedDeliveryTimeline?: string;
+      maxDownPayment?: number;
+      maxInstallment?: number;
+      preferredTenorMonths?: number;
+      preferredTransferMethod?: string;
+    }>(ctx.body);
+    const updated = await crm.updateCustomFields(ctx.params.leadId!, actor.companyId, body);
+    return { status: 200, body: updated };
+  });
+
+  httpServer.patch('/api/crm/leads/:leadId/owner', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'edit', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
+    const body = parseJsonBody<{ ownerEmployeeUserId: string }>(ctx.body);
+    const updated = await crm.assignOwner(ctx.params.leadId!, actor.companyId, body.ownerEmployeeUserId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'assign', resource: 'lead', resourceId: updated.id, metadata: { newOwnerUserId: updated.ownerEmployeeUserId } });
+    return { status: 200, body: updated };
+  });
+
+  httpServer.patch('/api/crm/leads/:leadId/tags', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'edit', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
+    const body = parseJsonBody<{ tags?: string[]; priority?: Lead['priority'] }>(ctx.body);
+    const updated = await crm.updateTagsAndPriority(ctx.params.leadId!, actor.companyId, body);
+    return { status: 200, body: updated };
+  });
+
+  // Unified Lead Timeline: everything ACTIVE actually recorded about this
+  // lead (status/owner history, messages, tasks, opportunity, contract),
+  // in one chronological view.
+  httpServer.get('/api/crm/leads/:leadId/timeline', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const lead = await crm.getLead(ctx.params.leadId!);
+    if (!lead || lead.companyId !== actor.companyId) throw new NotFoundError('lead not found');
+    const ownerKeys = await employeeScopeKeys(lead.ownerEmployeeUserId);
+    const allowed = await rbac.can(actor.userId, 'view', 'lead', {
+      companyId: lead.companyId,
+      ownerUserId: lead.ownerEmployeeUserId,
+      departmentId: ownerKeys.departmentId,
+      branchId: ownerKeys.branchId,
+      managerEmployeeId: ownerKeys.managerEmployeeId,
+    });
+    if (!allowed) throw new ForbiddenError('missing view:lead permission for this lead');
+    const timeline = await leadTimeline.getTimeline(ctx.params.leadId!, actor.companyId);
+    return { status: 200, body: timeline };
   });
 
   // ---- Sales ----
@@ -947,6 +2439,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: contract };
   });
 
+  // Discount governance: a company that never configures this sees zero
+  // change from the discount behavior it always had — any discount can
+  // still be applied directly.
+  httpServer.post('/api/sales/discount-policy', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'contract'))) {
+      throw new ForbiddenError('missing edit:contract permission');
+    }
+    const body = parseJsonBody<{ maxDiscountPercentWithoutApproval: number }>(ctx.body);
+    const policy = await sales.setDiscountApprovalPolicy(actor.companyId, body.maxDiscountPercentWithoutApproval);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'contract', resourceId: policy.id, metadata: { discountPolicy: true } });
+    return { status: 200, body: policy };
+  });
+
+  httpServer.get('/api/sales/discount-policy', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'contract'))) {
+      throw new ForbiddenError('missing view:contract permission');
+    }
+    const policy = await sales.getDiscountApprovalPolicy(actor.companyId);
+    if (!policy) return { status: 404, body: { error: 'no discount approval policy configured for this company' } };
+    return { status: 200, body: policy };
+  });
+
   httpServer.post('/api/sales/contracts', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'contract'))) {
@@ -959,18 +2475,119 @@ export async function buildApplication(options: AppOptions): Promise<Application
       discountPercent?: number;
       escalationPercentPerYear?: number;
     }>(ctx.body);
-    const contract = await sales.signContract({
-      companyId: actor.companyId,
+    if (!body.reservationId) throw new ValidationError('"reservationId" is required');
+    if (!body.paymentPlanTemplateId) throw new ValidationError('"paymentPlanTemplateId" is required');
+    if (!Number.isFinite(body.totalPrice) || body.totalPrice <= 0) throw new ValidationError('"totalPrice" must be a positive number');
+    const creditedEmployeeUserId = await resolveCreditedEmployee(actor.companyId, body.reservationId, actor.userId);
+    const signInput = {
       reservationId: body.reservationId,
-      creditedEmployeeUserId: actor.userId,
+      creditedEmployeeUserId,
       paymentPlanTemplateId: body.paymentPlanTemplateId,
       totalPrice: body.totalPrice,
       discountPercent: body.discountPercent,
       escalationPercentPerYear: body.escalationPercentPerYear,
-    });
-    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id });
-    await emitEvent({ companyId: actor.companyId, type: 'contract.signed', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.signed:${contract.id}` });
+    };
+
+    // Universal Approval Engine, wired in for the one real ungoverned
+    // action this system had: a discount of any size could always be
+    // applied at signing with no oversight. A company that never
+    // configures a policy sees no change — sales.discountRequiresApproval
+    // returns false with nothing configured.
+    if (await sales.discountRequiresApproval(actor.companyId, body.discountPercent)) {
+      const approval = await approvalEngine.requestApproval({
+        companyId: actor.companyId,
+        actionType: 'discount_override',
+        requestedByUserId: actor.userId,
+        reason: `Discount of ${body.discountPercent}% exceeds the company's no-approval threshold`,
+        context: signInput,
+      });
+      await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'approval', resourceId: approval.id, metadata: { actionType: 'discount_override' } });
+      await emitEvent({ companyId: actor.companyId, type: 'action_approval.requested', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.requested:${approval.id}` });
+      return { status: 202, body: approval };
+    }
+
+    const contract = await finishContractSigning(actor.companyId, signInput, actor.userId);
     return { status: 201, body: contract };
+  });
+
+  // Bulk CSV import for reservations/contracts. Unlike the other import
+  // routes, this can't be a single create() call per row: a contract only
+  // exists after reserving a real unit for a real opportunity, and that
+  // reservation is concurrency-protected (see SalesService/InventoryService)
+  // precisely to stop double-booking. So each row resolves human-friendly
+  // keys (customer phone, project+unit code, plan name) to real records
+  // and then drives the exact same protected pipeline the manual UI does —
+  // createOpportunity -> reserveUnitForOpportunity -> signContract — never
+  // a shortcut around it. A "Reservation" row stops after reserving; a
+  // "Contract" row also signs.
+  httpServer.post('/api/sales/contracts/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'contract'))) {
+      throw new ForbiddenError('missing create:contract permission');
+    }
+    if (!(await rbac.can(actor.userId, 'create', 'opportunity'))) {
+      throw new ForbiddenError('missing create:opportunity permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const [leads, projects, units, templates, opportunities] = await Promise.all([
+      repos.leads.findAll((l) => l.companyId === actor.companyId),
+      inventory.listProjects(actor.companyId),
+      inventory.listUnits(actor.companyId),
+      paymentPlans.listTemplates(actor.companyId),
+      sales.listOpportunities(actor.companyId),
+    ]);
+    const result = await runImport(
+      records,
+      ['Contract/Reservation ID', 'Reservation Deposit (EGP)', 'Reservation Date', 'Expiry Date', 'Status', 'Assigned Agent', 'Broker Name', 'Notes'],
+      async (record) => {
+        const phone = record['Customer Phone']?.trim();
+        const lead = leads.find((l) => l.phone === phone);
+        if (!lead) throw new ValidationError(`no lead found with phone "${phone}" — import leads first`);
+
+        const projectName = record['Project Name']?.trim();
+        const unitCode = record['Unit ID']?.trim();
+        const project = projects.find((p) => p.name === projectName);
+        const unit = project && units.find((u) => u.projectId === project.id && u.code === unitCode);
+        if (!unit) throw new ValidationError(`unit "${unitCode}" in project "${projectName}" not found`);
+
+        let opportunity = opportunities.find((o) => o.leadId === lead.id && o.stage === 'open');
+        if (!opportunity) {
+          opportunity = await sales.createOpportunity({ companyId: actor.companyId, leadId: lead.id, ownerEmployeeUserId: actor.userId });
+          opportunities.push(opportunity);
+          await emitEvent({ companyId: actor.companyId, type: 'opportunity.created', payload: { ...opportunity }, actorUserId: actor.userId, dedupeKey: `opportunity.created:${opportunity.id}` });
+        }
+
+        const reservation = await sales.reserveUnitForOpportunity(opportunity.id, unit.id, actor.companyId);
+
+        const type = (record['Type'] ?? '').trim().toLowerCase();
+        if (type === 'reservation') return reservation;
+
+        const planName = record['Payment Plan']?.trim();
+        const template = templates.find((t) => t.name === planName);
+        if (!template) throw new ValidationError(`payment plan template "${planName}" not found`);
+        const totalPrice = Number((record['Total Price (EGP)'] ?? '').replace(/,/g, ''));
+        if (!Number.isFinite(totalPrice) || totalPrice <= 0) throw new ValidationError('"Total Price (EGP)" must be a positive number');
+
+        const contract = await sales.signContract({
+          companyId: actor.companyId,
+          reservationId: reservation.id,
+          creditedEmployeeUserId: (await crm.resolveCommissionOwner(lead.id, actor.companyId)) ?? actor.userId,
+          paymentPlanTemplateId: template.id,
+          totalPrice,
+        });
+        await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'contract', resourceId: contract.id, metadata: { importedViaCsv: true } });
+        await emitEvent({ companyId: actor.companyId, type: 'contract.signed', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.signed:${contract.id}` });
+        await recordSalesCommissionsAndEmit(actor.companyId, contract, actor.userId);
+        // Generate the payment schedule immediately, same as an operator
+        // would do as the very next manual step — a signed contract with
+        // no schedule isn't usable yet, and a Finance import row can't
+        // record a payment against a schedule line that doesn't exist.
+        await paymentPlans.generateForContract(contract.id, actor.companyId, template.id, totalPrice);
+        return contract;
+      },
+    );
+    return { status: 200, body: result };
   });
 
   httpServer.post('/api/sales/contracts/:contractId/cancel', async (ctx) => {
@@ -982,6 +2599,129 @@ export async function buildApplication(options: AppOptions): Promise<Application
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'contract', resourceId: contract.id, metadata: { cancelled: true } });
     await emitEvent({ companyId: actor.companyId, type: 'contract.cancelled', payload: { ...contract }, actorUserId: actor.userId, dedupeKey: `contract.cancelled:${contract.id}` });
     return { status: 200, body: contract };
+  });
+
+  // Re-pricing money a client already committed to is always sensitive —
+  // unlike the discount-override gate (which only applies above a
+  // configurable threshold), every amendment goes through the Universal
+  // Approval Engine, no policy escape.
+  httpServer.post('/api/sales/contracts/:contractId/amend', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'contract'))) {
+      throw new ForbiddenError('missing edit:contract permission');
+    }
+    const body = parseJsonBody<{ newTotalPrice: number; discountPercent?: number; reason: string }>(ctx.body);
+    const contractId = ctx.params.contractId!;
+    const amendmentContext = { contractId, newTotalPrice: body.newTotalPrice, discountPercent: body.discountPercent };
+    const approval = await approvalEngine.requestApproval({
+      companyId: actor.companyId,
+      actionType: 'contract_amendment',
+      requestedByUserId: actor.userId,
+      reason: body.reason,
+      context: amendmentContext,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'approval', resourceId: approval.id, metadata: { actionType: 'contract_amendment', contractId } });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.requested', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.requested:${approval.id}` });
+    return { status: 202, body: approval };
+  });
+
+  // ---- E-Signature ----
+  // Additive to the existing contract flow — Contract.status itself, and
+  // everything that depends on it, is unchanged; this only tracks whether a
+  // customer has actually digitally signed the document.
+  httpServer.post('/api/sales/contracts/:contractId/signature-envelopes', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'signature_envelope'))) {
+      throw new ForbiddenError('missing create:signature_envelope permission');
+    }
+    const body = parseJsonBody<{ signerEmail: string; documentUrl: string }>(ctx.body);
+    const envelope = await signatures.sendForSignature({
+      companyId: actor.companyId,
+      contractId: ctx.params.contractId!,
+      signerEmail: body.signerEmail,
+      documentUrl: body.documentUrl,
+      requestedByUserId: actor.userId,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'signature_envelope', resourceId: envelope.id, metadata: { contractId: envelope.contractId } });
+    await emitEvent({ companyId: actor.companyId, type: 'contract.signature_sent', payload: { ...envelope }, actorUserId: actor.userId, dedupeKey: `contract.signature_sent:${envelope.id}` });
+    return { status: 201, body: envelope };
+  });
+
+  httpServer.get('/api/sales/contracts/:contractId/signature-envelopes', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'signature_envelope'))) {
+      throw new ForbiddenError('missing view:signature_envelope permission');
+    }
+    const list = await signatures.listForContract(ctx.params.contractId!, actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  // Inbound e-signature provider callback. Intentionally unauthenticated —
+  // same companyId + unguessable-id-in-the-URL model as the Automation
+  // Engine's webhook receiver above — but additionally requires a valid
+  // HMAC-SHA256 signature (computed over this connection's own
+  // webhook_secret) before any envelope state changes: an unsigned or
+  // mis-signed callback is refused outright, never treated as a real
+  // "customer signed" event. The signature is verified over this server's
+  // JSON re-serialization of the body (the HTTP layer only ever hands route
+  // handlers already-parsed JSON, not the original raw bytes) — a real
+  // provider integration wanting byte-exact verification against its own
+  // raw payload would need the shared body-reader extended to preserve it.
+  httpServer.post('/api/integrations/e-signature/webhooks/:companyId/:envelopeId', async (ctx) => {
+    const rawBody = ctx.body === undefined ? '' : JSON.stringify(ctx.body);
+    const signatureHeader = ctx.headers['x-signature-hmac'];
+    const envelope = await signatures.handleWebhook(
+      ctx.params.envelopeId!,
+      ctx.params.companyId!,
+      rawBody,
+      typeof signatureHeader === 'string' ? signatureHeader : undefined,
+    );
+    return { status: 200, body: { id: envelope.id, status: envelope.status } };
+  });
+
+  // Real WhatsApp/email delivery-status callback — HMAC-verified against
+  // the connection's own webhook_secret exactly like the e-signature
+  // webhook above. Accepts a normalized {providerMessageId, status,
+  // failureReason?} body (see CommunicationDeliveryService's class doc
+  // for why: not certified against WhatsApp Cloud API's or SendGrid's own
+  // raw payload shape, same honest scope as every other connector here).
+  httpServer.post('/api/integrations/communication/webhooks/:companyId/:connectionId', async (ctx) => {
+    const rawBody = ctx.body === undefined ? '' : JSON.stringify(ctx.body);
+    const signatureHeader = ctx.headers['x-signature-hmac'];
+    const event = await communicationDelivery.handleWebhook(
+      ctx.params.companyId!,
+      ctx.params.connectionId!,
+      rawBody,
+      typeof signatureHeader === 'string' ? signatureHeader : undefined,
+    );
+    return { status: 200, body: { id: event.id, status: event.status } };
+  });
+
+  // The real delivery timeline for one sent message — every status
+  // transition a verified webhook has actually reported, not an assumed
+  // "sent = delivered". See CommunicationDeliveryService.
+  httpServer.get('/api/integrations/communication/delivery/:providerMessageId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'integration_connection'))) {
+      throw new ForbiddenError('missing view:integration_connection permission');
+    }
+    const timeline = await communicationDelivery.getTimeline(actor.companyId, ctx.params.providerMessageId!);
+    return { status: 200, body: timeline };
+  });
+
+  // The latest delivery status for whatever a lead/customer/etc. was last
+  // messaged — the same real lookup the `get_delivery_status` AI tool uses
+  // (see automation.setDeliveryStatusGetter above), exposed directly so the
+  // frontend doesn't have to round-trip through the AI action pipeline just
+  // to show a status badge. Returns 'unknown' rather than 404 when nothing
+  // has been sent yet — a CRM view showing "no message sent" is not an error.
+  httpServer.get('/api/integrations/communication/delivery/by-resource/:resourceId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'integration_connection'))) {
+      throw new ForbiddenError('missing view:integration_connection permission');
+    }
+    const latest = await integrations.getLatestDeliveryStatusForResource(actor.companyId, ctx.params.resourceId!);
+    return { status: 200, body: latest ?? { status: 'unknown' } };
   });
 
   // ---- Finance ----
@@ -1003,6 +2743,164 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 201, body: result };
   });
 
+  // Bulk CSV import for collections. A finance export's literal "Contract
+  // ID"/"Receipt ID" values won't match this system's own generated IDs
+  // unless they came from ACTIVE itself, so rows are resolved by
+  // Project+Unit (finds the signed contract for that unit) and Installment
+  // Number (finds that schedule line by its real sequence number) instead —
+  // stable keys that survive being re-exported from anywhere. Every payment
+  // still goes through the exact same finance.recordPayment() the manual
+  // route above uses, so it's still subject to the real validation there
+  // (positive amount, line not already fully paid, etc).
+  httpServer.post('/api/finance/payments/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const [projects, units, contracts] = await Promise.all([
+      inventory.listProjects(actor.companyId),
+      inventory.listUnits(actor.companyId),
+      sales.listContracts(actor.companyId),
+    ]);
+    const METHOD_MAP: Record<string, Payment['method']> = {
+      'bank transfer': 'transfer',
+      transfer: 'transfer',
+      cheque: 'cheque',
+      check: 'cheque',
+      'visa pos': 'card',
+      card: 'card',
+      cash: 'cash',
+    };
+    const result = await runImport(
+      records,
+      ['Receipt/Transaction ID', 'Contract ID', 'Customer Name', 'Payment Status', 'Finance Officer', 'Notes'],
+      async (record) => {
+        const projectName = record['Project']?.trim();
+        const unitCode = record['Unit']?.trim();
+        const project = projects.find((p) => p.name === projectName);
+        const unit = project && units.find((u) => u.projectId === project.id && u.code === unitCode);
+        if (!unit) throw new ValidationError(`unit "${unitCode}" in project "${projectName}" not found`);
+        const contract = contracts.find((c) => c.unitId === unit.id && c.status === 'signed');
+        if (!contract) throw new ValidationError(`no signed contract found for unit "${unitCode}"`);
+
+        const amount = Number((record['Amount Paid (EGP)'] ?? '').replace(/,/g, ''));
+        if (!Number.isFinite(amount) || amount <= 0) throw new SkipRow('"Amount Paid (EGP)" is 0 or blank — nothing to record for this row yet');
+
+        const schedule = await paymentPlans.getScheduleForContract(contract.id, actor.companyId);
+        const sequence = Number(record['Installment Number'] ?? '');
+        const line = schedule.find((l) => l.sequence === sequence);
+        if (!line) throw new ValidationError(`no schedule line found with installment number ${record['Installment Number']} for this contract`);
+
+        const methodKey = (record['Payment Method'] ?? '').trim().toLowerCase();
+        const method = METHOD_MAP[methodKey];
+        if (!method) throw new ValidationError(`unrecognized "Payment Method": "${record['Payment Method']}"`);
+
+        const recorded = await finance.recordPayment({ companyId: actor.companyId, contractId: contract.id, paymentScheduleLineId: line.id, amount, method, recordedByUserId: actor.userId });
+        await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'payment_schedule', resourceId: recorded.line.id, metadata: { amount, importedViaCsv: true } });
+        await emitEvent({
+          companyId: actor.companyId,
+          type: 'payment.recorded',
+          payload: { ...recorded },
+          actorUserId: actor.userId,
+          dedupeKey: `payment.recorded:${recorded.payment.id}`,
+        });
+        return recorded.payment;
+      },
+    );
+    return { status: 200, body: result };
+  });
+
+  // ---- Payment Import pipeline (staged: upload -> preview -> confirm) ----
+  // The richer alternative to the bulk-CSV route above, for real Excel/PDF
+  // exports with unpredictable headers. Same resolution rules (Phone or
+  // Project+Unit -> contract, Installment Number -> schedule line) and the
+  // same single write path (finance.recordPayment), just reachable through
+  // upload/preview/confirm so the user sees exactly what would be recorded
+  // — including conflicts (already-paid/overpaying installments) — before
+  // anything actually happens.
+
+  httpServer.post(
+    '/api/finance/payments/import/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+        throw new ForbiddenError('missing edit:payment_schedule permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+
+      const session = await importSessions.createSession({
+        companyId: actor.companyId,
+        createdByUserId: actor.userId,
+        targetType: 'payment',
+        fileName: file.filename,
+        fileBuffer: file.data,
+        contentType: file.contentType,
+        fields: PAYMENT_IMPORT_FIELDS,
+      });
+      return {
+        status: 200,
+        body: {
+          sessionId: session.id,
+          fileName: session.fileName,
+          fileType: session.fileType,
+          detectedColumns: session.detectedColumns,
+          suggestedMapping: session.suggestedMapping,
+          sampleRows: session.rawRows.slice(0, 5),
+          totalRows: session.rawRows.length,
+          fields: PAYMENT_IMPORT_FIELDS,
+        },
+      };
+    },
+    { maxBodyBytes: IMPORT_MAX_BODY_BYTES },
+  );
+
+  httpServer.post('/api/finance/payments/import/:sessionId/preview', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const body = parseJsonBody<{ mapping: Record<string, string | null> }>(ctx.body);
+    const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping);
+    const mappedRows = importSessions.mapRows(session);
+    const preview = await paymentImport.buildPreview(actor.companyId, mappedRows);
+    return { status: 200, body: preview };
+  });
+
+  httpServer.post('/api/finance/payments/import/:sessionId/confirm', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const session = await importSessions.getSession(ctx.params.sessionId!, actor.companyId);
+    if (!session.confirmedMapping) {
+      throw new ValidationError('this import session has not been mapped yet — call the preview step first');
+    }
+    const mappedRows = importSessions.mapRows(session);
+    const result = await paymentImport.importRows(actor.companyId, actor.userId, mappedRows, async (recorded) => {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'payment_schedule',
+        resourceId: recorded.line.id,
+        metadata: { amount: recorded.payment.amount, importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+      });
+      await emitEvent({
+        companyId: actor.companyId,
+        type: 'payment.recorded',
+        payload: { ...recorded },
+        actorUserId: actor.userId,
+        dedupeKey: `payment.recorded:${recorded.payment.id}`,
+      });
+    });
+    await importSessions.markConfirmed(session.id, actor.companyId);
+    return { status: 200, body: result };
+  });
+
   httpServer.get('/api/finance/contracts/:contractId/balance', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'view', 'payment_schedule'))) {
@@ -1012,12 +2910,54 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: balance };
   });
 
+  httpServer.get('/api/finance/refunds', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'payment_schedule'))) {
+      throw new ForbiddenError('missing view:payment_schedule permission');
+    }
+    const refunds = await finance.listRefunds(actor.companyId);
+    return { status: 200, body: paginate(refunds, ctx.query) };
+  });
+
+  // Reversing money already collected is always sensitive — every
+  // refund request goes through the Universal Approval Engine, no
+  // direct-execute path, regardless of amount.
+  httpServer.post('/api/finance/refunds', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
+      throw new ForbiddenError('missing edit:payment_schedule permission');
+    }
+    const body = parseJsonBody<{ contractId: string; paymentScheduleLineId: string; amount: number; reason: string }>(ctx.body);
+    // Fixed real cross-tenant gap found during audit: unlike every other
+    // approval-gated route (discount_override validates the reservation,
+    // contract_amendment validates the contract), this one created a real
+    // ApprovalRequest for any contractId/paymentScheduleLineId string with
+    // no check that it belongs to the actor's own company — the request
+    // would only ever fail later, at approval time, instead of being
+    // rejected up front like everywhere else.
+    const line = await finance.getScheduleLine(body.paymentScheduleLineId, actor.companyId);
+    if (!line || line.contractId !== body.contractId) {
+      throw new NotFoundError('payment schedule line not found for this contract');
+    }
+    const refundContext = { contractId: body.contractId, paymentScheduleLineId: body.paymentScheduleLineId, amount: body.amount, reason: body.reason };
+    const approval = await approvalEngine.requestApproval({
+      companyId: actor.companyId,
+      actionType: 'refund',
+      requestedByUserId: actor.userId,
+      reason: body.reason,
+      context: refundContext,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'approval', resourceId: approval.id, metadata: { actionType: 'refund', contractId: body.contractId } });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.requested', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.requested:${approval.id}` });
+    return { status: 202, body: approval };
+  });
+
   httpServer.post('/api/finance/sweep-overdue', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'edit', 'payment_schedule'))) {
       throw new ForbiddenError('missing edit:payment_schedule permission');
     }
-    const count = await sweepOverdueAndEmit();
+    const count = await sweepOverdueAndEmit(actor.companyId);
     return { status: 200, body: { swept: count } };
   });
 
@@ -1038,7 +2978,40 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ name: string }>(ctx.body);
     const brokerCompany = await brokers.registerBrokerCompany({ companyId: actor.companyId, name: body.name });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'broker_company', resourceId: brokerCompany.id });
     return { status: 201, body: brokerCompany };
+  });
+
+  // Bulk CSV import — registers one real BrokerCompany per row, and (if a
+  // commission rate is given) a real per-broker CommissionRule through the
+  // exact same setCommissionRule() the manual commission-rules screen uses.
+  // Only name and commission rate exist on the real schema today — contact
+  // details, bank info, tax card, etc. are reported as unsupportedColumns.
+  httpServer.post('/api/brokers/companies/import', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'broker_company'))) {
+      throw new ForbiddenError('missing create:broker_company permission');
+    }
+    if (!(await rbac.can(actor.userId, 'edit', 'broker_company'))) {
+      throw new ForbiddenError('missing edit:broker_company permission');
+    }
+    const body = parseJsonBody<{ csv: string }>(ctx.body);
+    const records = parseCsvRecords(body.csv);
+    const result = await runImport(
+      records,
+      ['Broker ID', 'Broker Type', 'Contact Person', 'Phone', 'Email', 'Commercial Reg/ID', 'Tax Card', 'Bank Name', 'Account Name', 'IBAN', 'Status', 'Assigned Account Manager', 'Notes'],
+      async (record) => {
+        const name = record['Company/Individual Name']?.trim();
+        if (!name) throw new ValidationError('"Company/Individual Name" is required');
+        const rateText = (record['Commission Rate (%)'] ?? '').replace('%', '').trim();
+        const rate = rateText ? Number(rateText) : undefined;
+        if (rate !== undefined && (!Number.isFinite(rate) || rate <= 0)) throw new ValidationError('"Commission Rate (%)" must be a positive number');
+        const brokerCompany = await brokers.registerBrokerCompany({ companyId: actor.companyId, name });
+        if (rate !== undefined) await brokers.setCommissionRule(actor.companyId, rate, brokerCompany.id);
+        return brokerCompany;
+      },
+    );
+    return { status: 200, body: result };
   });
 
   httpServer.post('/api/brokers/companies/:brokerCompanyId/approve', async (ctx) => {
@@ -1047,6 +3020,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:broker_company permission');
     }
     const brokerCompany = await brokers.approveBrokerCompany(ctx.params.brokerCompanyId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'broker_company', resourceId: brokerCompany.id });
     return { status: 200, body: brokerCompany };
   });
 
@@ -1056,6 +3030,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:broker_company permission');
     }
     const brokerCompany = await brokers.suspendBrokerCompany(ctx.params.brokerCompanyId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'broker_company', resourceId: brokerCompany.id, metadata: { suspended: true } });
     return { status: 200, body: brokerCompany };
   });
 
@@ -1066,7 +3041,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const user = await repos.users.findById(actor.userId);
     if (!user?.brokerCompanyId) throw new ForbiddenError('this account is not linked to a broker company');
-    const body = parseJsonBody<{ fullName: string; phone: string; email?: string }>(ctx.body);
+    const body = parseJsonBody<{ fullName: string; phone: string; email?: string; nationalId?: string }>(ctx.body);
     const brokerLead = await brokers.submitBrokerLead({
       companyId: actor.companyId,
       brokerCompanyId: user.brokerCompanyId,
@@ -1089,15 +3064,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     // A broker_user only ever sees their own broker company's submissions
     // (mirrors the broker hard-wall in the RBAC evaluator); internal staff
     // reviewing the quarantine queue need view:broker_company instead.
+    const q = ctx.query.get('q');
     if (actor.userType === 'broker_user') {
       const user = await repos.users.findById(actor.userId);
       const own = all.filter((bl) => bl.brokerCompanyId === user?.brokerCompanyId);
-      return { status: 200, body: paginate(own, ctx.query) };
+      return { status: 200, body: paginate(searchFilter(own, ['fullName', 'phone', 'email'], q), ctx.query) };
     }
     if (!(await rbac.can(actor.userId, 'view', 'broker_company'))) {
       throw new ForbiddenError('missing view:broker_company permission');
     }
-    return { status: 200, body: paginate(all, ctx.query) };
+    return { status: 200, body: paginate(searchFilter(all, ['fullName', 'phone', 'email'], q), ctx.query) };
   });
 
   httpServer.post('/api/brokers/leads/:brokerLeadId/approve', async (ctx) => {
@@ -1147,6 +3123,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{ contractId: string; contractAmount: number }>(ctx.body);
     const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId, body.contractAmount);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'broker_company', resourceId: commission.id, metadata: { brokerCommission: true, brokerCompanyId: ctx.params.brokerCompanyId, contractId: body.contractId, amount: commission.amount } });
     return { status: 201, body: commission };
   });
 
@@ -1156,6 +3133,76 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing approve:broker_company permission');
     }
     const commission = await brokers.approveCommission(ctx.params.commissionId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'broker_company', resourceId: commission.id, metadata: { brokerCommission: true, amount: commission.amount } });
+    return { status: 200, body: commission };
+  });
+
+  // ---- Internal Sales Commission Engine ----
+  // Commission lines are recorded automatically at contract-signing time
+  // (see recordSalesCommissionsAndEmit above) — there is no manual
+  // "record commission" route, unlike the broker one, since the
+  // employee/amount/rate are always fully determined by real contract
+  // data and the configured rules.
+  httpServer.post('/api/sales-commissions/rules', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'sales_commission'))) {
+      throw new ForbiddenError('missing edit:sales_commission permission');
+    }
+    const body = parseJsonBody<{ tier: 'base' | 'override'; ratePercent: number; employeeUserId?: string }>(ctx.body);
+    const rule = await salesCommissions.setCommissionRule({ companyId: actor.companyId, ...body });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'sales_commission', resourceId: rule.id, metadata: { rule: true } });
+    return { status: 201, body: rule };
+  });
+
+  httpServer.get('/api/sales-commissions/rules', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'sales_commission'))) {
+      throw new ForbiddenError('missing view:sales_commission permission');
+    }
+    const rules = await salesCommissions.listCommissionRules(actor.companyId);
+    return { status: 200, body: rules };
+  });
+
+  httpServer.get('/api/sales-commissions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const scope = await rbac.getListAccessScope(actor.userId, 'view', 'sales_commission');
+    if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:sales_commission permission' } };
+    const all = await salesCommissions.listCommissions(actor.companyId);
+    const filtered = await filterByListScope(all, scope, (c) => employeeScopeKeys(c.employeeUserId));
+    return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  httpServer.post('/api/sales-commissions/:commissionId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'approve', 'sales_commission'))) {
+      throw new ForbiddenError('missing approve:sales_commission permission');
+    }
+    const commission = await salesCommissions.approveCommission(ctx.params.commissionId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'sales_commission', resourceId: commission.id });
+    await emitEvent({ companyId: actor.companyId, type: 'sales_commission.status_changed', payload: { ...commission }, actorUserId: actor.userId, dedupeKey: `sales_commission.status_changed:${commission.id}:approved` });
+    return { status: 200, body: commission };
+  });
+
+  httpServer.post('/api/sales-commissions/:commissionId/pay', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'sales_commission'))) {
+      throw new ForbiddenError('missing edit:sales_commission permission');
+    }
+    const commission = await salesCommissions.markCommissionPaid(ctx.params.commissionId!, actor.companyId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'sales_commission', resourceId: commission.id, metadata: { paid: true } });
+    await emitEvent({ companyId: actor.companyId, type: 'sales_commission.status_changed', payload: { ...commission }, actorUserId: actor.userId, dedupeKey: `sales_commission.status_changed:${commission.id}:paid` });
+    return { status: 200, body: commission };
+  });
+
+  httpServer.post('/api/sales-commissions/:commissionId/clawback', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'sales_commission'))) {
+      throw new ForbiddenError('missing edit:sales_commission permission');
+    }
+    const body = parseJsonBody<{ reason: string }>(ctx.body);
+    const commission = await salesCommissions.clawbackCommission(ctx.params.commissionId!, actor.companyId, body.reason);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'sales_commission', resourceId: commission.id, metadata: { clawedBack: true, reason: body.reason } });
+    await emitEvent({ companyId: actor.companyId, type: 'sales_commission.status_changed', payload: { ...commission }, actorUserId: actor.userId, dedupeKey: `sales_commission.status_changed:${commission.id}:clawed_back` });
     return { status: 200, body: commission };
   });
 
@@ -1183,7 +3230,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:leave_request permission');
     }
     const requests = await hr.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(requests, ctx.query) };
+    const filtered = searchFilter(requests, ['reason'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.get('/api/hr/my-leave-requests', async (ctx) => {
@@ -1259,7 +3307,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const unitId = ctx.query.get('unitId');
     const tickets = unitId ? await operations.listForUnit(unitId, actor.companyId) : await operations.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(tickets, ctx.query) };
+    const filtered = searchFilter(tickets, ['title', 'description'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/operations/tickets/:ticketId/assign', async (ctx) => {
@@ -1309,7 +3358,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const documents = contractId
       ? await legal.listForContract(contractId, actor.companyId)
       : await legal.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(documents, ctx.query) };
+    const filtered = searchFilter(documents, ['name', 'notes'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/legal/documents/:documentId/received', async (ctx) => {
@@ -1378,7 +3428,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:vendor permission');
     }
     const vendors = await purchasing.listVendors(actor.companyId);
-    return { status: 200, body: paginate(vendors, ctx.query) };
+    const filtered = searchFilter(vendors, ['name', 'category'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/purchasing/vendors/:vendorId/deactivate', async (ctx) => {
@@ -1481,7 +3532,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:campaign permission');
     }
     const campaigns = await marketing.listCampaigns(actor.companyId);
-    return { status: 200, body: paginate(campaigns, ctx.query) };
+    const filtered = searchFilter(campaigns, ['name'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/marketing/campaigns/:campaignId/status', async (ctx) => {
@@ -1531,7 +3583,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
   httpServer.get('/api/communication/my-messages', async (ctx) => {
     const actor = await actorOf(ctx);
     const messages = await communication.listForUser(actor.userId, actor.companyId);
-    return { status: 200, body: paginate(messages, ctx.query) };
+    const filtered = searchFilter(messages, ['subject'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.get('/api/communication/messages', async (ctx) => {
@@ -1544,7 +3597,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const messages = relatedResource && relatedResourceId
       ? await communication.listForResource(relatedResource, relatedResourceId, actor.companyId)
       : await communication.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(messages, ctx.query) };
+    const filtered = searchFilter(messages, ['subject'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
   httpServer.post('/api/communication/messages/:messageId/read', async (ctx) => {
@@ -1594,6 +3648,38 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: await analytics.brokerPerformance(actor.companyId) };
   });
 
+  httpServer.get('/api/analytics/speed-to-first-contact', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.speedToFirstContact(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/funnel-conversion-rates', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.funnelConversionRates(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/cost-per-qualified-lead', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.costPerQualifiedLead(actor.companyId) };
+  });
+
+  httpServer.get('/api/analytics/lost-reasons', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
+      throw new ForbiddenError('missing view:analytics permission');
+    }
+    return { status: 200, body: await analytics.lostReasonBreakdown(actor.companyId) };
+  });
+
   httpServer.get('/api/analytics/lead-scores', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'view', 'analytics'))) {
@@ -1608,6 +3694,55 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:lead permission');
     }
     return { status: 200, body: await leadScoring.scoreLead(ctx.params.leadId!, actor.companyId) };
+  });
+
+  // ---- Forecasting + Scenario Simulation ----
+  httpServer.get('/api/forecasting/historical', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const projectId = ctx.query.get('projectId') ?? undefined;
+    const months = ctx.query.get('months') ? Number(ctx.query.get('months')) : undefined;
+    return { status: 200, body: await forecasting.historicalMonthly(actor.companyId, projectId, months) };
+  });
+
+  httpServer.get('/api/forecasting/forecast', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const projectId = ctx.query.get('projectId') ?? undefined;
+    const trailingMonths = ctx.query.get('trailingMonths') ? Number(ctx.query.get('trailingMonths')) : undefined;
+    const forecastMonths = ctx.query.get('forecastMonths') ? Number(ctx.query.get('forecastMonths')) : undefined;
+    return { status: 200, body: await forecasting.forecastFuture(actor.companyId, projectId, trailingMonths, forecastMonths) };
+  });
+
+  httpServer.get('/api/forecasting/compare', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const month = ctx.query.get('month');
+    if (!month) throw new ValidationError('month query parameter is required (YYYY-MM)');
+    const projectId = ctx.query.get('projectId') ?? undefined;
+    const trailingMonths = ctx.query.get('trailingMonths') ? Number(ctx.query.get('trailingMonths')) : undefined;
+    return { status: 200, body: await forecasting.compareActualVsForecast(actor.companyId, month, projectId, trailingMonths) };
+  });
+
+  // Pure calculator — never persists anything, exactly like
+  // PaymentPlansService.previewSchedule, which it reuses under the hood.
+  httpServer.post('/api/scenario-simulation/run', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'forecast'))) {
+      throw new ForbiddenError('missing view:forecast permission');
+    }
+    const body = parseJsonBody<Parameters<ScenarioSimulationService['runScenario']>[1] & { baseline?: Parameters<ScenarioSimulationService['runScenario']>[1] }>(ctx.body);
+    if (body.baseline) {
+      const { baseline, ...scenario } = body;
+      return { status: 200, body: await scenarioSimulation.compareScenarios(actor.companyId, scenario, baseline) };
+    }
+    return { status: 200, body: await scenarioSimulation.runScenario(actor.companyId, body) };
   });
 
   // ---- Customer Portal ----
@@ -1627,7 +3762,21 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:portal_access permission');
     }
     const customers = await portal.listCustomers(actor.companyId);
-    return { status: 200, body: paginate(customers, ctx.query) };
+    const filtered = searchFilter(customers, ['fullName', 'phone', 'email'], ctx.query.get('q'));
+    return { status: 200, body: paginate(filtered, ctx.query) };
+  });
+
+  // Customer 360: everything ACTIVE already knows about one customer,
+  // joined from CRM/Sales/Payment Plans/Legal/Communication/Tasks — see
+  // PortalService.getCustomer360 for the join logic. Same permission as
+  // the customer list above, since this is just one customer's detail.
+  httpServer.get('/api/customers/:id/360', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'portal_access'))) {
+      throw new ForbiddenError('missing view:portal_access permission');
+    }
+    const profile = await portal.getCustomer360(ctx.params.id!, actor.companyId);
+    return { status: 200, body: profile };
   });
 
   const customerActorOf = async (ctx: RequestContext): Promise<{ actor: Actor; customerId: string }> => {
@@ -1738,6 +3887,24 @@ export async function buildApplication(options: AppOptions): Promise<Application
   httpServer.get('/api/automation/templates', async (ctx) => {
     await actorOf(ctx); // any authenticated user may read the built-in catalogue
     return { status: 200, body: automation.listTemplates() };
+  });
+
+  // Event-to-AI activation control: instantiates a real WorkflowDefinition
+  // from a built-in template in one call — the company-level opt-in this
+  // deployment requires before any event can drive an AI action (see
+  // AutomationService.activateTemplate). Never automatic, never global:
+  // create:workflow permission gates it exactly like a hand-built workflow.
+  httpServer.post('/api/automation/templates/:templateKey/activate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'workflow'))) {
+      throw new ForbiddenError('missing create:workflow permission');
+    }
+    const workflow = await automation.activateTemplate(ctx.params.templateKey!, actor.companyId, actor.userId);
+    await auditLog.record({
+      companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'workflow', resourceId: workflow.id,
+      metadata: { templateKey: ctx.params.templateKey, name: workflow.name },
+    });
+    return { status: 201, body: workflow };
   });
 
   // Company-wide execution monitoring — a dashboard summary of workflow and
@@ -1863,6 +4030,46 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: run };
   });
 
+  // ---- Universal Approval Engine ----
+  // Independent of the Automation Engine's own ApprovalRequest above (that
+  // one only ever exists inside a workflow run) — any route can gate an
+  // action behind one of these without building a workflow first. See
+  // resumeApprovedAction for how "approving" one actually finishes the
+  // underlying action.
+  httpServer.get('/api/approvals', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'approval'))) {
+      throw new ForbiddenError('missing view:approval permission');
+    }
+    const status = ctx.query.get('status') as ActionApproval['status'] | null;
+    const list = await approvalEngine.listApprovals(actor.companyId, status ?? undefined);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.post('/api/approvals/:approvalId/approve', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const approval = await approvalEngine.approve(ctx.params.approvalId!, actor.companyId, actor.userId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'approval', resourceId: approval.id });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.decided', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.decided:${approval.id}` });
+    try {
+      const result = await resumeApprovedAction(approval, actor.userId);
+      return { status: 200, body: { approval, result } };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await approvalEngine.recordResumeFailure(approval.id, actor.companyId, message);
+      throw err;
+    }
+  });
+
+  httpServer.post('/api/approvals/:approvalId/reject', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const body = ctx.body && typeof ctx.body === 'object' ? (ctx.body as { reason?: string }) : {};
+    const approval = await approvalEngine.reject(ctx.params.approvalId!, actor.companyId, actor.userId, body.reason);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'approve', resource: 'approval', resourceId: approval.id, metadata: { rejected: true } });
+    await emitEvent({ companyId: actor.companyId, type: 'action_approval.decided', payload: { ...approval }, actorUserId: actor.userId, dedupeKey: `action_approval.decided:${approval.id}` });
+    return { status: 200, body: approval };
+  });
+
   // ---- Automation Engine: secrets (encrypted-at-rest credentials for
   // webhook_call actions — never returned in plaintext by any route) ----
   httpServer.post('/api/automation/secrets', async (ctx) => {
@@ -1967,8 +4174,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'ai_action'))) {
       throw new ForbiddenError('missing edit:ai_action permission');
     }
-    const body = parseJsonBody<{ actionType: AiPolicy['actionType']; autonomyLevel: AiPolicy['autonomyLevel'] }>(ctx.body);
-    const policy = await aiAgent.setPolicy(actor.companyId, body.actionType, body.autonomyLevel, actor.userId);
+    const body = parseJsonBody<{
+      actionType: AiPolicy['actionType'];
+      autonomyLevel: AiPolicy['autonomyLevel'];
+      maxFinancialAmount?: number;
+      allowedChannels?: string[];
+      workingHoursStart?: string;
+      workingHoursEnd?: string;
+    }>(ctx.body);
+    const policy = await aiAgent.setPolicy(actor.companyId, body.actionType, body.autonomyLevel, actor.userId, {
+      maxFinancialAmount: body.maxFinancialAmount,
+      allowedChannels: body.allowedChannels,
+      workingHoursStart: body.workingHoursStart,
+      workingHoursEnd: body.workingHoursEnd,
+    });
     await auditLog.record({
       companyId: actor.companyId,
       actorUserId: actor.userId,
@@ -2049,6 +4268,162 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: stats };
   });
 
+  // ---- Persistent AI Memory Layer ----
+  // Only application code (deterministic agent logic, a human via this API)
+  // writes memories in this phase — see AiMemoryService's class doc comment
+  // for why no AI-callable "remember" tool exists yet. Recall is agent-
+  // callable (the `recall_memory` tool, read-only) and human-callable here.
+  httpServer.post('/api/ai/memory', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_memory'))) {
+      throw new ForbiddenError('missing create:ai_memory permission');
+    }
+    const body = parseJsonBody<{
+      category: AiMemory['category'];
+      content: string;
+      subjectType?: string;
+      subjectId?: string;
+      key?: string;
+      tags?: string[];
+      confidence?: number;
+      sensitivity?: AiMemory['sensitivity'];
+      expiresAt?: string;
+    }>(ctx.body);
+    const memory = await aiMemory.remember({
+      companyId: actor.companyId,
+      category: body.category,
+      content: body.content,
+      subjectType: body.subjectType,
+      subjectId: body.subjectId,
+      key: body.key,
+      tags: body.tags,
+      source: { type: 'user_note', id: actor.userId },
+      confidence: body.confidence,
+      sensitivity: body.sensitivity,
+      createdByUserId: actor.userId,
+      expiresAt: body.expiresAt,
+    });
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'create',
+      resource: 'ai_memory',
+      resourceId: memory.id,
+      metadata: { category: memory.category, subjectType: memory.subjectType, subjectId: memory.subjectId },
+    });
+    return { status: 201, body: memory };
+  });
+
+  httpServer.get('/api/ai/memory', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_memory'))) {
+      throw new ForbiddenError('missing view:ai_memory permission');
+    }
+    const limitParam = ctx.query.get('limit');
+    const list = await aiMemory.recall(
+      actor.companyId,
+      {
+        category: (ctx.query.get('category') ?? undefined) as AiMemory['category'] | undefined,
+        subjectType: ctx.query.get('subjectType') ?? undefined,
+        subjectId: ctx.query.get('subjectId') ?? undefined,
+        key: ctx.query.get('key') ?? undefined,
+        query: ctx.query.get('query') ?? undefined,
+      },
+      limitParam ? Number(limitParam) : undefined,
+    );
+    return { status: 200, body: list };
+  });
+
+  httpServer.post('/api/ai/memory/:memoryId/invalidate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'ai_memory'))) {
+      throw new ForbiddenError('missing edit:ai_memory permission');
+    }
+    const memory = await aiMemory.invalidate(ctx.params.memoryId!, actor.companyId, actor.userId);
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'ai_memory',
+      resourceId: memory.id,
+      metadata: { invalidated: true },
+    });
+    return { status: 200, body: memory };
+  });
+
+  // ---- LLM Provider Abstraction ----
+  // No external AI API is configured for this deployment — these routes
+  // manage the real, testable provider config (see LlmOrchestratorService's
+  // class doc comment) rather than a stand-in for one. CEO-only by default
+  // seed, same posture as /api/automation/secrets: API keys are financial/
+  // security-sensitive and never returned by any route here.
+  httpServer.post('/api/ai/llm/config', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing create:ai_llm_config permission');
+    }
+    const body = parseJsonBody<{
+      provider: AiModelConfig['provider'];
+      displayName: string;
+      model: string;
+      baseUrl: string;
+      apiKey: string;
+      maxOutputTokens?: number;
+      temperature?: number;
+      timeoutMs?: number;
+      maxRetries?: number;
+      dailyTokenBudget?: number;
+      costPerInputTokenUsd?: number;
+      costPerOutputTokenUsd?: number;
+      isActive?: boolean;
+    }>(ctx.body);
+    const config = await llmOrchestrator.setModelConfig({ ...body, companyId: actor.companyId, createdByUserId: actor.userId });
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'create',
+      resource: 'ai_llm_config',
+      resourceId: config.id,
+      metadata: { provider: config.provider, model: config.model },
+    });
+    return { status: 201, body: config };
+  });
+
+  httpServer.get('/api/ai/llm/config', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing view:ai_llm_config permission');
+    }
+    const list = await llmOrchestrator.listModelConfigs(actor.companyId);
+    return { status: 200, body: list };
+  });
+
+  httpServer.post('/api/ai/llm/config/:configId/deactivate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing edit:ai_llm_config permission');
+    }
+    const config = await llmOrchestrator.deactivateModelConfig(ctx.params.configId!, actor.companyId);
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'edit',
+      resource: 'ai_llm_config',
+      resourceId: config.id,
+      metadata: { deactivated: true },
+    });
+    return { status: 200, body: config };
+  });
+
+  httpServer.get('/api/ai/llm/usage', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_llm_config'))) {
+      throw new ForbiddenError('missing view:ai_llm_config permission');
+    }
+    const list = await llmOrchestrator.listUsage(actor.companyId, ctx.query.get('modelConfigId') ?? undefined);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
   // ---- Integration Layer (WhatsApp, Email, Meta Ads, Google Calendar,
   // Stripe, and a generic custom_api connector for other approved
   // third-party services) — secure credential storage (reused from the
@@ -2114,6 +4489,59 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: paginate(list, ctx.query) };
   });
 
+  // ---- AI Workflow / Agentic Orchestration Engine ----
+  // Multi-step, replanning-capable AI workflows layered on top of the AI
+  // Execution Layer above: every mutating step routes through
+  // aiAgent.requestAction() (never automation.executeActionDirect()
+  // directly), so the exact same RBAC/autonomy/approval/audit pipeline
+  // gates every action a workflow takes. See AiWorkflowService.
+  httpServer.post('/api/ai/workflows', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'ai_action'))) {
+      throw new ForbiddenError('missing create:ai_action permission');
+    }
+    const body = parseJsonBody<{ goalType: AiWorkflowGoalType; subjectId: string }>(ctx.body);
+    const run = await aiWorkflow.startWorkflow(body.goalType, actor.companyId, body.subjectId, actor.userId);
+    return { status: 201, body: run };
+  });
+
+  httpServer.get('/api/ai/workflows', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const subjectId = ctx.query.get('subjectId') ?? undefined;
+    const list = await aiWorkflow.listRuns(actor.companyId, subjectId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.get('/api/ai/workflows/:runId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const run = await aiWorkflow.getRun(ctx.params.runId!, actor.companyId);
+    return { status: 200, body: run };
+  });
+
+  httpServer.get('/api/ai/workflows/:runId/steps', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'ai_action'))) {
+      throw new ForbiddenError('missing view:ai_action permission');
+    }
+    const steps = await aiWorkflow.getSteps(ctx.params.runId!, actor.companyId);
+    return { status: 200, body: steps };
+  });
+
+  httpServer.post('/api/ai/workflows/:runId/resume', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'ai_action'))) {
+      throw new ForbiddenError('missing edit:ai_action permission');
+    }
+    const run = await aiWorkflow.resumeWorkflow(ctx.params.runId!, actor.companyId, actor.userId);
+    return { status: 200, body: run };
+  });
+
   // ---- Audit ----
   httpServer.get('/api/audit-log', async (ctx) => {
     const actor = await actorOf(ctx);
@@ -2138,9 +4566,10 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, inventory, paymentPlans, sales, finance, brokers, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, aiAgent, integrations,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures,
+      importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,
   };

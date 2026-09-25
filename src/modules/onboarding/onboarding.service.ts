@@ -4,6 +4,7 @@ import type { OrganizationService } from '../organization/organization.service.j
 import type { AuthService } from '../auth/auth.service.js';
 import type { RoleManagementService } from '../permissions/role-management.service.js';
 import { ACTIONS, RESOURCES } from '../permissions/manifest.builder.js';
+import type { CrmStageService } from '../crm/crm-stage.service.js';
 
 export interface SignupInput {
   companyName: string;
@@ -34,6 +35,7 @@ export class OnboardingService {
     private readonly organization: OrganizationService,
     private readonly auth: AuthService,
     private readonly roleManagement: RoleManagementService,
+    private readonly crmStages: CrmStageService,
   ) {}
 
   async signupNewCompany(input: SignupInput): Promise<SignupResult> {
@@ -41,6 +43,13 @@ export class OnboardingService {
     if (!input.fullName?.trim()) throw new ValidationError('fullName is required');
 
     const company = await this.organization.createCompany({ name: input.companyName });
+    // Every company needs a CRM pipeline to create leads into at all —
+    // seedDemoData() does this for the fixed demo company, but a real
+    // self-service signup never went through that path, so
+    // crm.createLead()'s getDefaultStage() lookup would fail for every
+    // real tenant with "no default CRM stage configured for this
+    // company". Idempotent, same as the demo seed's call.
+    await this.crmStages.seedDefaultStages(company.id);
     const employee = await this.organization.createEmployee({
       companyId: company.id,
       fullName: input.fullName,

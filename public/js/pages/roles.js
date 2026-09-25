@@ -1,13 +1,21 @@
 import { el, clear, table, toast, errorBanner, selectInput, confirmModal, loadingState } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export', 'assign', 'transfer', 'unmask'];
 const RESOURCES = ['employee', 'lead', 'opportunity', 'unit', 'payment_plan_template', 'payment_schedule', 'contract', 'broker_company', 'audit_log', 'role'];
 const SCOPES = ['own', 'team', 'department', 'branch', 'company', 'broker_own'];
+// The 'opportunity' RBAC resource is unchanged (see quotation.service.ts's
+// sibling module, opportunities.js) — only its user-facing name is "Offers"
+// now, so the permission grant UI shows that instead of the raw key.
+const RESOURCE_LABELS = { opportunity: 'Offers' };
+const resourceLabel = (r) => RESOURCE_LABELS[r] || r;
 
 export async function renderRoles(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Roles & Permissions')));
+  const locale = getLocale();
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_roles'))));
 
   const errorSlot = el('div');
   container.appendChild(errorSlot);
@@ -81,7 +89,7 @@ export async function renderRoles(container) {
     grantsCard.appendChild(el('h3', { style: 'margin-top:0' }, `Grants for "${role?.name ?? roleId}"`));
 
     const actionSelect = selectInput(ACTIONS.map((a) => ({ value: a, label: a })));
-    const resourceSelect = selectInput(RESOURCES.map((r) => ({ value: r, label: r })));
+    const resourceSelect = selectInput(RESOURCES.map((r) => ({ value: r, label: resourceLabel(r) })));
     const scopeSelect = selectInput(SCOPES.map((s) => ({ value: s, label: s })));
     const addBtn = el('button', { class: 'primary' }, 'Add grant');
     addBtn.addEventListener('click', async () => {
@@ -115,7 +123,7 @@ export async function renderRoles(container) {
       grantsListSlot.appendChild(table(
         [
           { label: 'Action', key: 'action' },
-          { label: 'Resource', key: 'resource' },
+          { label: 'Resource', render: (g) => resourceLabel(g.resource) },
           { label: 'Scope', key: 'scope' },
           { label: '', render: (g) => {
             const btn = el('button', { class: 'danger' }, 'Revoke');

@@ -1,11 +1,28 @@
 import { el, clear, table, toast, errorBanner, statusBadge, selectInput, confirmModal } from '../ui.js';
+import { t } from '../i18n.js';
 import { api } from '../api.js';
+import { can, getLocale } from '../state.js';
+import { openImportWizard } from '../import-wizard.js';
 
 export async function renderFinance(container) {
   clear(container);
+  const locale = getLocale();
+  const headerActions = el('div');
   container.appendChild(el('div', { class: 'page-header' }, [
-    el('h1', {}, 'Finance & Collections'),
+    el('h1', {}, t(locale, 'page_title_finance')),
+    headerActions,
   ]));
+  if (can('payment_schedule', 'edit')) {
+    const importBtn = el('button', {}, 'Import Payments');
+    importBtn.addEventListener('click', () => {
+      openImportWizard({
+        title: 'Import Payments',
+        uploadPath: '/api/finance/payments/import/upload',
+        onImported: () => { load(); },
+      });
+    });
+    headerActions.appendChild(importBtn);
+  }
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
@@ -80,11 +97,50 @@ export async function renderFinance(container) {
     }
   });
 
+  const refundLineSelect = selectInput([]);
+  const refundAmount = el('input', { type: 'number', placeholder: 'Amount' });
+  const refundReason = el('input', { type: 'text', placeholder: 'Why is this being refunded?' });
+  const refundBtn = el('button', { class: 'danger' }, 'Request refund');
+
+  refundBtn.addEventListener('click', async () => {
+    clear(errorSlot);
+    if (!contractSelect.value || !refundLineSelect.value) {
+      errorSlot.appendChild(errorBanner('Choose a contract and a paid schedule line first.'));
+      return;
+    }
+    if (!(Number(refundAmount.value) > 0)) {
+      errorSlot.appendChild(errorBanner('Enter a refund amount greater than zero.'));
+      return;
+    }
+    if (!refundReason.value.trim()) {
+      errorSlot.appendChild(errorBanner('A reason is required for every refund request.'));
+      return;
+    }
+    if (!(await confirmModal('Refunds always require approval before any money moves. Submit this refund request?'))) return;
+    refundBtn.disabled = true;
+    try {
+      await api.post('/api/finance/refunds', {
+        contractId: contractSelect.value,
+        paymentScheduleLineId: refundLineSelect.value,
+        amount: Number(refundAmount.value),
+        reason: refundReason.value.trim(),
+      });
+      toast('Refund request submitted — pending approval. See the Approvals page for its status.', 'success');
+      refundAmount.value = '';
+      refundReason.value = '';
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    } finally {
+      refundBtn.disabled = false;
+    }
+  });
+
   async function loadContractDetail() {
     clear(balanceOutput);
     clear(scheduleSlot);
     clear(contractActionsSlot);
     clear(recordLineSelect);
+    clear(refundLineSelect);
     if (!contractSelect.value) return;
     try {
       const [contract, balance, lines] = await Promise.all([
@@ -108,7 +164,13 @@ export async function renderFinance(container) {
         if (l.status !== 'paid') {
           recordLineSelect.appendChild(el('option', { value: l.id }, `${l.label} — ${Number(l.amount - l.amountPaid).toLocaleString()} remaining`));
         }
+        if (l.amountPaid > 0) {
+          refundLineSelect.appendChild(el('option', { value: l.id }, `${l.label} — ${Number(l.amountPaid).toLocaleString()} paid`));
+        }
       });
+      if (refundLineSelect.options.length === 0) {
+        refundLineSelect.appendChild(el('option', { value: '' }, 'No paid lines to refund yet'));
+      }
       scheduleSlot.appendChild(table(
         [
           { label: 'Line', key: 'label' },
@@ -143,6 +205,17 @@ export async function renderFinance(container) {
       el('div', {}, [el('label', {}, 'Method'), recordMethod]),
     ]),
     el('div', { class: 'form-actions' }, [recordBtn]),
+  ]));
+
+  container.appendChild(el('div', { class: 'card' }, [
+    el('h3', { style: 'margin-top:0' }, 'Request a refund'),
+    el('p', { class: 'page-subtitle' }, 'Reverses money already collected on a paid line. Always requires approval before it takes effect — see the Approvals page to track it.'),
+    el('div', { class: 'form-row' }, [
+      el('div', {}, [el('label', {}, 'Paid schedule line'), refundLineSelect]),
+      el('div', {}, [el('label', {}, 'Amount'), refundAmount]),
+      el('div', {}, [el('label', {}, 'Reason'), refundReason]),
+    ]),
+    el('div', { class: 'form-actions' }, [refundBtn]),
   ]));
 
   async function load() {

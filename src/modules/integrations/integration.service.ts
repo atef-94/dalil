@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { IntegrationConnection, IntegrationEventStatus, IntegrationProvider } from '../../domain/types.js';
+import type { CommunicationDeliveryEvent, IntegrationConnection, IntegrationEventStatus, IntegrationProvider } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { AutomationError, NotFoundError, ValidationError } from '../../infra/errors.js';
 import { SlidingWindowRateLimiter } from '../../infra/rate-limiter.js';
@@ -10,6 +10,7 @@ import type { IntegrationEvent } from '../../domain/types.js';
 export interface IntegrationRepos {
   connections: Repository<IntegrationConnection>;
   events: Repository<IntegrationEvent>;
+  deliveryEvents: Repository<CommunicationDeliveryEvent>;
 }
 
 export interface ConnectorDefinition {
@@ -29,15 +30,15 @@ const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     provider: 'whatsapp',
     name: 'WhatsApp Business',
-    description: 'Send WhatsApp messages via the Meta Cloud API.',
+    description: 'Send WhatsApp text messages or documents (e.g. a generated Offer PDF) via the Meta Cloud API. Also accepts an optional "webhook_secret" credential (not required to connect) to HMAC-verify inbound delivery-status callbacks — see CommunicationDeliveryService.',
     configFields: ['phoneNumberId'],
     credentialFields: ['access_token'],
-    actions: ['send_message'],
+    actions: ['send_message', 'send_document'],
   },
   {
     provider: 'email',
     name: 'Email (SendGrid)',
-    description: 'Send transactional email via the SendGrid API.',
+    description: 'Send transactional email via the SendGrid API. Also accepts an optional "webhook_secret" credential (not required to connect) to HMAC-verify inbound delivery-status callbacks — see CommunicationDeliveryService.',
     configFields: ['fromAddress'],
     credentialFields: ['api_key'],
     actions: ['send_message'],
@@ -65,6 +66,14 @@ const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     configFields: [],
     credentialFields: ['secret_key'],
     actions: ['charge'],
+  },
+  {
+    provider: 'e_signature',
+    name: 'E-Signature (DocuSign-compatible)',
+    description: 'Send a contract document for e-signature via a DocuSign-shaped REST API and receive a webhook-verified signed/declined callback.',
+    configFields: ['accountId'],
+    credentialFields: ['api_key', 'webhook_secret'],
+    actions: ['send_envelope'],
   },
   {
     provider: 'custom_api',
@@ -185,6 +194,24 @@ export class IntegrationService {
     return this.repos.events.findAll((e) => e.companyId === companyId && (!connectionId || e.connectionId === connectionId));
   }
 
+  /** The full, real delivery timeline for one message — every status
+   * transition a verified webhook has actually reported, oldest first.
+   * An empty array for a message that was just sent means exactly that:
+   * no delivery confirmation has arrived yet, not "assumed delivered". */
+  async getDeliveryTimeline(companyId: string, providerMessageId: string): Promise<CommunicationDeliveryEvent[]> {
+    const events = await this.repos.deliveryEvents.findAll((e) => e.companyId === companyId && e.providerMessageId === providerMessageId);
+    return events.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  }
+
+  /** The most recent delivery status ACTIVE has actually observed for a
+   * given related resource (typically a lead) — what the AI queries
+   * instead of assuming "API call succeeded" means "message delivered".
+   * Returns undefined when nothing has been sent to this resource yet. */
+  async getLatestDeliveryStatusForResource(companyId: string, relatedResourceId: string): Promise<CommunicationDeliveryEvent | undefined> {
+    const events = await this.repos.deliveryEvents.findAll((e) => e.companyId === companyId && e.relatedResourceId === relatedResourceId);
+    return events.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+  }
+
   /**
    * Sends one outbound call through a company's connected provider.
    * Pipeline: find the active connection -> rate limit -> resolve
@@ -234,6 +261,23 @@ export class IntegrationService {
         companyId, actorUserId: userId, action: 'execute', resource: 'integration_connection', resourceId: connection.id,
         metadata: { provider, integrationAction: action, attempts },
       });
+      if ((provider === 'whatsapp' || provider === 'email') && typeof result.providerMessageId === 'string') {
+        // 'sent' is the honest starting status: the provider accepted the
+        // request, nothing more — a real delivered/read/failed transition
+        // only ever comes from a verified webhook callback (see
+        // CommunicationDeliveryService.handleWebhook), never assumed here.
+        await this.repos.deliveryEvents.save({
+          id: randomUUID(),
+          companyId,
+          connectionId: connection.id,
+          provider,
+          providerMessageId: result.providerMessageId,
+          relatedResource: typeof params.leadId === 'string' ? 'lead' : undefined,
+          relatedResourceId: typeof params.leadId === 'string' ? params.leadId : undefined,
+          status: 'sent',
+          createdAt: new Date().toISOString(),
+        });
+      }
       return result;
     }
 
@@ -320,6 +364,8 @@ export class IntegrationService {
         return this.createCalendarEvent(connection, credentials, params);
       case 'payment_stripe':
         return this.chargeStripe(credentials, params);
+      case 'e_signature':
+        return this.sendSignatureEnvelope(connection, credentials, params);
       case 'custom_api':
         return this.callCustomApi(connection, credentials, params);
       default:
@@ -330,16 +376,73 @@ export class IntegrationService {
   // ---- WhatsApp Business (Meta Cloud API) ----
   private async sendWhatsApp(connection: IntegrationConnection, credentials: Record<string, string>, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const to = this.requireString(params.to, 'to');
-    const body = this.requireString(params.body, 'body');
     const phoneNumberId = this.requireString(connection.config.phoneNumberId, 'phoneNumberId');
     const token = this.requireString(credentials.access_token, 'access_token');
+
+    // A document (e.g. a generated Offer PDF) is a real, separate Cloud
+    // API flow — upload the file first to get a media id, then reference
+    // that id in the message — rather than the single-call text path.
+    if (params.documentBuffer instanceof Buffer) {
+      const filename = typeof params.documentFilename === 'string' && params.documentFilename.trim() ? params.documentFilename.trim() : 'document.pdf';
+      const caption = typeof params.body === 'string' && params.body.trim() ? params.body.trim() : undefined;
+      return this.sendWhatsAppDocument(phoneNumberId, token, to, params.documentBuffer, filename, caption);
+    }
+
+    const body = this.requireString(params.body, 'body');
     const res = await this.fetchImpl(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body } }),
     });
     if (!res.ok) throw new Error(`WhatsApp API returned ${res.status}`);
-    return { status: res.status };
+    // Real shape: { messages: [{ id: "wamid.xxx" }] } — only trusted when
+    // actually present; never fabricated when the response doesn't carry it.
+    const responseBody = (await res.json().catch(() => ({}))) as { messages?: { id?: string }[] };
+    const providerMessageId = responseBody.messages?.[0]?.id;
+    return { status: res.status, ...(providerMessageId ? { providerMessageId } : {}) };
+  }
+
+  /** The real 2-step Meta Cloud API document flow: upload the file's bytes
+   * to get back a media id (never guessed — only used when the API
+   * actually returns one), then send a "document" message referencing
+   * that id. Both requests use the same connected phone number and
+   * access token as the text path above. */
+  private async sendWhatsAppDocument(
+    phoneNumberId: string,
+    token: string,
+    to: string,
+    fileBuffer: Buffer,
+    filename: string,
+    caption: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    form.set('messaging_product', 'whatsapp');
+    form.set('file', new Blob([fileBuffer], { type: 'application/pdf' }), filename);
+
+    const uploadRes = await this.fetchImpl(`https://graph.facebook.com/v20.0/${phoneNumberId}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    if (!uploadRes.ok) throw new Error(`WhatsApp media upload returned ${uploadRes.status}`);
+    const uploadBody = (await uploadRes.json().catch(() => ({}))) as { id?: string };
+    const mediaId = uploadBody.id;
+    if (!mediaId) throw new Error('WhatsApp media upload did not return a media id');
+
+    const res = await this.fetchImpl(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'document',
+        document: { id: mediaId, filename, ...(caption ? { caption } : {}) },
+      }),
+    });
+    if (!res.ok) throw new Error(`WhatsApp API returned ${res.status}`);
+    const responseBody = (await res.json().catch(() => ({}))) as { messages?: { id?: string }[] };
+    const providerMessageId = responseBody.messages?.[0]?.id;
+    return { status: res.status, ...(providerMessageId ? { providerMessageId } : {}) };
   }
 
   // ---- Email (SendGrid) ----
@@ -360,7 +463,11 @@ export class IntegrationService {
       }),
     });
     if (!res.ok) throw new Error(`SendGrid API returned ${res.status}`);
-    return { status: res.status };
+    // SendGrid returns its message id in the X-Message-Id response header,
+    // not the (empty, 202) body — only trusted when the header is actually
+    // present; never fabricated when it isn't.
+    const providerMessageId = res.headers.get('X-Message-Id') ?? undefined;
+    return { status: res.status, ...(providerMessageId ? { providerMessageId } : {}) };
   }
 
   // ---- Meta Ads ----
@@ -410,6 +517,37 @@ export class IntegrationService {
     });
     if (!res.ok) throw new Error(`Stripe API returned ${res.status}`);
     return { status: res.status };
+  }
+
+  // ---- E-Signature ----
+  // Generic envelope-creation request shape (subject, one document
+  // referenced by URL, one signer) — not certified against a specific
+  // vendor's exact field contract, same honest scope as every other
+  // connector here (a thin, real REST wrapper an admin points at their own
+  // account, not a vendor-verified integration).
+  private async sendSignatureEnvelope(connection: IntegrationConnection, credentials: Record<string, string>, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const to = this.requireString(params.to, 'to');
+    const documentUrl = this.requireString(params.documentUrl, 'documentUrl');
+    const contractId = this.requireString(params.contractId, 'contractId');
+    const accountId = this.requireString(connection.config.accountId, 'accountId');
+    const apiKey = this.requireString(credentials.api_key, 'api_key');
+    // baseUri is per-account with a real e-signature provider (issued at
+    // OAuth time) — config.baseUri lets an admin point at their own,
+    // defaulting to the provider's public developer sandbox host.
+    const baseUri = typeof connection.config.baseUri === 'string' && connection.config.baseUri ? connection.config.baseUri : 'demo.docusign.net';
+    const res = await this.fetchImpl(`https://${baseUri}/restapi/v2.1/accounts/${encodeURIComponent(accountId)}/envelopes`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        emailSubject: `Please sign contract ${contractId}`,
+        documents: [{ documentUrl }],
+        recipients: { signers: [{ email: to, recipientId: '1' }] },
+        status: 'sent',
+      }),
+    });
+    if (!res.ok) throw new Error(`e-signature API returned ${res.status}`);
+    const body = (await res.json().catch(() => ({}))) as { envelopeId?: string };
+    return { status: res.status, envelopeId: body.envelopeId };
   }
 
   // ---- Generic custom API (other approved third-party services) ----

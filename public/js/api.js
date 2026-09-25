@@ -66,9 +66,35 @@ async function request(path, { method = 'GET', body, query } = {}) {
   return parsed;
 }
 
+/** File uploads (Lead/Inventory/Payment import) use multipart/form-data,
+ * not JSON — the browser sets Content-Type (with its boundary) itself
+ * when given a FormData body, so this bypasses request()'s JSON headers
+ * entirely rather than fighting them. */
+async function upload(path, formData) {
+  const headers = {};
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(path, { method: 'POST', headers, body: formData });
+  const text = await res.text();
+  let parsed;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    parsed = text;
+  }
+  if (!res.ok) {
+    if (res.status === 401) clearToken();
+    const message = (parsed && (parsed.error || parsed.message)) || `Request failed (${res.status})`;
+    throw new ApiError(res.status, message);
+  }
+  return parsed;
+}
+
 export const api = {
   get: (path, query) => request(path, { method: 'GET', query }),
   post: (path, body) => request(path, { method: 'POST', body }),
   patch: (path, body) => request(path, { method: 'PATCH', body }),
   delete: (path) => request(path, { method: 'DELETE' }),
+  upload,
 };

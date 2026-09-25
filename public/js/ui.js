@@ -1,3 +1,8 @@
+import { t } from './i18n.js';
+import { getLocale } from './state.js';
+
+const tt = (key) => t(getLocale(), key);
+
 export function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {
@@ -28,14 +33,18 @@ const ICONS = {
   opportunities: '<path d="M4 4h16l-6 8v6l-4 2v-8z"/>',
   units: '<rect x="4" y="9" width="16" height="12" rx="1"/><path d="M8 9V5a4 4 0 0 1 8 0v4"/>',
   templates: '<rect x="5" y="3" width="14" height="18" rx="1.5"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/>',
+  quotations: '<rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M8 8h8M8 12h5" /><path d="M9 16l1.5 1.5L14 14"/>',
   finance: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/>',
   brokers: '<circle cx="9" cy="12" r="5"/><circle cx="15" cy="12" r="5" opacity="0.5"/>',
+  commissions: '<circle cx="12" cy="12" r="9"/><path d="M9.5 15.5c0 1 1 1.8 2.5 1.8s2.5-.8 2.5-1.8-1-1.5-2.5-1.9-2.5-.9-2.5-1.9 1-1.8 2.5-1.8 2.5.8 2.5 1.8"/><line x1="12" y1="6.5" x2="12" y2="8" /><line x1="12" y1="16" x2="12" y2="17.5"/>',
   marketing: '<path d="M3 10v4h3l6 4V6l-6 4z"/><path d="M16 9a4 4 0 0 1 0 6"/>',
   operations: '<rect x="3" y="7" width="18" height="10" rx="2"/><line x1="9" y1="7" x2="9" y2="17" stroke-dasharray="2 2"/>',
   legal: '<path d="M4 4h7v16H4z"/><path d="M13 4h7v16h-7z"/><line x1="12" y1="4" x2="12" y2="20"/>',
   purchasing: '<path d="M3 7l2-4h14l2 4"/><path d="M3 7h18v13H3z"/><line x1="3" y1="7" x2="21" y2="7"/>',
   communication: '<path d="M4 4h16v12H8l-4 4z"/>',
   analytics: '<line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="13" width="3" height="7"/><rect x="11" y="9" width="3" height="11"/><rect x="16" y="5" width="3" height="15"/>',
+  forecasting: '<path d="M4 17l4-5 4 3 5-7 3 3"/><line x1="4" y1="20" x2="20" y2="20"/>',
+  scenario: '<path d="M4 18l5-9 5 5 6-11"/><circle cx="9" cy="9" r="1.4"/><circle cx="14" cy="14" r="1.4"/><circle cx="20" cy="3" r="1.4"/>',
   automation: '<circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><line x1="7" y1="6" x2="17" y2="6"/><line x1="6.4" y1="7.6" x2="10.8" y2="16.4"/><line x1="17.6" y1="7.6" x2="13.2" y2="16.4"/>',
   ai: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
   integrations: '<path d="M9 3v6M15 3v6"/><path d="M6 9h12v4a6 6 0 0 1-12 0z"/><path d="M12 19v3"/>',
@@ -103,7 +112,7 @@ export function loadingState() {
 /** Richer empty state: an icon, a short title, an optional hint, and an
  * optional primary action button — replaces bare "No records yet" text. */
 export function emptyState({ icon: iconName = 'inbox', title, hint, actionLabel, onAction } = {}) {
-  const children = [icon(iconName, 'lg'), el('div', { class: 'empty-title' }, title || 'Nothing here yet')];
+  const children = [icon(iconName, 'lg'), el('div', { class: 'empty-title' }, title || tt('common_nothing_here'))];
   if (hint) children.push(el('div', { class: 'empty-hint' }, hint));
   if (actionLabel && onAction) {
     const btn = el('button', { class: 'primary' }, actionLabel);
@@ -114,10 +123,10 @@ export function emptyState({ icon: iconName = 'inbox', title, hint, actionLabel,
 }
 
 /** Shown in place of a page/section a user's RBAC grants don't allow. */
-export function deniedState(message = "You don't have permission to view this.") {
+export function deniedState(message = tt('common_no_permission')) {
   return el('div', { class: 'denied-state' }, [
     icon('lock', 'lg'),
-    el('div', { class: 'denied-title' }, 'Access restricted'),
+    el('div', { class: 'denied-title' }, tt('common_access_restricted')),
     el('div', {}, message),
   ]);
 }
@@ -141,15 +150,25 @@ export function tabs(items, activeKey, onSelect) {
   return wrap;
 }
 
-/** A KPI stat card with an optional icon and trend indicator. */
-export function statCard({ label, value, iconName, trend }) {
+/** A KPI stat card with an optional icon and trend indicator. Pass
+ * `onClick` to make the whole card an interactive entry point (e.g. a
+ * pipeline stage card that drills into that stage's list) — omit it for a
+ * plain, non-interactive stat. */
+export function statCard({ label, value, iconName, trend, onClick }) {
   const top = el('div', { class: 'stat-top' }, [
     el('div', { class: 'value' }, String(value)),
     iconName ? el('div', { class: 'icon-wrap' }, icon(iconName)) : null,
   ]);
   const children = [top, el('div', { class: 'label' }, label)];
   if (trend) children.push(el('div', { class: `trend ${trend.direction || ''}` }, trend.text));
-  return el('div', { class: 'stat-card' }, children);
+  const card = el('div', { class: `stat-card${onClick ? ' clickable' : ''}` }, children);
+  if (onClick) {
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.addEventListener('click', onClick);
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } });
+  }
+  return card;
 }
 
 /** A minimal, dependency-free bar chart. data: {label, value}[]. */
@@ -169,15 +188,15 @@ export function badge(text, color = '') {
 }
 
 const STATUS_COLORS = {
-  active: 'green', approved: 'green', paid: 'green', won: 'green', signed: 'green', converted: 'green',
+  active: 'green', approved: 'green', paid: 'green', won: 'green', signed: 'green', converted: 'green', verified: 'green',
   pending: 'amber', upcoming: 'amber', held: 'amber', reserved: 'amber', pending_approval: 'amber', new: 'blue', open: 'blue',
-  overdue: 'red', lost: 'red', rejected: 'red', cancelled: 'red', suspended: 'red', terminated: 'red', rejected_duplicate: 'red', rejected_other: 'red',
+  overdue: 'red', lost: 'red', rejected: 'red', cancelled: 'red', suspended: 'red', terminated: 'red', rejected_duplicate: 'red', rejected_other: 'red', failed: 'red',
 };
 export function statusBadge(status) {
   return badge(status, STATUS_COLORS[status] || '');
 }
 
-export function table(columns, rows, { empty = 'No records yet.', emptyIcon = 'inbox' } = {}) {
+export function table(columns, rows, { empty = tt('common_no_records'), emptyIcon = 'inbox' } = {}) {
   if (!rows || rows.length === 0) {
     return emptyState({ icon: emptyIcon, title: empty });
   }
@@ -202,13 +221,26 @@ export function selectInput(options, props = {}) {
   ));
 }
 
+/** A debounced search box — calls onSearch(trimmedValue) ~300ms after the
+ * user stops typing, not on every keystroke. Callers own resetting their
+ * own offset/state and re-fetching; this only owns the input's own timing. */
+export function searchInput(placeholder, onSearch, { debounceMs = 300 } = {}) {
+  const input = el('input', { type: 'text', placeholder });
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => onSearch(input.value.trim()), debounceMs);
+  });
+  return input;
+}
+
 export function paginationControls(page, onChange) {
   const hasPrev = page.offset > 0;
   const hasNext = page.offset + page.limit < page.total;
   return el('div', { class: 'pagination' }, [
-    el('span', {}, `${page.total === 0 ? 0 : page.offset + 1}–${Math.min(page.offset + page.limit, page.total)} of ${page.total}`),
-    el('button', { disabled: !hasPrev, onclick: () => onChange(Math.max(0, page.offset - page.limit)) }, '‹ Prev'),
-    el('button', { disabled: !hasNext, onclick: () => onChange(page.offset + page.limit) }, 'Next ›'),
+    el('span', {}, `${page.total === 0 ? 0 : page.offset + 1}–${Math.min(page.offset + page.limit, page.total)} ${tt('common_of')} ${page.total}`),
+    el('button', { disabled: !hasPrev, onclick: () => onChange(Math.max(0, page.offset - page.limit)) }, tt('common_prev')),
+    el('button', { disabled: !hasNext, onclick: () => onChange(page.offset + page.limit) }, tt('common_next')),
   ]);
 }
 
@@ -238,9 +270,23 @@ function openModalShell(titleText, bodyNode) {
   return { overlay, card, close };
 }
 
+/** Opens a modal around arbitrary read-only content (e.g. a detail/summary
+ * view) using the exact same shell confirmModal/formModal use — for pages
+ * that need more than a yes/no or a form. Returns { close }; the caller
+ * builds and appends its own content to the returned card body region via
+ * bodyNode, which it constructs before calling this. */
+export function contentModal(title, bodyNode, { wide = false } = {}) {
+  const { card, close } = openModalShell(title, bodyNode);
+  if (wide) card.classList.add('wide');
+  const closeBtn = el('button', { class: 'modal-close', 'aria-label': tt('common_close') }, '×');
+  closeBtn.addEventListener('click', close);
+  card.insertBefore(closeBtn, card.firstChild);
+  return { close };
+}
+
 /** Promise-based replacement for window.confirm — styled, keyboard/overlay
  * dismissible, never blocks the whole browser tab. */
-export function confirmModal(message, { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+export function confirmModal(message, { confirmLabel = tt('common_confirm'), cancelLabel = tt('common_cancel'), danger = false } = {}) {
   return new Promise((resolve) => {
     const body = el('div', {}, [
       el('p', { style: 'margin:0 0 18px' }, message),
@@ -263,7 +309,7 @@ export function confirmModal(message, { confirmLabel = 'Confirm', cancelLabel = 
  * fields: { key, label, type: 'text'|'number'|'select'|'textarea',
  *           options?: [{value,label}], placeholder?, value? }[]
  */
-export function formModal({ title, fields, submitLabel = 'Submit', cancelLabel = 'Cancel' }) {
+export function formModal({ title, fields, submitLabel = tt('common_submit'), cancelLabel = tt('common_cancel') }) {
   return new Promise((resolve) => {
     const inputs = {};
     const body = el('div', {});

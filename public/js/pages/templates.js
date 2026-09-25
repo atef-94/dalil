@@ -1,11 +1,14 @@
 import { el, clear, table, toast, errorBanner, selectInput, loadingState } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 const FREQUENCIES = ['monthly', 'quarterly', 'semiannual', 'annual', 'custom'];
 
 export async function renderTemplates(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Payment Plan Templates')));
+  const locale = getLocale();
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_templates'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 

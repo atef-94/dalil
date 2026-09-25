@@ -6,9 +6,11 @@ import type {
   ApprovalStatus,
   AutomationActionType,
   CampaignStatus,
-  LeadStatus,
+  AiMemory,
+  CommunicationDeliveryEvent,
   MessageChannel,
   MessageRelatedResource,
+  PaymentMethod,
   ResourceName,
   Secret,
   StepRunStatus,
@@ -32,8 +34,15 @@ import { ConcurrencyLimiter } from '../../infra/concurrency-queue.js';
 import { RbacEvaluator } from '../permissions/rbac.evaluator.js';
 import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
-import { CrmService } from '../crm/crm.service.js';
+import { CrmService, LEGACY_STATUS_TO_STAGE_KEY } from '../crm/crm.service.js';
+import type { CrmStageService } from '../crm/crm-stage.service.js';
 import { MarketingService } from '../marketing/marketing.service.js';
+import { FinanceService } from '../finance/finance.service.js';
+import { SalesService } from '../sales/sales.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { LeadScoringService } from '../ai/lead-scoring.service.js';
+import { QuotationService } from '../quotations/quotation.service.js';
+import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 
 export interface AutomationRepos {
   workflows: Repository<WorkflowDefinition>;
@@ -115,14 +124,24 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
     key: 'qualified-lead-reassignment-approval',
     name: 'Qualified Lead Reassignment Approval',
-    description: 'Requires manager approval before a newly qualified lead can be reassigned.',
-    trigger: { type: 'event', eventType: 'lead.status_changed' },
+    description: 'Requires manager approval before a lead newly moved into the "qualified" CRM stage can be reassigned. Edit the condition\'s stageKey if your company renamed or replaced that default stage.',
+    trigger: { type: 'event', eventType: 'lead.stage_changed' },
     steps: [
       {
-        name: 'Only when qualified',
-        conditions: [{ field: 'status', operator: 'eq', value: 'qualified' }],
+        name: 'Only when moved into the "qualified" stage',
+        conditions: [{ field: 'stageKey', operator: 'eq', value: 'qualified' }],
         action: { type: 'require_approval', params: { reason: 'Approve reassignment of a newly qualified lead' } },
       },
+    ],
+  },
+  {
+    key: 'new-lead-crm-pipeline-kickoff',
+    name: 'New Lead CRM Pipeline Kickoff',
+    description: 'The default new-lead flow requested for the CRM workspace: create a follow-up task and notify the assigned owner as soon as a lead lands in Fresh Leads (assignment/SLA timer are already handled by Lead Distribution before this fires).',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [
+      { name: 'Create follow-up task', action: { type: 'create_task', params: { title: 'Follow up with {{fullName}}', relatedResource: 'lead', relatedResourceId: '{{id}}' } } },
+      { name: 'Notify assigned owner', action: { type: 'send_message', params: { toUserId: '{{ownerEmployeeUserId}}', subject: 'New lead assigned to you', body: '{{fullName}} was just added to Fresh Leads and assigned to you.', relatedResource: 'lead', relatedResourceId: '{{id}}' } } },
     ],
   },
   {
@@ -132,6 +151,15 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     trigger: { type: 'event', eventType: 'payment.overdue_swept' },
     steps: [
       { name: 'Notify finance', action: { type: 'send_message', params: { subject: 'Overdue payment', body: 'A scheduled payment was marked overdue.' } } },
+    ],
+  },
+  {
+    key: 'lead-sla-breach-notice',
+    name: 'Lead SLA Breach Notice',
+    description: 'Notifies the sales team internally whenever a lead misses its first-contact SLA and gets auto-reassigned by the Lead Distribution pool.',
+    trigger: { type: 'event', eventType: 'lead.sla_breached' },
+    steps: [
+      { name: 'Notify sales', action: { type: 'send_message', params: { subject: 'Lead SLA breached', body: 'A lead missed its first-contact SLA and was auto-reassigned.' } } },
     ],
   },
   {
@@ -181,7 +209,11 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   },
 ];
 
-const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
+// Exported so the AI Tool Registry (ai-agent.service.ts) can describe each
+// tool's real required permission by reading the same maps the executor
+// enforces, instead of a second, hand-maintained copy that could drift out
+// of sync with what's actually checked at execution time.
+export const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   create_task: 'task',
   send_message: 'message',
   create_lead: 'lead',
@@ -192,9 +224,22 @@ const ACTION_RESOURCE: Record<AutomationActionType, ResourceName> = {
   integration_call: 'integration_connection',
   ai_decide: 'ai_action',
   require_approval: 'approval',
+  record_payment: 'payment_schedule',
+  cancel_contract: 'contract',
+  search_units: 'unit',
+  score_lead: 'lead',
+  compare_payment_plans: 'quotation',
+  get_delivery_status: 'integration_connection',
+  recall_memory: 'ai_memory',
+  search_projects: 'project',
+  get_project_details: 'project',
+  get_project_payment_plans: 'payment_plan_template',
+  get_developer_portfolio: 'project',
+  get_project_facilities: 'project',
+  get_project_location: 'project',
 };
 
-const ACTION_VERB: Record<AutomationActionType, ActionName> = {
+export const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   create_task: 'create',
   send_message: 'create',
   create_lead: 'create',
@@ -205,6 +250,19 @@ const ACTION_VERB: Record<AutomationActionType, ActionName> = {
   integration_call: 'create',
   ai_decide: 'create',
   require_approval: 'approve',
+  record_payment: 'edit',
+  cancel_contract: 'edit',
+  search_units: 'view',
+  score_lead: 'view',
+  compare_payment_plans: 'create',
+  get_delivery_status: 'view',
+  recall_memory: 'view',
+  search_projects: 'view',
+  get_project_details: 'view',
+  get_project_payment_plans: 'view',
+  get_developer_portfolio: 'view',
+  get_project_facilities: 'view',
+  get_project_location: 'view',
 };
 
 /**
@@ -247,6 +305,17 @@ export class AutomationService {
   // the workflow continues (e.g. a guaranteed follow-up task) regardless of
   // what the agent chose.
   private aiDecider?: (companyId: string, agentKey: string, subjectId: string, requestedByUserId: string) => Promise<AgentDecision>;
+  // Same late-binding, same reason: CommunicationDeliveryService/
+  // IntegrationService are themselves built on top of AutomationService
+  // (encrypted secret storage), so a constructor-level dependency back
+  // onto them here would be circular.
+  private deliveryStatusGetter?: (companyId: string, relatedResourceId: string) => Promise<CommunicationDeliveryEvent | undefined>;
+  // Late-bound for consistency with the other AI-tool executors above, even
+  // though AiMemoryService has no reverse dependency on AutomationService —
+  // keeping every AI-callable capability wired the same way (a setter called
+  // once in app.ts) rather than mixing constructor- and setter-injected
+  // dependencies for the same class of thing.
+  private memoryRecaller?: (companyId: string, filter: Record<string, unknown>) => Promise<AiMemory[]>;
 
   constructor(
     private readonly repos: AutomationRepos,
@@ -254,7 +323,14 @@ export class AutomationService {
     private readonly tasks: TaskService,
     private readonly communication: CommunicationService,
     private readonly crm: CrmService,
+    private readonly crmStages: CrmStageService,
     private readonly marketing: MarketingService,
+    private readonly finance: FinanceService,
+    private readonly sales: SalesService,
+    private readonly inventory: InventoryService,
+    private readonly leadScoring: LeadScoringService,
+    private readonly quotations: QuotationService,
+    private readonly paymentPlans: PaymentPlansService,
     private readonly auditLog: AuditLog,
     private readonly encryptionSecret: string,
     private readonly fetchImpl: typeof fetch = fetch,
@@ -281,6 +357,20 @@ export class AutomationService {
    * late-bound rather than a constructor dependency. */
   setAiDecider(decider: (companyId: string, agentKey: string, subjectId: string, requestedByUserId: string) => Promise<AgentDecision>): void {
     this.aiDecider = decider;
+  }
+
+  /** Wires IntegrationService's real delivery-status lookup in as the
+   * executor for the `get_delivery_status` tool — see the field comment
+   * above for why this is late-bound rather than a constructor
+   * dependency. */
+  setDeliveryStatusGetter(getter: (companyId: string, relatedResourceId: string) => Promise<CommunicationDeliveryEvent | undefined>): void {
+    this.deliveryStatusGetter = getter;
+  }
+
+  /** Wires AiMemoryService's recall() in as the executor for the
+   * `recall_memory` tool — read-only, see the field comment above. */
+  setMemoryRecaller(recaller: (companyId: string, filter: Record<string, unknown>) => Promise<AiMemory[]>): void {
+    this.memoryRecaller = recaller;
   }
 
   // ---- Workflow CRUD ----
@@ -346,6 +436,33 @@ export class AutomationService {
 
   listTemplates(): WorkflowTemplate[] {
     return WORKFLOW_TEMPLATES;
+  }
+
+  /**
+   * Event-to-AI activation control (company + workflow level — see the
+   * class-level rule this deployment follows: no template, however "safe",
+   * is ever auto-activated globally; a company always opts in explicitly,
+   * one template at a time). Instantiates a real, standard WorkflowDefinition
+   * from a built-in template — the exact same createWorkflow() a human
+   * manually reconstructing the template's trigger/steps would call, just
+   * without requiring them to copy every field by hand. The resulting
+   * workflow is ordinary in every way afterward: it can be paused/archived
+   * like any other, and any ai_decide step inside it still goes through
+   * the full permission/policy/approval pipeline for every action it
+   * proposes — activation only creates the workflow, it never grants any
+   * autonomy beyond what the company's own AiPolicy rows already allow.
+   */
+  async activateTemplate(templateKey: string, companyId: string, createdByUserId: string): Promise<WorkflowDefinition> {
+    const template = WORKFLOW_TEMPLATES.find((t) => t.key === templateKey);
+    if (!template) throw new NotFoundError(`no workflow template with key "${templateKey}"`);
+    return this.createWorkflow({
+      companyId,
+      name: template.name,
+      description: template.description,
+      trigger: template.trigger,
+      steps: template.steps,
+      createdByUserId,
+    });
   }
 
   private validateTrigger(trigger: WorkflowTriggerConfig): void {
@@ -837,9 +954,20 @@ export class AutomationService {
         const lead = await this.crm.getLead(leadId);
         if (!lead || lead.companyId !== companyId) throw new AutomationError('lead not found for this company', 404);
         await this.requirePermission(actorUserId, action, companyId, lead.ownerEmployeeUserId);
-        const status = this.requireString(params.status, 'status') as LeadStatus;
-        const updated = await this.crm.updateStatus(leadId, status, this.optionalString(params.lostReason));
-        return { leadId: updated.id, status: updated.status };
+        // Prefers a real stageId; falls back to mapping a legacy literal
+        // status string (from a workflow/AiPolicy row created before the
+        // CrmStage engine existed) to the matching default stage's id.
+        let stageId = this.optionalString(params.stageId);
+        if (!stageId) {
+          const legacyStatus = this.optionalString(params.status);
+          const stageKey = legacyStatus ? LEGACY_STATUS_TO_STAGE_KEY[legacyStatus] : undefined;
+          if (!stageKey) throw new ValidationError('"stageId" (or a recognized legacy "status") is required');
+          const stages = await this.crmStages.listStages(companyId, true);
+          stageId = stages.find((s) => s.key === stageKey)?.id;
+          if (!stageId) throw new AutomationError(`no CRM stage found for legacy status "${legacyStatus}"`, 404);
+        }
+        const updated = await this.crm.moveToStage(leadId, companyId, stageId, this.optionalString(params.lostReason));
+        return { leadId: updated.id, stageId: updated.stageId };
       }
       case 'assign_lead_owner': {
         const leadId = this.requireString(params.leadId, 'leadId');
@@ -858,6 +986,170 @@ export class AutomationService {
         const status = this.requireString(params.status, 'status') as CampaignStatus;
         const updated = await this.marketing.updateStatus(campaignId, companyId, status);
         return { campaignId: updated.id, status: updated.status };
+      }
+      case 'record_payment': {
+        const contractId = this.requireString(params.contractId, 'contractId');
+        const contract = await this.sales.getContract(contractId);
+        if (!contract || contract.companyId !== companyId) throw new AutomationError('contract not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, contract.creditedEmployeeUserId);
+        const paymentScheduleLineId = this.requireString(params.paymentScheduleLineId, 'paymentScheduleLineId');
+        const amount = params.amount;
+        if (typeof amount !== 'number' || amount <= 0) throw new ValidationError('"amount" must be a positive number');
+        const method = this.requireString(params.method, 'method') as PaymentMethod;
+        const result = await this.finance.recordPayment({ companyId, contractId, paymentScheduleLineId, amount, method, recordedByUserId: actorUserId });
+        return { paymentId: result.payment.id, lineId: result.line.id, lineStatus: result.line.status };
+      }
+      case 'cancel_contract': {
+        const contractId = this.requireString(params.contractId, 'contractId');
+        const contract = await this.sales.getContract(contractId);
+        if (!contract || contract.companyId !== companyId) throw new AutomationError('contract not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, contract.creditedEmployeeUserId);
+        const cancelled = await this.sales.cancelContract(contractId, companyId);
+        return { contractId: cancelled.id, status: cancelled.status };
+      }
+      case 'search_units': {
+        await this.requirePermission(actorUserId, action, companyId);
+        // Delegates to InventoryService.searchUnits — the same real,
+        // server-side filter chain the /api/inventory/units route now
+        // uses, so a human's search and the AI's search can never quietly
+        // diverge into two different result sets for the same query.
+        const units = await this.inventory.searchUnits(companyId, {
+          projectId: this.optionalString(params.projectId),
+          phaseId: this.optionalString(params.phaseId),
+          unitType: this.optionalString(params.unitType),
+          status: (this.optionalString(params.status) as 'available' | 'held' | 'reserved' | 'contracted' | 'cancelled' | 'any' | undefined) ?? 'available',
+          minPrice: typeof params.minPrice === 'number' ? params.minPrice : undefined,
+          maxPrice: typeof params.maxPrice === 'number' ? params.maxPrice : undefined,
+          minAreaSqm: typeof params.minAreaSqm === 'number' ? params.minAreaSqm : undefined,
+          maxAreaSqm: typeof params.maxAreaSqm === 'number' ? params.maxAreaSqm : undefined,
+          minGardenAreaSqm: typeof params.minGardenAreaSqm === 'number' ? params.minGardenAreaSqm : undefined,
+          maxGardenAreaSqm: typeof params.maxGardenAreaSqm === 'number' ? params.maxGardenAreaSqm : undefined,
+          bedrooms: typeof params.bedrooms === 'number' ? params.bedrooms : undefined,
+          minBedrooms: typeof params.minBedrooms === 'number' ? params.minBedrooms : undefined,
+          maxBedrooms: typeof params.maxBedrooms === 'number' ? params.maxBedrooms : undefined,
+          finishingType: this.optionalString(params.finishingType),
+          view: this.optionalString(params.view),
+          floorLabel: this.optionalString(params.floorLabel),
+          designType: this.optionalString(params.designType),
+          destination: this.optionalString(params.destination),
+          developerId: this.optionalString(params.developerId),
+          q: this.optionalString(params.q),
+          limit: typeof params.limit === 'number' ? params.limit : 20,
+        });
+        return { units, matchCount: units.length };
+      }
+      case 'search_projects': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projects = await this.inventory.searchProjects(companyId, {
+          destination: this.optionalString(params.destination),
+          developerId: this.optionalString(params.developerId),
+          minPriceFrom: typeof params.minPriceFrom === 'number' ? params.minPriceFrom : undefined,
+          maxPriceTo: typeof params.maxPriceTo === 'number' ? params.maxPriceTo : undefined,
+          unitType: this.optionalString(params.unitType),
+          q: this.optionalString(params.q),
+          limit: typeof params.limit === 'number' ? params.limit : 20,
+        });
+        return { projects, matchCount: projects.length };
+      }
+      case 'get_project_details': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        return { ...(await this.inventory.getProjectFullDetails(projectId, companyId)) };
+      }
+      case 'get_project_payment_plans': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        const project = await this.inventory.getProject(projectId);
+        if (!project || project.companyId !== companyId) throw new AutomationError('project not found for this company', 404);
+        const templates = (await this.paymentPlans.listTemplates(companyId)).filter((t) => !t.projectId || t.projectId === projectId);
+        return { projectId, templates };
+      }
+      case 'get_developer_portfolio': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const developerId = this.requireString(params.developerId, 'developerId');
+        const developer = await this.inventory.getDeveloper(developerId);
+        if (!developer || developer.companyId !== companyId) throw new AutomationError('developer not found for this company', 404);
+        const projects = await this.inventory.getDeveloperPortfolio(developerId, companyId);
+        return { developer, projects };
+      }
+      case 'get_project_facilities': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        return { projectId, facilities: await this.inventory.getProjectFacilities(projectId, companyId) };
+      }
+      case 'get_project_location': {
+        await this.requirePermission(actorUserId, action, companyId);
+        const projectId = this.requireString(params.projectId, 'projectId');
+        const project = await this.inventory.getProject(projectId);
+        if (!project || project.companyId !== companyId) throw new AutomationError('project not found for this company', 404);
+        return {
+          projectId,
+          location: project.location,
+          address: project.address,
+          locationLat: project.locationLat,
+          locationLng: project.locationLng,
+          locationMapUrl: project.locationMapUrl,
+          destination: project.destination,
+        };
+      }
+      case 'score_lead': {
+        const leadId = this.requireString(params.leadId, 'leadId');
+        const lead = await this.crm.getLead(leadId);
+        if (!lead || lead.companyId !== companyId) throw new AutomationError('lead not found for this company', 404);
+        await this.requirePermission(actorUserId, action, companyId, lead.ownerEmployeeUserId);
+        return { ...(await this.leadScoring.scoreLead(leadId, companyId)) };
+      }
+      case 'compare_payment_plans': {
+        await this.requirePermission(actorUserId, action, companyId, actorUserId);
+        const unitId = this.requireString(params.unitId, 'unitId');
+        const unit = await this.inventory.getUnit(unitId);
+        if (!unit || unit.companyId !== companyId) throw new AutomationError('unit not found for this company', 404);
+        const discountPercent = typeof params.discountPercent === 'number' ? params.discountPercent : undefined;
+        const escalationPercentPerYear = typeof params.escalationPercentPerYear === 'number' ? params.escalationPercentPerYear : undefined;
+        const requestedTemplateIds = Array.isArray(params.templateIds) ? (params.templateIds as unknown[]).filter((v): v is string => typeof v === 'string') : undefined;
+        const allTemplates = await this.paymentPlans.listTemplates(companyId);
+        const candidateTemplates = (requestedTemplateIds?.length
+          ? allTemplates.filter((t) => requestedTemplateIds.includes(t.id))
+          : allTemplates.filter((t) => !t.projectId || t.projectId === unit.projectId)
+        ).slice(0, 10);
+        if (candidateTemplates.length === 0) throw new AutomationError('no payment plan templates available to compare for this unit', 404);
+        const comparisons: Record<string, unknown>[] = [];
+        for (const template of candidateTemplates) {
+          try {
+            const calc = await this.quotations.calculate(companyId, { unitId, paymentPlanTemplateId: template.id, discountPercent, escalationPercentPerYear });
+            comparisons.push({
+              templateId: template.id,
+              templateName: template.name,
+              termMonths: template.termMonths,
+              frequency: template.frequency,
+              downPayment: calc.downPayment,
+              netValue: calc.netValue,
+              installmentCount: calc.schedule.length,
+            });
+          } catch (err) {
+            comparisons.push({ templateId: template.id, templateName: template.name, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        return { unitId, comparisons };
+      }
+      case 'get_delivery_status': {
+        await this.requirePermission(actorUserId, action, companyId);
+        if (!this.deliveryStatusGetter) throw new AutomationError('no delivery-status getter is configured for this deployment');
+        const relatedResourceId = this.requireString(params.relatedResourceId ?? params.leadId, 'relatedResourceId');
+        const latest = await this.deliveryStatusGetter(companyId, relatedResourceId);
+        return latest ? { ...latest } : { status: 'unknown', detail: 'no outbound message has been sent to this resource yet' };
+      }
+      case 'recall_memory': {
+        await this.requirePermission(actorUserId, action, companyId);
+        if (!this.memoryRecaller) throw new AutomationError('no memory recaller is configured for this deployment');
+        const filter = {
+          category: this.optionalString(params.category),
+          subjectType: this.optionalString(params.subjectType),
+          subjectId: this.optionalString(params.subjectId),
+          query: this.optionalString(params.query),
+        };
+        const memories = await this.memoryRecaller(companyId, filter);
+        return { memories };
       }
       case 'webhook_call': {
         await this.requirePermission(actorUserId, action, companyId);

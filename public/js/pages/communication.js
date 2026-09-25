@@ -1,9 +1,14 @@
-import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, loadingState, selectInput, paginationControls, searchInput } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderCommunication(container) {
   clear(container);
-  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, 'Communication')));
+  const locale = getLocale();
+  let offset = 0;
+  let q = '';
+  container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_communication'))));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
   container.appendChild(el('p', { style: 'color:var(--text-muted);font-size:12.5px;margin-top:-8px' },
@@ -52,6 +57,9 @@ export async function renderCommunication(container) {
     el('div', { class: 'form-actions' }, [sendBtn]),
   ]));
 
+  const search = searchInput('Search by subject…', (value) => { q = value; offset = 0; load(); });
+  container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
+
   const listSlot = el('div');
   container.appendChild(listSlot);
 
@@ -59,7 +67,7 @@ export async function renderCommunication(container) {
     clear(listSlot);
     listSlot.appendChild(loadingState());
     try {
-      const page = await api.get('/api/communication/my-messages', { limit: 50 });
+      const page = await api.get('/api/communication/my-messages', { limit: 20, offset, q });
       clear(listSlot);
       listSlot.appendChild(table(
         [
@@ -73,6 +81,7 @@ export async function renderCommunication(container) {
         page.items,
         { empty: 'No messages yet — send one above.' },
       ));
+      listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));
     }

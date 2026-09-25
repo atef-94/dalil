@@ -12,6 +12,7 @@ async function main(): Promise<void> {
   const tokenSecret = process.env.TOKEN_SECRET ?? 'dev-secret';
   const secretStoreKey = process.env.SECRET_STORE_KEY ?? tokenSecret;
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const trustProxy = process.env.TRUST_PROXY === 'true';
 
   const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
     automationRetryBaseDelayMs: process.env.AUTOMATION_RETRY_BASE_DELAY_MS ? Number(process.env.AUTOMATION_RETRY_BASE_DELAY_MS) : 300,
     automationMaxConcurrentRuns: process.env.AUTOMATION_MAX_CONCURRENT_RUNS ? Number(process.env.AUTOMATION_MAX_CONCURRENT_RUNS) : undefined,
+    trustProxy,
   });
 
   // Crash recovery: any WorkflowRun left `running` in storage is one that
@@ -50,6 +52,14 @@ async function main(): Promise<void> {
   }, 60_000);
   sweepInterval.unref();
 
+  // Lead Distribution + SLA: auto-reassigns any lead still sitting in
+  // 'new' past its first-contact deadline, on the same 60s cadence as the
+  // payment-overdue sweep above.
+  const slaSweepInterval = setInterval(() => {
+    void services.sweepSlaBreachesAndEmit();
+  }, 60_000);
+  slaSweepInterval.unref();
+
   // Scheduled/recurring workflow trigger tick — checks every minute for any
   // active `scheduled` workflow whose interval has elapsed (each workflow
   // tracks its own lastScheduledRunAt, so this can run as often as we like
@@ -59,13 +69,41 @@ async function main(): Promise<void> {
   }, 60_000);
   scheduledWorkflowInterval.unref();
 
+  // AI Workflow Engine: resumes any run paused in `waiting` (e.g. waiting
+  // for a customer reply) whose resumeAt has elapsed — same 60s cadence as
+  // the other ticks above. See AiWorkflowService.sweepDueWaitingRuns.
+  const aiWorkflowSweepInterval = setInterval(() => {
+    void services.aiWorkflow.sweepDueWaitingRuns();
+  }, 60_000);
+  aiWorkflowSweepInterval.unref();
+
+  // Inventory: releases any Reservation left past its expiresAt (never
+  // converted to a contract) back onto the market, same 60s cadence as the
+  // other ticks above. See InventoryService.sweepExpiredReservationsDetailed.
+  const reservationSweepInterval = setInterval(() => {
+    void services.sweepExpiredReservationsAndEmit();
+  }, 60_000);
+  reservationSweepInterval.unref();
+
+  // AI Memory: marks expired-but-not-yet-invalidated memories invalidated
+  // (recall() already excludes them — this is retention hygiene, not a
+  // correctness requirement), same 60s cadence as the other ticks above.
+  const memorySweepInterval = setInterval(() => {
+    void services.aiMemory.sweepExpiredMemories();
+  }, 60_000);
+  memorySweepInterval.unref();
+
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     process.stdout.write(`received ${signal}, shutting down gracefully\n`);
     clearInterval(sweepInterval);
+    clearInterval(slaSweepInterval);
     clearInterval(scheduledWorkflowInterval);
+    clearInterval(aiWorkflowSweepInterval);
+    clearInterval(reservationSweepInterval);
+    clearInterval(memorySweepInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');
       process.exit(1);
