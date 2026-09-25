@@ -5,6 +5,7 @@ import { ValidationError, ConflictError, NotFoundError } from '../../infra/error
 import type { ListScope } from '../permissions/rbac.evaluator.js';
 import { filterByListScope, type ScopeOwnerKeys } from '../permissions/scope-filter.js';
 import type { CrmStageService } from './crm-stage.service.js';
+import { KeyedMutex } from '../../infra/keyed-mutex.js';
 
 export interface LeadCustomFields {
   propertyTypeWanted?: string;
@@ -85,6 +86,8 @@ export const LEGACY_STATUS_TO_STAGE_KEY: Record<string, string> = {
 };
 
 export class CrmService {
+  private readonly mutex = new KeyedMutex();
+
   constructor(
     private readonly leads: Repository<Lead>,
     private readonly crmStages: CrmStageService,
@@ -126,48 +129,57 @@ export class CrmService {
     );
   }
 
+  /** Locked on the company (not on a per-field key, since the duplicate
+   * check itself matches on any of phone/email/nationalId — see
+   * findDuplicate) so two concurrent createLead calls for the same
+   * company can never both pass the dedup check before either one has
+   * written its row. Lead creation isn't hot enough for per-company
+   * serialization to matter; correctness here matters more than
+   * throughput. */
   async createLead(input: CreateLeadInput): Promise<Lead> {
     if (!input.fullName?.trim()) throw new ValidationError('fullName is required');
     if (!input.phone?.trim()) throw new ValidationError('phone is required');
 
-    const nationalId = sanitizeString(input.nationalId);
-    const duplicate = await this.findDuplicate(input.companyId, input.phone.trim(), input.email?.trim(), nationalId);
-    if (duplicate) {
-      throw new ConflictError('a lead with this phone, email, or national ID already exists');
-    }
+    return this.mutex.runExclusive(input.companyId, async () => {
+      const nationalId = sanitizeString(input.nationalId);
+      const duplicate = await this.findDuplicate(input.companyId, input.phone.trim(), input.email?.trim(), nationalId);
+      if (duplicate) {
+        throw new ConflictError('a lead with this phone, email, or national ID already exists');
+      }
 
-    let stageId = input.stageId;
-    if (stageId) {
-      const stage = await this.crmStages.getStage(stageId, input.companyId);
-      if (!stage.isActive) throw new ValidationError('cannot create a lead directly in an archived CRM stage');
-    } else {
-      stageId = (await this.crmStages.getDefaultStage(input.companyId)).id;
-    }
+      let stageId = input.stageId;
+      if (stageId) {
+        const stage = await this.crmStages.getStage(stageId, input.companyId);
+        if (!stage.isActive) throw new ValidationError('cannot create a lead directly in an archived CRM stage');
+      } else {
+        stageId = (await this.crmStages.getDefaultStage(input.companyId)).id;
+      }
 
-    const lead: Lead = {
-      id: randomUUID(),
-      companyId: input.companyId,
-      fullName: input.fullName.trim(),
-      phone: input.phone.trim(),
-      email: input.email?.trim(),
-      nationalId,
-      sourceId: input.sourceId,
-      stageId,
-      tags: input.tags?.map((t) => t.trim()).filter(Boolean),
-      priority: input.priority,
-      ownerEmployeeUserId: input.ownerEmployeeUserId,
-      // Captured once and never changed afterward — see
-      // resolveCommissionOwner(), which uses this to keep commission
-      // credit with whoever established first contact for 60 days, even
-      // through a later reassignment (SLA auto-reassignment, a manual
-      // reassign, etc).
-      originalOwnerEmployeeUserId: input.ownerEmployeeUserId,
-      createdAt: new Date().toISOString(),
-      requiredSkill: input.requiredSkill?.trim() || undefined,
-      firstContactSlaDueAt: input.firstContactSlaDueAt,
-      ...sanitizeCustomFields(input),
-    };
-    return this.leads.save(lead);
+      const lead: Lead = {
+        id: randomUUID(),
+        companyId: input.companyId,
+        fullName: input.fullName.trim(),
+        phone: input.phone.trim(),
+        email: input.email?.trim(),
+        nationalId,
+        sourceId: input.sourceId,
+        stageId,
+        tags: input.tags?.map((t) => t.trim()).filter(Boolean),
+        priority: input.priority,
+        ownerEmployeeUserId: input.ownerEmployeeUserId,
+        // Captured once and never changed afterward — see
+        // resolveCommissionOwner(), which uses this to keep commission
+        // credit with whoever established first contact for 60 days, even
+        // through a later reassignment (SLA auto-reassignment, a manual
+        // reassign, etc).
+        originalOwnerEmployeeUserId: input.ownerEmployeeUserId,
+        createdAt: new Date().toISOString(),
+        requiredSkill: input.requiredSkill?.trim() || undefined,
+        firstContactSlaDueAt: input.firstContactSlaDueAt,
+        ...sanitizeCustomFields(input),
+      };
+      return this.leads.save(lead);
+    });
   }
 
   /** The lead-ownership protection law: for 60 days from first contact,
@@ -189,23 +201,26 @@ export class CrmService {
   }
 
   /** Merges in whatever custom fields the caller passes — a real estate
-   * agent fills these in progressively, not all at once at creation. */
+   * agent fills these in progressively, not all at once at creation.
+   * Locked on leadId — same lost-update race as moveToStage. */
   async updateCustomFields(leadId: string, companyId: string, input: LeadCustomFields): Promise<Lead> {
-    const lead = await this.leads.findById(leadId);
-    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
-    const sanitized = sanitizeCustomFields({
-      minAreaSqm: input.minAreaSqm ?? lead.minAreaSqm,
-      maxAreaSqm: input.maxAreaSqm ?? lead.maxAreaSqm,
-      maxDownPayment: input.maxDownPayment ?? lead.maxDownPayment,
-      maxInstallment: input.maxInstallment ?? lead.maxInstallment,
-      preferredTenorMonths: input.preferredTenorMonths ?? lead.preferredTenorMonths,
-      propertyTypeWanted: input.propertyTypeWanted ?? lead.propertyTypeWanted,
-      purchaseGoal: input.purchaseGoal ?? lead.purchaseGoal,
-      preferredLocation: input.preferredLocation ?? lead.preferredLocation,
-      expectedDeliveryTimeline: input.expectedDeliveryTimeline ?? lead.expectedDeliveryTimeline,
-      preferredTransferMethod: input.preferredTransferMethod ?? lead.preferredTransferMethod,
+    return this.mutex.runExclusive(leadId, async () => {
+      const lead = await this.leads.findById(leadId);
+      if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
+      const sanitized = sanitizeCustomFields({
+        minAreaSqm: input.minAreaSqm ?? lead.minAreaSqm,
+        maxAreaSqm: input.maxAreaSqm ?? lead.maxAreaSqm,
+        maxDownPayment: input.maxDownPayment ?? lead.maxDownPayment,
+        maxInstallment: input.maxInstallment ?? lead.maxInstallment,
+        preferredTenorMonths: input.preferredTenorMonths ?? lead.preferredTenorMonths,
+        propertyTypeWanted: input.propertyTypeWanted ?? lead.propertyTypeWanted,
+        purchaseGoal: input.purchaseGoal ?? lead.purchaseGoal,
+        preferredLocation: input.preferredLocation ?? lead.preferredLocation,
+        expectedDeliveryTimeline: input.expectedDeliveryTimeline ?? lead.expectedDeliveryTimeline,
+        preferredTransferMethod: input.preferredTransferMethod ?? lead.preferredTransferMethod,
+      });
+      return this.leads.save({ ...lead, ...sanitized });
     });
-    return this.leads.save({ ...lead, ...sanitized });
   }
 
   async getLead(id: string): Promise<Lead | undefined> {
@@ -226,38 +241,52 @@ export class CrmService {
    * reason, and once a lead sits in an isLost stage it can only be moved
    * out again by an explicit call (never silently blocked, unlike the old
    * hard lock — a rep who mis-marked a lead lost can fix it). */
+  /** Locked on leadId — without this, two concurrent moves of the same
+   * lead (e.g. a manual move racing the SLA sweep's auto-reassignment, or
+   * two reps clicking "move" at once) could both read the same
+   * pre-move `lead`, and whichever save() lands second would silently
+   * overwrite the first's stageId/lostReason (a lost update). */
   async moveToStage(leadId: string, companyId: string, stageId: string, lostReason?: string): Promise<Lead> {
-    const lead = await this.leads.findById(leadId);
-    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
+    return this.mutex.runExclusive(leadId, async () => {
+      const lead = await this.leads.findById(leadId);
+      if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
 
-    const stage = await this.crmStages.getStage(stageId, companyId);
-    if (!stage.isActive) throw new ValidationError('cannot move a lead into an archived CRM stage');
+      const stage = await this.crmStages.getStage(stageId, companyId);
+      if (!stage.isActive) throw new ValidationError('cannot move a lead into an archived CRM stage');
 
-    if (stage.isLost && !lostReason?.trim()) {
-      throw new ValidationError('lostReason is required when moving a lead into a Lost-flagged stage');
-    }
+      if (stage.isLost && !lostReason?.trim()) {
+        throw new ValidationError('lostReason is required when moving a lead into a Lost-flagged stage');
+      }
 
-    const updated: Lead = {
-      ...lead,
-      stageId: stage.id,
-      lostReason: stage.isLost ? lostReason!.trim() : lead.lostReason,
-    };
-    return this.leads.save(updated);
+      const updated: Lead = {
+        ...lead,
+        stageId: stage.id,
+        lostReason: stage.isLost ? lostReason!.trim() : lead.lostReason,
+      };
+      return this.leads.save(updated);
+    });
   }
 
+  /** Locked on leadId — same lost-update race as moveToStage (e.g. this
+   * racing the SLA sweep's own assignOwner call for the same lead). */
   async assignOwner(leadId: string, companyId: string, ownerEmployeeUserId: string): Promise<Lead> {
-    const lead = await this.leads.findById(leadId);
-    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
-    return this.leads.save({ ...lead, ownerEmployeeUserId });
+    return this.mutex.runExclusive(leadId, async () => {
+      const lead = await this.leads.findById(leadId);
+      if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
+      return this.leads.save({ ...lead, ownerEmployeeUserId });
+    });
   }
 
+  /** Locked on leadId — same lost-update race as moveToStage. */
   async updateTagsAndPriority(leadId: string, companyId: string, patch: { tags?: string[]; priority?: Lead['priority'] }): Promise<Lead> {
-    const lead = await this.leads.findById(leadId);
-    if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
-    return this.leads.save({
-      ...lead,
-      tags: patch.tags !== undefined ? patch.tags.map((t) => t.trim()).filter(Boolean) : lead.tags,
-      priority: patch.priority !== undefined ? patch.priority : lead.priority,
+    return this.mutex.runExclusive(leadId, async () => {
+      const lead = await this.leads.findById(leadId);
+      if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
+      return this.leads.save({
+        ...lead,
+        tags: patch.tags !== undefined ? patch.tags.map((t) => t.trim()).filter(Boolean) : lead.tags,
+        priority: patch.priority !== undefined ? patch.priority : lead.priority,
+      });
     });
   }
 }

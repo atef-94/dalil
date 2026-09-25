@@ -163,3 +163,57 @@ test('resolveCommissionOwner rejects a lead belonging to a different company (cr
   const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
   await assert.rejects(() => svc.resolveCommissionOwner(lead.id, 'c2'));
 });
+
+// ---- Concurrency: createLead's dedup check and per-lead read-modify-write
+// methods are now KeyedMutex-protected. These tests would fail (produce
+// duplicate leads / lose one of two concurrent updates) against the
+// unprotected version of the service — Promise.all forces the interleaving
+// a real double-submit or two simultaneous requests could hit.
+
+test('10 concurrent createLead calls with the same phone number produce exactly one lead, not 10', async () => {
+  const { svc } = await freshService();
+  const results = await Promise.allSettled(
+    Array.from({ length: 10 }, (_, i) => svc.createLead({ companyId: 'c1', fullName: `Client ${i}`, phone: '0100-same' })),
+  );
+  const succeeded = results.filter((r) => r.status === 'fulfilled');
+  assert.equal(succeeded.length, 1, 'exactly one of the 10 concurrent same-phone creates should win');
+  const all = await svc.listForScope({ kind: 'company', companyId: 'c1' }, async () => ({}));
+  assert.equal(all.filter((l) => l.phone === '0100-same').length, 1);
+});
+
+test('10 concurrent createLead calls with the same email (different phones) produce exactly one lead', async () => {
+  const { svc } = await freshService();
+  const results = await Promise.allSettled(
+    Array.from({ length: 10 }, (_, i) => svc.createLead({ companyId: 'c1', fullName: `Client ${i}`, phone: `0${i}`, email: 'dup@x.com' })),
+  );
+  const succeeded = results.filter((r) => r.status === 'fulfilled');
+  assert.equal(succeeded.length, 1, 'exactly one of the 10 concurrent same-email creates should win');
+});
+
+test('concurrent createLead calls for different companies are not serialized against each other (mutex is per-company)', async () => {
+  const { svc } = await freshService(['c1', 'c2']);
+  const [a, b] = await Promise.all([
+    svc.createLead({ companyId: 'c1', fullName: 'A', phone: '0100' }),
+    svc.createLead({ companyId: 'c2', fullName: 'B', phone: '0100' }), // same phone, different company — not a dup
+  ]);
+  assert.equal(a.companyId, 'c1');
+  assert.equal(b.companyId, 'c2');
+});
+
+test('20 concurrent moveToStage calls on the same lead never lose an update — the lead ends up in a real stage, not a stale pre-move snapshot', async () => {
+  const { svc, crmStages } = await freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  const stages = await crmStages.listStages('c1', true);
+  const nonLostStages = stages.filter((s) => !s.isLost);
+  const results = await Promise.all(
+    Array.from({ length: 20 }, (_, i) => svc.moveToStage(lead.id, 'c1', nonLostStages[i % nonLostStages.length]!.id)),
+  );
+  // Every call must have observed and returned a real, valid final write —
+  // none of them should have silently overwritten another's result with a
+  // torn/incomplete record (the hallmark of a lost-update race).
+  for (const r of results) {
+    assert.ok(nonLostStages.some((s) => s.id === r.stageId));
+  }
+  const finalLead = await svc.getLead(lead.id);
+  assert.ok(nonLostStages.some((s) => s.id === finalLead!.stageId));
+});

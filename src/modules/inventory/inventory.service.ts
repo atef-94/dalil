@@ -6,6 +6,7 @@ import type {
   Developer,
   Facility,
   Launch,
+  MasterPlanPosition,
   Project,
   ProjectPhase,
   Reservation,
@@ -35,6 +36,8 @@ export interface CreateUnitInput {
   finishingType?: string;
   delivery?: DeliveryInfo;
   pricePerMeterOverride?: number;
+  floorPlanImageUrl?: string;
+  masterPlanPosition?: MasterPlanPosition;
 }
 
 /** Fields updateUnitDetails() is allowed to touch — deliberately the same
@@ -56,6 +59,8 @@ export type UpdateUnitDetailsInput = Partial<
     | 'finishingType'
     | 'delivery'
     | 'pricePerMeterOverride'
+    | 'floorPlanImageUrl'
+    | 'masterPlanPosition'
   >
 >;
 
@@ -99,6 +104,8 @@ export interface CreateProjectInput {
   cashDiscountEffectiveDate?: string;
   maintenanceFeePercent?: number;
   maintenanceFeeAmount?: number;
+  imageUrls?: string[];
+  masterPlanImageUrl?: string;
 }
 
 /** Every field is optional and only ever overwrites what's explicitly
@@ -230,6 +237,8 @@ export class InventoryService {
     if (input.cashDiscountEffectiveDate !== undefined) out.cashDiscountEffectiveDate = input.cashDiscountEffectiveDate;
     if (input.maintenanceFeePercent !== undefined) out.maintenanceFeePercent = this.percentInRange(input.maintenanceFeePercent, 'maintenanceFeePercent');
     if (input.maintenanceFeeAmount !== undefined) out.maintenanceFeeAmount = this.nonNegative(input.maintenanceFeeAmount, 'maintenanceFeeAmount');
+    if (input.imageUrls !== undefined) out.imageUrls = input.imageUrls.length ? input.imageUrls : undefined;
+    if (input.masterPlanImageUrl !== undefined) out.masterPlanImageUrl = input.masterPlanImageUrl?.trim() || undefined;
     return out;
   }
 
@@ -295,6 +304,7 @@ export class InventoryService {
     if (!(input.listPrice > 0)) throw new ValidationError('listPrice must be positive');
     if (input.bedrooms !== undefined && !(input.bedrooms >= 0)) throw new ValidationError('bedrooms must be >= 0');
     if (input.gardenAreaSqm !== undefined && !(input.gardenAreaSqm >= 0)) throw new ValidationError('gardenAreaSqm must be >= 0');
+    const masterPlanPosition = this.sanitizeMasterPlanPosition(input.masterPlanPosition);
 
     const existing = await this.units.findAll((u) => u.companyId === input.companyId && u.code === input.code.trim());
     if (existing.length > 0) {
@@ -320,9 +330,23 @@ export class InventoryService {
       finishingType: input.finishingType?.trim() || undefined,
       delivery: input.delivery,
       pricePerMeterOverride: input.pricePerMeterOverride,
+      floorPlanImageUrl: input.floorPlanImageUrl?.trim() || undefined,
+      masterPlanPosition,
       createdAt: new Date().toISOString(),
     };
     return this.units.save(unit);
+  }
+
+  /** Every coordinate is a percentage (0-100) of the master-plan image's
+   * width/height — see MasterPlanPosition's own doc comment for why. */
+  private sanitizeMasterPlanPosition(pos: MasterPlanPosition | undefined): MasterPlanPosition | undefined {
+    if (pos === undefined) return undefined;
+    for (const [field, value] of Object.entries(pos) as [keyof MasterPlanPosition, number][]) {
+      if (!(typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100)) {
+        throw new ValidationError(`masterPlanPosition.${field} must be a number between 0 and 100`);
+      }
+    }
+    return pos;
   }
 
   async listUnits(companyId: string, projectId?: string): Promise<Unit[]> {
@@ -395,6 +419,7 @@ export class InventoryService {
     if (updates.listPrice !== undefined && !(updates.listPrice > 0)) throw new ValidationError('listPrice must be positive');
     if (updates.bedrooms !== undefined && !(updates.bedrooms >= 0)) throw new ValidationError('bedrooms must be >= 0');
     if (updates.gardenAreaSqm !== undefined && !(updates.gardenAreaSqm >= 0)) throw new ValidationError('gardenAreaSqm must be >= 0');
+    const masterPlanPosition = updates.masterPlanPosition !== undefined ? this.sanitizeMasterPlanPosition(updates.masterPlanPosition) : unit.masterPlanPosition;
     return this.units.save({
       ...unit,
       unitType: updates.unitType?.trim() || unit.unitType,
@@ -408,6 +433,8 @@ export class InventoryService {
       gardenAreaSqm: updates.gardenAreaSqm ?? unit.gardenAreaSqm,
       buildingLabel: updates.buildingLabel !== undefined ? updates.buildingLabel?.trim() || undefined : unit.buildingLabel,
       finishingType: updates.finishingType !== undefined ? updates.finishingType?.trim() || undefined : unit.finishingType,
+      floorPlanImageUrl: updates.floorPlanImageUrl !== undefined ? updates.floorPlanImageUrl?.trim() || undefined : unit.floorPlanImageUrl,
+      masterPlanPosition,
       delivery: updates.delivery ?? unit.delivery,
       pricePerMeterOverride: updates.pricePerMeterOverride ?? unit.pricePerMeterOverride,
     });

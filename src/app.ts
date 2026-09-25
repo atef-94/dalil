@@ -1874,6 +1874,22 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: paginate(filtered, ctx.query) };
   });
 
+  // Manual unit edit route — previously updateUnitDetails() was only ever
+  // reachable through the bulk import pipeline, with no way to correct a
+  // single unit's commercial/descriptive fields (or set its floor-plan
+  // image / master-plan highlight position, both otherwise write-only
+  // dead fields) outside of a full re-import.
+  httpServer.patch('/api/inventory/units/:unitId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {
+      throw new ForbiddenError('missing edit:unit permission');
+    }
+    const body = parseJsonBody<Parameters<typeof inventory.updateUnitDetails>[2]>(ctx.body);
+    const unit = await inventory.updateUnitDetails(ctx.params.unitId!, actor.companyId, body);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'unit', resourceId: unit.id, metadata: { fields: Object.keys(body) } });
+    return { status: 200, body: unit };
+  });
+
   httpServer.post('/api/inventory/units/:unitId/hold', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'edit', 'unit'))) {

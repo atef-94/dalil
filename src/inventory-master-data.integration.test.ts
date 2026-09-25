@@ -168,3 +168,78 @@ test('PATCH /api/inventory/projects/:id is cross-tenant IDOR-safe and non-destru
     assert.equal(otherCompanyPatch.status, 404);
   });
 });
+
+/**
+ * Project.imageUrls/masterPlanImageUrl and Unit.floorPlanImageUrl/
+ * masterPlanPosition were declared in the domain model and read by
+ * offer-pdf.service.ts, but had no write path anywhere (no route, no
+ * import mapping) — confirmed by grepping the codebase for any assignment
+ * to them before this fix. This test proves the round trip now actually
+ * works over real HTTP, and that PATCH /api/inventory/units/:id (which
+ * didn't exist before — updateUnitDetails() was only ever reachable from
+ * the bulk import pipeline) is now a real manual edit route.
+ */
+test('Project image fields and Unit floor-plan/master-plan fields have a real write path via PATCH', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'x-demo-user': ceoUserId };
+
+    const project = await callJson(
+      base,
+      'POST',
+      '/api/inventory/projects',
+      { name: `Media Project ${Date.now()}` },
+      headers,
+    );
+    assert.equal(project.status, 201);
+    const projectId = (project.body as { id: string }).id;
+
+    const projectPatch = await callJson(
+      base,
+      'PATCH',
+      `/api/inventory/projects/${projectId}`,
+      { imageUrls: ['https://cdn.example.com/cover1.jpg', 'https://cdn.example.com/cover2.jpg'], masterPlanImageUrl: 'https://cdn.example.com/masterplan.jpg' },
+      headers,
+    );
+    assert.equal(projectPatch.status, 200);
+    const projectBody = projectPatch.body as { imageUrls?: string[]; masterPlanImageUrl?: string };
+    assert.deepEqual(projectBody.imageUrls, ['https://cdn.example.com/cover1.jpg', 'https://cdn.example.com/cover2.jpg']);
+    assert.equal(projectBody.masterPlanImageUrl, 'https://cdn.example.com/masterplan.jpg');
+
+    const unit = await callJson(
+      base,
+      'POST',
+      '/api/inventory/units',
+      { projectId, code: `MEDIA-U-${Date.now()}`, listPrice: 1_200_000, unitType: 'apartment', areaSqm: 100 },
+      headers,
+    );
+    assert.equal(unit.status, 201);
+    const unitId = (unit.body as { id: string }).id;
+
+    const unitPatch = await callJson(
+      base,
+      'PATCH',
+      `/api/inventory/units/${unitId}`,
+      { floorPlanImageUrl: 'https://cdn.example.com/floorplan.jpg', masterPlanPosition: { x: 12.5, y: 40, width: 8, height: 6 } },
+      headers,
+    );
+    assert.equal(unitPatch.status, 200, JSON.stringify(unitPatch.body));
+    const unitBody = unitPatch.body as { floorPlanImageUrl?: string; masterPlanPosition?: { x: number; y: number; width: number; height: number } };
+    assert.equal(unitBody.floorPlanImageUrl, 'https://cdn.example.com/floorplan.jpg');
+    assert.deepEqual(unitBody.masterPlanPosition, { x: 12.5, y: 40, width: 8, height: 6 });
+
+    // Out-of-range coordinates are rejected, not silently clamped/stored.
+    const invalidPosition = await callJson(
+      base,
+      'PATCH',
+      `/api/inventory/units/${unitId}`,
+      { masterPlanPosition: { x: 150, y: 0, width: 1, height: 1 } },
+      headers,
+    );
+    assert.equal(invalidPosition.status, 400);
+
+    // A non-existent unit id (mirrors the project route's IDOR shape) is a 404, not a 500/silent success.
+    const missingUnit = await callJson(base, 'PATCH', '/api/inventory/units/nonexistent-cross-tenant-id', { floorPlanImageUrl: 'https://x' }, headers);
+    assert.equal(missingUnit.status, 404);
+  });
+});
