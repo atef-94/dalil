@@ -22,7 +22,8 @@ export async function renderScenarioSimulation(container) {
     const templateSelect = selectInput([]);
     const downPaymentType = selectInput([{ value: 'percentage', label: t(locale, 'scenario_down_payment_type_percentage_option') }, { value: 'fixed', label: t(locale, 'scenario_down_payment_type_fixed_option') }]);
     const downPaymentValue = el('input', { type: 'number', placeholder: t(locale, 'scenario_down_payment_value_placeholder') });
-    const frequency = selectInput(['monthly', 'quarterly', 'semiannual', 'annual'].map((f) => ({ value: f, label: f })));
+    const FREQUENCY_LABEL_KEYS = { monthly: 'scenario_frequency_monthly', quarterly: 'scenario_frequency_quarterly', semiannual: 'scenario_frequency_semiannual', annual: 'scenario_frequency_annual' };
+    const frequency = selectInput(['monthly', 'quarterly', 'semiannual', 'annual'].map((f) => ({ value: f, label: t(locale, FREQUENCY_LABEL_KEYS[f]) })));
     const termMonths = el('input', { type: 'number', placeholder: t(locale, 'scenario_term_months_placeholder') });
     const escalationPercentPerYear = el('input', { type: 'number', placeholder: t(locale, 'fin_percent_zero_placeholder') });
 

@@ -168,9 +168,19 @@ export async function renderAi(container) {
     memorySlot.appendChild(el('h3', { style: 'margin-top:0' }, t(locale, 'ai_memory_heading')));
     memorySlot.appendChild(el('p', { class: 'page-subtitle' }, t(locale, 'ai_memory_subtitle')));
 
+    const MEMORY_CATEGORY_LABEL_KEYS = {
+      working: 'ai_memory_category_working',
+      short_term: 'ai_memory_category_short_term',
+      long_term: 'ai_memory_category_long_term',
+      customer: 'ai_memory_category_customer',
+      lead: 'ai_memory_category_lead',
+      agent: 'ai_memory_category_agent',
+      company: 'ai_memory_category_company',
+      workflow: 'ai_memory_category_workflow',
+    };
     const categorySelect = selectInput([
       { value: '', label: t(locale, 'ai_memory_all_categories') },
-      ...['working', 'short_term', 'long_term', 'customer', 'lead', 'agent', 'company', 'workflow'].map((c) => ({ value: c, label: c })),
+      ...['working', 'short_term', 'long_term', 'customer', 'lead', 'agent', 'company', 'workflow'].map((c) => ({ value: c, label: t(locale, MEMORY_CATEGORY_LABEL_KEYS[c]) })),
     ]);
     categorySelect.value = filter.category || '';
     const queryInput = el('input', { type: 'text', placeholder: t(locale, 'ai_memory_search_placeholder'), value: filter.query || '' });

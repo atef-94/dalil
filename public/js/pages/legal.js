@@ -13,7 +13,14 @@ export async function renderLegal(container) {
   container.appendChild(errorSlot);
 
   const contractSelect = selectInput([]);
-  const typeSelect = selectInput(['title_deed', 'power_of_attorney', 'nda', 'id_verification', 'other'].map((t) => ({ value: t, label: t })));
+  const DOC_TYPE_LABEL_KEYS = {
+    title_deed: 'legal_doc_type_title_deed',
+    power_of_attorney: 'legal_doc_type_power_of_attorney',
+    nda: 'legal_doc_type_nda',
+    id_verification: 'legal_doc_type_id_verification',
+    other: 'legal_doc_type_other',
+  };
+  const typeSelect = selectInput(['title_deed', 'power_of_attorney', 'nda', 'id_verification', 'other'].map((dt) => ({ value: dt, label: t(locale, DOC_TYPE_LABEL_KEYS[dt]) })));
   const nameInput = el('input', { type: 'text', placeholder: t(locale, 'legal_name_placeholder') });
   const notesInput = el('input', { type: 'text', placeholder: t(locale, 'legal_notes_placeholder') });
   const addBtn = el('button', { class: 'primary' }, t(locale, 'legal_add_document_btn'));

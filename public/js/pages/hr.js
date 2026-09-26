@@ -12,7 +12,8 @@ export async function renderHr(container) {
   container.appendChild(errorSlot);
 
   const employeeSelect = selectInput([]);
-  const typeSelect = selectInput(['annual', 'sick', 'unpaid', 'other'].map((t) => ({ value: t, label: t })));
+  const LEAVE_TYPE_LABEL_KEYS = { annual: 'hr_leave_type_annual', sick: 'hr_leave_type_sick', unpaid: 'hr_leave_type_unpaid', other: 'hr_leave_type_other' };
+  const typeSelect = selectInput(['annual', 'sick', 'unpaid', 'other'].map((lt) => ({ value: lt, label: t(locale, LEAVE_TYPE_LABEL_KEYS[lt]) })));
   const startInput = el('input', { type: 'date' });
   const endInput = el('input', { type: 'date' });
   const reasonInput = el('input', { type: 'text', placeholder: t(locale, 'hr_reason_placeholder') });

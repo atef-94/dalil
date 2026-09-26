@@ -15,9 +15,8 @@ export async function renderTemplates(container) {
   const nameInput = el('input', { type: 'text', placeholder: t(locale, 'templates_name_placeholder') });
   const dpTypeSelect = selectInput([{ value: 'percentage', label: t(locale, 'scenario_down_payment_type_percentage_option') }, { value: 'fixed', label: t(locale, 'templates_dp_type_fixed_label') }]);
   const dpValueInput = el('input', { type: 'number', placeholder: '10' });
-  // Raw enum-as-label select, deliberately left untranslated — same treatment
-  // as the identical FREQUENCIES list in scenario-simulation.js.
-  const frequencySelect = selectInput(FREQUENCIES.map((f) => ({ value: f, label: f })));
+  const FREQUENCY_LABEL_KEYS = { monthly: 'scenario_frequency_monthly', quarterly: 'scenario_frequency_quarterly', semiannual: 'scenario_frequency_semiannual', annual: 'scenario_frequency_annual', custom: 'templates_frequency_custom' };
+  const frequencySelect = selectInput(FREQUENCIES.map((f) => ({ value: f, label: t(locale, FREQUENCY_LABEL_KEYS[f]) })));
   const termInput = el('input', { type: 'number', placeholder: '60' });
   const createBtn = el('button', { class: 'primary' }, t(locale, 'templates_create_btn'));
 

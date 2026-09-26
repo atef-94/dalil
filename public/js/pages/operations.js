@@ -16,9 +16,8 @@ export async function renderOperations(container) {
 
   const unitSelect = selectInput([]);
   const titleInput = el('input', { type: 'text', placeholder: t(locale, 'operations_ticket_title_placeholder') });
-  // Raw enum-as-label select, deliberately left untranslated — same treatment
-  // as the identical pattern in scenario-simulation.js/finance.js.
-  const prioritySelect = selectInput(['low', 'medium', 'high', 'urgent'].map((p) => ({ value: p, label: p })));
+  const PRIORITY_LABEL_KEYS = { low: 'crm_priority_low', medium: 'crm_priority_medium', high: 'crm_priority_high', urgent: 'crm_priority_urgent' };
+  const prioritySelect = selectInput(['low', 'medium', 'high', 'urgent'].map((p) => ({ value: p, label: t(locale, PRIORITY_LABEL_KEYS[p]) })));
   const descriptionInput = el('input', { type: 'text', placeholder: t(locale, 'crm_stage_description_field') });
   const createBtn = el('button', { class: 'primary' }, t(locale, 'operations_open_ticket_btn'));
 

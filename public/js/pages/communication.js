@@ -15,7 +15,8 @@ export async function renderCommunication(container) {
     t(locale, 'communication_info_text')));
 
   const toUserIdInput = el('input', { type: 'text', placeholder: t(locale, 'communication_recipient_placeholder') });
-  const channelSelect = selectInput(['internal', 'email', 'whatsapp', 'sms'].map((c) => ({ value: c, label: c })));
+  const CHANNEL_LABEL_KEYS = { internal: 'crm_channel_internal', email: 'crm_channel_email', whatsapp: 'crm_channel_whatsapp', sms: 'crm_channel_sms' };
+  const channelSelect = selectInput(['internal', 'email', 'whatsapp', 'sms'].map((c) => ({ value: c, label: t(locale, CHANNEL_LABEL_KEYS[c]) })));
   const subjectInput = el('input', { type: 'text', placeholder: t(locale, 'automation_field_subject') });
   const bodyInput = el('textarea', { rows: 3, placeholder: t(locale, 'communication_body_placeholder') });
   const sendBtn = el('button', { class: 'primary' }, t(locale, 'crm_send_btn'));

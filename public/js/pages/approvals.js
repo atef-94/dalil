@@ -11,6 +11,23 @@ import { api } from '../api.js';
 // call for a given row.
 const AI_STEP_ID = 'ai-action';
 
+const ACTION_TYPE_LABEL_KEYS = {
+  create_task: 'automation_action_create_task',
+  create_lead: 'automation_action_create_lead',
+  send_message: 'automation_action_send_message',
+  update_lead_status: 'automation_action_update_lead_status',
+  assign_lead_owner: 'automation_action_assign_lead_owner',
+  update_campaign_status: 'automation_action_update_campaign_status',
+  webhook_call: 'automation_action_webhook_call',
+  integration_call: 'automation_action_integration_call',
+  ai_decide: 'automation_action_ai_decide',
+  require_approval: 'automation_action_require_approval',
+};
+function actionTypeLabel(locale, actionType) {
+  const key = ACTION_TYPE_LABEL_KEYS[actionType];
+  return key ? t(locale, key) : actionType.replace(/_/g, ' ');
+}
+
 const WORKFLOW_EMPTY_KEYS = {
   pending: 'approvals_empty_workflow_pending',
   approved: 'approvals_empty_workflow_approved',
@@ -121,7 +138,7 @@ export async function renderApprovals(container) {
       actionListSlot.appendChild(el('h3', { style: 'margin-top:0' }, t(locale, 'approvals_business_title')));
       actionListSlot.appendChild(table(
         [
-          { label: t(locale, 'units_col_type'), render: (a) => badge(a.actionType.replace(/_/g, ' '), 'amber') },
+          { label: t(locale, 'units_col_type'), render: (a) => badge(actionTypeLabel(locale, a.actionType), 'amber') },
           { label: t(locale, 'fin_reason_field'), key: 'reason' },
           { label: t(locale, 'approvals_requested_col'), render: (a) => new Date(a.createdAt).toLocaleString() },
           { label: '', render: (a) => {

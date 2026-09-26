@@ -13,7 +13,14 @@ export async function renderMarketing(container) {
   container.appendChild(errorSlot);
 
   const nameInput = el('input', { type: 'text', placeholder: t(locale, 'marketing_name_placeholder') });
-  const channelSelect = selectInput(['digital', 'print', 'event', 'referral', 'other'].map((c) => ({ value: c, label: c })));
+  const CAMPAIGN_CHANNEL_LABEL_KEYS = {
+    digital: 'marketing_channel_digital',
+    print: 'marketing_channel_print',
+    event: 'marketing_channel_event',
+    referral: 'marketing_channel_referral',
+    other: 'marketing_channel_other',
+  };
+  const channelSelect = selectInput(['digital', 'print', 'event', 'referral', 'other'].map((c) => ({ value: c, label: t(locale, CAMPAIGN_CHANNEL_LABEL_KEYS[c]) })));
   const budgetInput = el('input', { type: 'number', placeholder: '5000' });
   const startInput = el('input', { type: 'date' });
   const createBtn = el('button', { class: 'primary' }, t(locale, 'marketing_create_campaign_btn'));

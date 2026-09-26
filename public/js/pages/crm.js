@@ -61,6 +61,11 @@ function timelineTypeLabels(locale) {
 // `tone` option in ui.js. Order/values/labels are untouched.
 const STAT_TONES = ['blue', 'purple', 'teal', 'green', 'amber', 'pink'];
 
+const PRIORITY_LABEL_KEYS = { low: 'crm_priority_low', medium: 'crm_priority_medium', high: 'crm_priority_high', urgent: 'crm_priority_urgent' };
+function priorityLabel(locale, p) {
+  return PRIORITY_LABEL_KEYS[p] ? t(locale, PRIORITY_LABEL_KEYS[p]) : p;
+}
+
 function priorityOptions(locale) {
   return [
     { value: '', label: '—' },
@@ -304,7 +309,8 @@ export async function renderCrm(container) {
     const search = searchInput(t(locale, 'crm_search_leads_placeholder'), (value) => { q = value; offset = 0; loadList(); });
     const listSlot = el('div');
     clear(bodySlot);
-    const backLink = el('button', { class: 'ghost', style: 'padding:4px 0;margin-bottom:8px' }, `← ${t(locale, 'crm_back_to_pipeline')}`);
+    const backArrow = locale === 'ar' ? '→' : '←';
+    const backLink = el('button', { class: 'ghost', style: 'padding:4px 0;margin-bottom:8px' }, `${backArrow} ${t(locale, 'crm_back_to_pipeline')}`);
     backLink.addEventListener('click', goToDashboard);
     bodySlot.appendChild(backLink);
     bodySlot.appendChild(el('h2', { style: 'margin:0 0 12px' }, stage?.name ?? ''));
@@ -322,7 +328,7 @@ export async function renderCrm(container) {
             [
               { label: t(locale, 'crm_col_name'), key: 'fullName' },
               { label: t(locale, 'crm_col_phone'), key: 'phone' },
-              { label: t(locale, 'crm_col_priority'), render: (l) => (l.priority ? badge(l.priority, l.priority === 'urgent' || l.priority === 'high' ? 'red' : '') : '—') },
+              { label: t(locale, 'crm_col_priority'), render: (l) => (l.priority ? badge(priorityLabel(locale, l.priority), l.priority === 'urgent' || l.priority === 'high' ? 'red' : '') : '—') },
               { label: t(locale, 'crm_col_owner'), render: (l) => (l.ownerEmployeeUserId ? l.ownerEmployeeUserId.slice(0, 8) + '…' : '—') },
               { label: '', render: (l) => rowActions(l, loadList) },
             ],
@@ -654,7 +660,7 @@ export async function renderCrm(container) {
       const DELIVERY_COLORS = { delivered: 'green', read: 'green', sent: 'blue', queued: 'amber', failed: 'red', rejected: 'red', unknown: '' };
       const header = el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:14px' }, [
         statusBadge(stage?.name || lead.stageId),
-        lead.priority ? badge(lead.priority, lead.priority === 'urgent' || lead.priority === 'high' ? 'red' : '') : null,
+        lead.priority ? badge(priorityLabel(locale, lead.priority), lead.priority === 'urgent' || lead.priority === 'high' ? 'red' : '') : null,
         deliveryStatus && deliveryStatus.status !== 'unknown' ? badge(`${t(locale, 'crm_delivery_status_prefix')} ${deliveryStatus.status}`, DELIVERY_COLORS[deliveryStatus.status] || '') : null,
         score ? el('span', { class: 'muted' }, `${t(locale, 'crm_lead_score_prefix')} ${score.score}/100`) : null,
         el('span', { class: 'muted' }, lead.phone),

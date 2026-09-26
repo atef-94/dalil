@@ -65,7 +65,8 @@ export async function renderFinance(container) {
   }
 
   const recordAmount = el('input', { type: 'number', placeholder: t(locale, 'sales_col_amount') });
-  const recordMethod = selectInput(['cash', 'transfer', 'card', 'cheque'].map((m) => ({ value: m, label: m })));
+  const PAYMENT_METHOD_LABEL_KEYS = { cash: 'finance_method_cash', transfer: 'finance_method_transfer', card: 'finance_method_card', cheque: 'finance_method_cheque' };
+  const recordMethod = selectInput(['cash', 'transfer', 'card', 'cheque'].map((m) => ({ value: m, label: t(locale, PAYMENT_METHOD_LABEL_KEYS[m]) })));
   const recordLineSelect = selectInput([]);
   const recordBtn = el('button', { class: 'primary' }, t(locale, 'finance_record_payment_btn'));
 

@@ -248,8 +248,33 @@ const STATUS_COLORS = {
   pending: 'amber', upcoming: 'amber', held: 'amber', reserved: 'amber', pending_approval: 'amber', new: 'blue', open: 'blue',
   overdue: 'red', lost: 'red', rejected: 'red', cancelled: 'red', suspended: 'red', terminated: 'red', rejected_duplicate: 'red', rejected_other: 'red', failed: 'red',
 };
+// Maps every raw backend enum value that flows through statusBadge() (unit/
+// lead/contract/approval/workflow/ticket status, priority, commission tier,
+// message channel, etc.) to its i18n key, so the badge shows a translated
+// label instead of the raw English/snake_case value while the value itself
+// (passed to/received from the API) never changes.
+const STATUS_LABEL_KEYS = {
+  active: 'status_active', approved: 'status_approved', paid: 'status_paid', won: 'status_won', signed: 'status_signed',
+  converted: 'status_converted', verified: 'status_verified', pending: 'status_pending', upcoming: 'status_upcoming',
+  held: 'status_held', reserved: 'status_reserved', pending_approval: 'status_pending_approval', new: 'status_new',
+  open: 'status_open', overdue: 'status_overdue', lost: 'status_lost', rejected: 'status_rejected', cancelled: 'status_cancelled',
+  suspended: 'status_suspended', terminated: 'status_terminated', rejected_duplicate: 'status_rejected_duplicate',
+  rejected_other: 'status_rejected_other', failed: 'status_failed', draft: 'status_draft', generated: 'status_generated',
+  sent: 'status_sent', accepted: 'status_accepted', expired: 'status_expired', available: 'status_available',
+  contracted: 'status_contracted', qualified: 'status_qualified', opportunity: 'status_opportunity', contacted: 'status_contacted',
+  fulfilled: 'status_fulfilled', planned: 'status_planned', completed: 'status_completed', read: 'status_read',
+  done: 'status_done', uploaded: 'status_uploaded', mapped: 'status_mapped', confirmed: 'status_confirmed',
+  archived: 'status_archived', running: 'status_running', waiting_approval: 'status_waiting_approval',
+  extracted: 'status_extracted', blocked: 'status_blocked', reviewed: 'status_reviewed', imported: 'status_imported',
+  declined: 'status_declined', due: 'status_due',
+  low: 'crm_priority_low', medium: 'crm_priority_medium', high: 'crm_priority_high', urgent: 'crm_priority_urgent',
+  base: 'status_tier_base', override: 'status_tier_override',
+  internal: 'crm_channel_internal', email: 'crm_channel_email', whatsapp: 'crm_channel_whatsapp',
+  sms: 'crm_channel_sms', call: 'crm_channel_call', note: 'crm_channel_note',
+};
 export function statusBadge(status) {
-  return badge(status, STATUS_COLORS[status] || '');
+  const key = STATUS_LABEL_KEYS[status];
+  return badge(key ? tt(key) : status, STATUS_COLORS[status] || '');
 }
 
 export function table(columns, rows, { empty = tt('common_no_records'), emptyIcon = 'inbox' } = {}) {
