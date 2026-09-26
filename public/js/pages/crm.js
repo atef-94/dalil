@@ -1,6 +1,6 @@
 import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState, selectInput } from '../ui.js';
 import { api } from '../api.js';
-import { can, getLocale } from '../state.js';
+import { can, getLocale, session } from '../state.js';
 import { t } from '../i18n.js';
 import { setAiContext, clearAiContext } from './ai-panel.js';
 import { openImportWizard } from '../import-wizard.js';
@@ -878,6 +878,12 @@ export async function renderCrm(container) {
             relatedResource: 'lead',
             relatedResourceId: lead.id,
             dueAt: followUpDate.value ? new Date(followUpDate.value).toISOString() : undefined,
+            // Without this, the follow-up never appears in anyone's "My
+            // Tasks" list (GET /api/tasks/my filters strictly on
+            // assignedToUserId) — it would be created but effectively
+            // uncompletable from the Tasks tab. No assignee picker exists
+            // in this composer, so default to the scheduler themselves.
+            assignedToUserId: session.me?.id,
           });
           followUpInput.value = '';
           toast('Follow-up scheduled.', 'success');
