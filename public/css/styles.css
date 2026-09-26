@@ -14,7 +14,7 @@
   --n-800: #262b35;
   --n-900: #14171c;
 
-  /* ---- Brand: deep indigo, used sparingly ---- */
+  /* ---- Brand: vivid blue-indigo, used sparingly ---- */
   --brand-50: #eef1ff;
   --brand-100: #dfe4ff;
   --brand-500: #4048c7;
@@ -26,6 +26,27 @@
   --danger-bg: #fdeaea;  --danger-text: #a3242f;  --danger-solid: #d1323d;
   --warning-bg: #fdf1de; --warning-text: #8a5a10; --warning-solid: #c67c15;
   --info-bg: #e7eefb;    --info-text: #24528f;    --info-solid: #3568b8;
+
+  /* ---- Accent set (stat-card icon chips, chart series, misc "not the
+     primary action but needs its own identity" spots) — never used for
+     interactive/primary elements, which stay on --brand-*. ---- */
+  --accent-purple-bg: #f0ecff; --accent-purple: #7c5cf0;
+  --accent-teal-bg:   #e2f7f3; --accent-teal:   #14a893;
+  --accent-blue-bg:   var(--brand-50); --accent-blue: var(--brand-500);
+  --accent-green-bg:  var(--success-bg); --accent-green: var(--success-solid);
+  --accent-amber-bg:  var(--warning-bg); --accent-amber: var(--warning-solid);
+  --accent-pink-bg:   #fdecf3; --accent-pink: #d64a89;
+
+  /* ---- Sidebar: a deep navy shell reads as a real product, not a bare
+     content page — distinct from the light surfaces it opens onto. Kept
+     as its own token set (not reusing --n-900) so the rest of the app's
+     neutral scale can change without retuning the sidebar by accident. */
+  --sidebar-bg: #10162c;
+  --sidebar-bg-active: #1a2142;
+  --sidebar-text: #a6adcf;
+  --sidebar-text-dim: #6d759e;
+  --sidebar-text-active: #ffffff;
+  --sidebar-border: rgba(255, 255, 255, 0.07);
 
   /* ---- Backward-compatible aliases (existing pages reference these) ---- */
   --bg: var(--n-50);
@@ -43,12 +64,12 @@
   /* ---- Elevation ---- */
   --shadow-xs: 0 1px 2px rgba(20, 23, 28, 0.05);
   --shadow-sm: 0 1px 3px rgba(20, 23, 28, 0.08), 0 1px 2px rgba(20, 23, 28, 0.04);
-  --shadow-md: 0 4px 14px rgba(20, 23, 28, 0.09), 0 1px 3px rgba(20, 23, 28, 0.06);
-  --shadow-lg: 0 14px 40px rgba(20, 23, 28, 0.16), 0 3px 10px rgba(20, 23, 28, 0.08);
+  --shadow-md: 0 6px 18px rgba(20, 23, 28, 0.09), 0 1px 3px rgba(20, 23, 28, 0.06);
+  --shadow-lg: 0 16px 44px rgba(20, 23, 28, 0.16), 0 3px 10px rgba(20, 23, 28, 0.08);
 
   /* ---- Spacing / radius / type ---- */
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
-  --radius-sm: 6px; --radius: 8px; --radius-lg: 12px; --radius-xl: 16px;
+  --radius-sm: 7px; --radius: 9px; --radius-lg: 14px; --radius-xl: 18px;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, monospace;
 
@@ -163,9 +184,9 @@ label:first-child { margin-top: 0; }
 
 #sidebar {
   width: var(--sidebar-w);
-  background: var(--surface);
-  border-inline-end: 1px solid var(--border);
-  padding: 14px 10px 16px;
+  background: var(--sidebar-bg);
+  border-inline-end: 1px solid var(--sidebar-border);
+  padding: 16px 12px 16px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -174,37 +195,44 @@ label:first-child { margin-top: 0; }
   top: 0;
   overflow-y: auto;
 }
-[dir="rtl"] #sidebar { border-inline-end: none; border-inline-start: 1px solid var(--border); }
+[dir="rtl"] #sidebar { border-inline-end: none; border-inline-start: 1px solid var(--sidebar-border); }
 
-#sidebar .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; padding: 6px 8px 4px; }
+#sidebar .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; padding: 4px 8px 6px; color: var(--sidebar-text-active); }
 #sidebar .brand .mark {
-  width: 26px; height: 26px; border-radius: 7px; background: var(--brand-500); color: white;
+  width: 28px; height: 28px; border-radius: 8px; background: var(--brand-500); color: white;
   display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; flex-shrink: 0;
+  box-shadow: 0 0 0 4px rgba(64, 72, 199, 0.18);
 }
-#sidebar .company-name { font-size: 12px; color: var(--text-muted); padding: 0 8px 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sidebar .company-name {
+  font-size: 12px; color: var(--sidebar-text-dim); padding: 0 8px 16px; margin-bottom: 6px;
+  border-bottom: 1px solid var(--sidebar-border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 #sidebar .nav-section { margin-top: 14px; }
 #sidebar .nav-section:first-of-type { margin-top: 4px; }
 #sidebar .nav-section-label {
   font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
-  color: var(--text-tertiary); padding: 0 10px 6px;
+  color: var(--sidebar-text-dim); padding: 0 10px 6px;
 }
 
 #sidebar nav a {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 10px;
-  border-radius: var(--radius-sm);
-  color: var(--n-700);
-  margin-bottom: 1px;
+  gap: 10px;
+  padding: 8px 11px;
+  border-radius: var(--radius);
+  color: var(--sidebar-text);
+  margin-bottom: 2px;
   font-size: 13.5px;
   font-weight: 500;
+  transition: background-color 0.12s ease, color 0.12s ease;
 }
-#sidebar nav a .icon { color: var(--text-muted); }
-#sidebar nav a:hover { background: var(--n-100); text-decoration: none; }
-#sidebar nav a.active { background: var(--brand-50); color: var(--brand-700); font-weight: 650; }
-#sidebar nav a.active .icon { color: var(--brand-600); }
+#sidebar nav a .icon { color: var(--sidebar-text-dim); transition: color 0.12s ease; }
+#sidebar nav a:hover { background: var(--sidebar-bg-active); color: var(--sidebar-text-active); text-decoration: none; }
+#sidebar nav a:hover .icon { color: var(--sidebar-text-active); }
+#sidebar nav a.active { background: var(--brand-500); color: var(--sidebar-text-active); font-weight: 650; box-shadow: var(--shadow-sm); }
+#sidebar nav a.active .icon { color: var(--sidebar-text-active); }
 
 #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
@@ -213,10 +241,11 @@ label:first-child { margin-top: 0; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 0 20px;
+  padding: 0 22px;
   height: var(--topbar-h);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-xs);
   position: sticky;
   top: 0;
   z-index: 20;
@@ -258,7 +287,7 @@ label:first-child { margin-top: 0; }
   border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; border-radius: 0;
 }
 .tab:hover { background: var(--n-50); color: var(--text); }
-.tab.active { color: var(--brand-600); border-bottom-color: var(--brand-500); }
+.tab.active { color: var(--brand-600); border-bottom-color: var(--brand-500); font-weight: 700; }
 
 /* ---- Tables ---- */
 .table-wrap { overflow-x: auto; }
@@ -298,9 +327,17 @@ tbody tr.clickable { cursor: pointer; }
 .stat-card .value { font-size: 25px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
 .stat-card .label { color: var(--text-muted); font-size: 12px; font-weight: 550; }
 .stat-card .icon-wrap {
-  width: 30px; height: 30px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center;
-  background: var(--brand-50); color: var(--brand-600); flex-shrink: 0;
+  width: 34px; height: 34px; border-radius: var(--radius); display: flex; align-items: center; justify-content: center;
+  background: var(--accent-blue-bg); color: var(--accent-blue); flex-shrink: 0;
 }
+/* Optional tone modifiers (statCard({ tone })) — rotate KPI icon chips
+   through the accent set instead of every card reading the same brand
+   color, without changing what value/label/icon each card shows. */
+.stat-card .icon-wrap.tone-purple { background: var(--accent-purple-bg); color: var(--accent-purple); }
+.stat-card .icon-wrap.tone-teal   { background: var(--accent-teal-bg);   color: var(--accent-teal); }
+.stat-card .icon-wrap.tone-green  { background: var(--accent-green-bg);  color: var(--accent-green); }
+.stat-card .icon-wrap.tone-amber  { background: var(--accent-amber-bg);  color: var(--accent-amber); }
+.stat-card .icon-wrap.tone-pink   { background: var(--accent-pink-bg);   color: var(--accent-pink); }
 .stat-card .trend { font-size: 11.5px; font-weight: 650; display: flex; align-items: center; gap: 3px; }
 .stat-card .trend.up { color: var(--success-text); }
 .stat-card .trend.down { color: var(--danger-text); }

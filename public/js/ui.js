@@ -207,11 +207,13 @@ export function popover(trigger, buildContent) {
 /** A KPI stat card with an optional icon and trend indicator. Pass
  * `onClick` to make the whole card an interactive entry point (e.g. a
  * pipeline stage card that drills into that stage's list) — omit it for a
- * plain, non-interactive stat. */
-export function statCard({ label, value, iconName, trend, onClick }) {
+ * plain, non-interactive stat. `tone` ('purple'|'teal'|'green'|'amber'|
+ * 'pink', default brand blue) only changes the icon chip's color, purely
+ * cosmetic — every value/label/click behavior is unchanged. */
+export function statCard({ label, value, iconName, trend, onClick, tone }) {
   const top = el('div', { class: 'stat-top' }, [
     el('div', { class: 'value' }, String(value)),
-    iconName ? el('div', { class: 'icon-wrap' }, icon(iconName)) : null,
+    iconName ? el('div', { class: `icon-wrap${tone ? ` tone-${tone}` : ''}` }, icon(iconName)) : null,
   ]);
   const children = [top, el('div', { class: 'label' }, label)];
   if (trend) children.push(el('div', { class: `trend ${trend.direction || ''}` }, trend.text));

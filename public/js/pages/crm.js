@@ -47,6 +47,11 @@ const TIMELINE_TYPE_LABELS = {
   reservation_created: 'Reservation Created', contract_signed: 'Contract Signed', contract_cancelled: 'Contract Cancelled',
 };
 
+// Purely cosmetic: rotates KPI stat-card icon chips through the accent
+// palette instead of every card reading the same color — see statCard's
+// `tone` option in ui.js. Order/values/labels are untouched.
+const STAT_TONES = ['blue', 'purple', 'teal', 'green', 'amber', 'pink'];
+
 const PRIORITY_OPTIONS = [
   { value: '', label: '—' },
   { value: 'low', label: 'Low' },
@@ -247,9 +252,11 @@ export async function renderCrm(container) {
     clear(bodySlot);
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_pipeline_realtime')),
-      el('div', { class: 'stat-grid' }, funnel.stages.map((s) => statCard({
+      el('div', { class: 'stat-grid' }, funnel.stages.map((s, i) => statCard({
         label: s.stageName,
         value: s.count,
+        iconName: 'leads',
+        tone: STAT_TONES[i % STAT_TONES.length],
         // Each pipeline card IS the way into that stage's lead list now —
         // the horizontal stage-tab row this used to require was removed
         // because it only duplicated these same cards.
@@ -259,22 +266,22 @@ export async function renderCrm(container) {
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_today_followups')),
       el('div', { class: 'stat-grid' }, [
-        statCard({ label: t(locale, 'crm_new_today'), value: newToday }),
-        statCard({ label: t(locale, 'crm_followups_due_today'), value: followUpsToday }),
-        statCard({ label: t(locale, 'crm_followups_overdue'), value: followUpsOverdue }),
-        statCard({ label: t(locale, 'crm_total_leads'), value: funnel.totalLeads }),
+        statCard({ label: t(locale, 'crm_new_today'), value: newToday, iconName: 'plus', tone: 'green' }),
+        statCard({ label: t(locale, 'crm_followups_due_today'), value: followUpsToday, iconName: 'bell', tone: 'amber' }),
+        statCard({ label: t(locale, 'crm_followups_overdue'), value: followUpsOverdue, iconName: 'warning', tone: 'pink' }),
+        statCard({ label: t(locale, 'crm_total_leads'), value: funnel.totalLeads, iconName: 'leads', tone: 'blue' }),
       ]),
     ]));
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_conversion')),
       el('div', { class: 'stat-grid' }, [
-        statCard({ label: t(locale, 'crm_overall_win_rate'), value: `${conversion.overallWinRatePercent}%` }),
-        statCard({ label: t(locale, 'crm_lost_rate'), value: `${conversion.lostRatePercent}%` }),
-        statCard({ label: t(locale, 'crm_avg_speed'), value: speed.averageHours !== null ? `${speed.averageHours}h` : '—' }),
-        statCard({ label: t(locale, 'crm_cost_per_qualified_lead'), value: costPerLead.costPerQualifiedLead !== null ? Number(costPerLead.costPerQualifiedLead).toLocaleString() : '—' }),
+        statCard({ label: t(locale, 'crm_overall_win_rate'), value: `${conversion.overallWinRatePercent}%`, iconName: 'analytics', tone: 'green' }),
+        statCard({ label: t(locale, 'crm_lost_rate'), value: `${conversion.lostRatePercent}%`, iconName: 'warning', tone: 'pink' }),
+        statCard({ label: t(locale, 'crm_avg_speed'), value: speed.averageHours !== null ? `${speed.averageHours}h` : '—', iconName: 'history', tone: 'purple' }),
+        statCard({ label: t(locale, 'crm_cost_per_qualified_lead'), value: costPerLead.costPerQualifiedLead !== null ? Number(costPerLead.costPerQualifiedLead).toLocaleString() : '—', iconName: 'commissions', tone: 'teal' }),
       ]),
       conversion.stageConversion.length > 0 ? el('div', { class: 'stat-grid', style: 'margin-top:10px' },
-        conversion.stageConversion.map((s) => statCard({ label: `${s.fromStageName} → ${s.toStageName}`, value: `${s.conversionPercent}%` })),
+        conversion.stageConversion.map((s, i) => statCard({ label: `${s.fromStageName} → ${s.toStageName}`, value: `${s.conversionPercent}%`, iconName: 'analytics', tone: STAT_TONES[i % STAT_TONES.length] })),
       ) : null,
     ]));
   }
