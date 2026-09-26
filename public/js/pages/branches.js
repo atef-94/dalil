@@ -9,19 +9,19 @@ export async function renderBranches(container) {
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, t(locale, 'page_title_branches')),
-      el('p', { class: 'page-subtitle' }, 'The org structure Employees, Roles, and department-scoped permissions are built on.'),
+      el('p', { class: 'page-subtitle' }, t(locale, 'branches_page_subtitle')),
     ]),
   ]));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
-  const branchNameInput = el('input', { type: 'text', placeholder: 'e.g. Cairo HQ' });
-  const branchAddressInput = el('input', { type: 'text', placeholder: 'Address (optional)' });
-  const addBranchBtn = el('button', { class: 'primary' }, 'Add branch');
+  const branchNameInput = el('input', { type: 'text', placeholder: t(locale, 'branches_name_placeholder') });
+  const branchAddressInput = el('input', { type: 'text', placeholder: t(locale, 'branches_address_placeholder') });
+  const addBranchBtn = el('button', { class: 'primary' }, t(locale, 'branches_add_branch_btn'));
   addBranchBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!branchNameInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('Enter a branch name.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'branches_enter_name_error')));
       return;
     }
     addBranchBtn.disabled = true;
@@ -29,7 +29,7 @@ export async function renderBranches(container) {
       await api.post('/api/organization/branches', { name: branchNameInput.value.trim(), address: branchAddressInput.value.trim() || undefined });
       branchNameInput.value = '';
       branchAddressInput.value = '';
-      toast('Branch added.', 'success');
+      toast(t(locale, 'branches_added_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -38,20 +38,20 @@ export async function renderBranches(container) {
     }
   });
 
-  const deptNameInput = el('input', { type: 'text', placeholder: 'e.g. Sales' });
-  const deptBranchSelect = selectInput([{ value: '', label: 'No specific branch' }]);
-  const addDeptBtn = el('button', { class: 'primary' }, 'Add department');
+  const deptNameInput = el('input', { type: 'text', placeholder: t(locale, 'branches_dept_name_placeholder') });
+  const deptBranchSelect = selectInput([{ value: '', label: t(locale, 'branches_no_specific_branch') }]);
+  const addDeptBtn = el('button', { class: 'primary' }, t(locale, 'branches_add_dept_btn'));
   addDeptBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!deptNameInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('Enter a department name.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'branches_enter_dept_name_error')));
       return;
     }
     addDeptBtn.disabled = true;
     try {
       await api.post('/api/organization/departments', { name: deptNameInput.value.trim(), branchId: deptBranchSelect.value || undefined });
       deptNameInput.value = '';
-      toast('Department added.', 'success');
+      toast(t(locale, 'branches_added_dept_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -72,65 +72,65 @@ export async function renderBranches(container) {
   function branchesPanel() {
     clear(panelSlot);
     panelSlot.appendChild(el('div', { class: 'card' }, [
-      el('h3', { style: 'margin-top:0' }, 'Add a branch'),
+      el('h3', { style: 'margin-top:0' }, t(locale, 'branches_add_branch_title')),
       el('div', { class: 'form-row' }, [
-        el('div', {}, [el('label', {}, 'Name'), branchNameInput]),
-        el('div', {}, [el('label', {}, 'Address'), branchAddressInput]),
+        el('div', {}, [el('label', {}, t(locale, 'crm_col_name')), branchNameInput]),
+        el('div', {}, [el('label', {}, t(locale, 'branches_address_field')), branchAddressInput]),
         el('div', { style: 'align-self:flex-end' }, addBranchBtn),
       ]),
     ]));
     panelSlot.appendChild(table(
       [
-        { label: 'Name', key: 'name' },
-        { label: 'Address', render: (b) => b.address || '—' },
-        { label: 'Departments', render: (b) => String(departments.filter((d) => d.branchId === b.id).length) },
-        { label: 'Employees', render: (b) => String(employees.filter((e) => e.branchId === b.id).length) },
+        { label: t(locale, 'crm_col_name'), key: 'name' },
+        { label: t(locale, 'branches_address_field'), render: (b) => b.address || '—' },
+        { label: t(locale, 'branches_departments_col'), render: (b) => String(departments.filter((d) => d.branchId === b.id).length) },
+        { label: t(locale, 'nav_employees'), render: (b) => String(employees.filter((e) => e.branchId === b.id).length) },
       ],
       branches,
-      { empty: 'No branches yet — add your first one above.', emptyIcon: 'branches' },
+      { empty: t(locale, 'branches_list_empty'), emptyIcon: 'branches' },
     ));
   }
 
   function departmentsPanel() {
     clear(panelSlot);
     panelSlot.appendChild(el('div', { class: 'card' }, [
-      el('h3', { style: 'margin-top:0' }, 'Add a department'),
+      el('h3', { style: 'margin-top:0' }, t(locale, 'branches_add_dept_title')),
       el('div', { class: 'form-row' }, [
-        el('div', {}, [el('label', {}, 'Name'), deptNameInput]),
-        el('div', {}, [el('label', {}, 'Branch (optional)'), deptBranchSelect]),
+        el('div', {}, [el('label', {}, t(locale, 'crm_col_name')), deptNameInput]),
+        el('div', {}, [el('label', {}, t(locale, 'branches_branch_optional_field')), deptBranchSelect]),
         el('div', { style: 'align-self:flex-end' }, addDeptBtn),
       ]),
     ]));
     panelSlot.appendChild(table(
       [
-        { label: 'Name', key: 'name' },
-        { label: 'Branch', render: (d) => branches.find((b) => b.id === d.branchId)?.name || '—' },
-        { label: 'Employees', render: (d) => String(employees.filter((e) => e.departmentId === d.id).length) },
+        { label: t(locale, 'crm_col_name'), key: 'name' },
+        { label: t(locale, 'branches_field_branch'), render: (d) => branches.find((b) => b.id === d.branchId)?.name || '—' },
+        { label: t(locale, 'nav_employees'), render: (d) => String(employees.filter((e) => e.departmentId === d.id).length) },
       ],
       departments,
-      { empty: 'No departments yet — add your first one above.', emptyIcon: 'branches' },
+      { empty: t(locale, 'branches_dept_list_empty'), emptyIcon: 'branches' },
     ));
   }
 
   function teamsPanel() {
     clear(panelSlot);
     const teamNames = [...new Set(employees.map((e) => e.teamId).filter(Boolean))];
-    panelSlot.appendChild(el('p', { class: 'page-subtitle', style: 'margin:0 0 12px' }, 'Teams are a free-form grouping set per-employee (Employees → Team field) — this view is derived, not a separate record to manage here.'));
+    panelSlot.appendChild(el('p', { class: 'page-subtitle', style: 'margin:0 0 12px' }, t(locale, 'branches_teams_subtitle')));
     panelSlot.appendChild(table(
       [
-        { label: 'Team', render: (name) => el('span', { style: 'font-weight:600' }, name) },
-        { label: 'Members', render: (name) => String(employees.filter((e) => e.teamId === name).length) },
-        { label: '', render: (name) => badge(`${employees.filter((e) => e.teamId === name && e.status === 'active').length} active`, 'blue') },
+        { label: t(locale, 'branches_field_team'), render: (name) => el('span', { style: 'font-weight:600' }, name) },
+        { label: t(locale, 'branches_members_col'), render: (name) => String(employees.filter((e) => e.teamId === name).length) },
+        { label: '', render: (name) => badge(`${employees.filter((e) => e.teamId === name && e.status === 'active').length} ${t(locale, 'branches_active_suffix')}`, 'blue') },
       ],
       teamNames,
-      { empty: 'No teams yet — set a Team on an employee to see it here.', emptyIcon: 'branches' },
+      { empty: t(locale, 'branches_teams_empty'), emptyIcon: 'branches' },
     ));
   }
 
   const TABS = [
-    { key: 'branches', label: 'Branches', render: branchesPanel },
-    { key: 'departments', label: 'Departments', render: departmentsPanel },
-    { key: 'teams', label: 'Teams', render: teamsPanel },
+    { key: 'branches', label: t(locale, 'branches_tab_branches'), render: branchesPanel },
+    { key: 'departments', label: t(locale, 'branches_departments_col'), render: departmentsPanel },
+    { key: 'teams', label: t(locale, 'branches_tab_teams'), render: teamsPanel },
   ];
   let activeTab = 'branches';
   function renderTabs() {
@@ -156,7 +156,7 @@ export async function renderBranches(container) {
       employees = employeesPage.items;
 
       clear(deptBranchSelect);
-      deptBranchSelect.appendChild(el('option', { value: '' }, 'No specific branch'));
+      deptBranchSelect.appendChild(el('option', { value: '' }, t(locale, 'branches_no_specific_branch')));
       branches.forEach((b) => deptBranchSelect.appendChild(el('option', { value: b.id }, b.name)));
 
       renderTabs();

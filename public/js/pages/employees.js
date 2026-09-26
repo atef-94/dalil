@@ -17,18 +17,18 @@ export async function renderEmployees(container) {
   let branches = [];
   let departments = [];
 
-  const nameInput = el('input', { type: 'text', placeholder: 'Full name' });
-  const emailInput = el('input', { type: 'email', placeholder: 'name@company.com' });
-  const titleInput = el('input', { type: 'text', placeholder: 'Sales Agent' });
-  const empBranchSelect = selectInput([{ value: '', label: 'No branch' }]);
-  const empDeptSelect = selectInput([{ value: '', label: 'No department' }]);
-  const teamInput = el('input', { type: 'text', placeholder: 'e.g. Alpha Sales Squad (optional)' });
+  const nameInput = el('input', { type: 'text', placeholder: t(locale, 'crm_lead_field_full_name') });
+  const emailInput = el('input', { type: 'email', placeholder: t(locale, 'employees_email_placeholder') });
+  const titleInput = el('input', { type: 'text', placeholder: t(locale, 'employees_title_placeholder') });
+  const empBranchSelect = selectInput([{ value: '', label: t(locale, 'employees_no_branch') }]);
+  const empDeptSelect = selectInput([{ value: '', label: t(locale, 'employees_no_department') }]);
+  const teamInput = el('input', { type: 'text', placeholder: t(locale, 'employees_team_placeholder') });
 
-  const createBtn = el('button', { class: 'primary' }, 'Add employee');
+  const createBtn = el('button', { class: 'primary' }, t(locale, 'employees_add_btn'));
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!nameInput.value.trim() || !emailInput.value.trim() || !titleInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('Full name, email, and title are required.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'employees_required_fields_error')));
       return;
     }
     createBtn.disabled = true;
@@ -45,7 +45,7 @@ export async function renderEmployees(container) {
       emailInput.value = '';
       titleInput.value = '';
       teamInput.value = '';
-      toast('Employee added.', 'success');
+      toast(t(locale, 'employees_added_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -55,20 +55,20 @@ export async function renderEmployees(container) {
   });
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Add an employee'),
-    el('p', { class: 'page-subtitle', style: 'margin-bottom:12px' }, 'Manage branches and departments themselves from Branches & Departments.'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'employees_add_title')),
+    el('p', { class: 'page-subtitle', style: 'margin-bottom:12px' }, `${t(locale, 'employees_manage_hint_prefix')} ${t(locale, 'page_title_branches')}.`),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Full name'), nameInput]),
-      el('div', {}, [el('label', {}, 'Email'), emailInput]),
-      el('div', {}, [el('label', {}, 'Title'), titleInput]),
-      el('div', {}, [el('label', {}, 'Branch'), empBranchSelect]),
-      el('div', {}, [el('label', {}, 'Department'), empDeptSelect]),
-      el('div', {}, [el('label', {}, 'Team'), teamInput]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_lead_field_full_name')), nameInput]),
+      el('div', {}, [el('label', {}, t(locale, 'field_email')), emailInput]),
+      el('div', {}, [el('label', {}, t(locale, 'employees_job_title_field')), titleInput]),
+      el('div', {}, [el('label', {}, t(locale, 'branches_field_branch')), empBranchSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'branches_field_department')), empDeptSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'branches_field_team')), teamInput]),
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
 
-  const search = searchInput('Search by name, email, or title…', (value) => { q = value; offset = 0; load(); });
+  const search = searchInput(t(locale, 'employees_search_placeholder'), (value) => { q = value; offset = 0; load(); });
   container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
 
   container.appendChild(listSlot);
@@ -76,26 +76,26 @@ export async function renderEmployees(container) {
   async function reassignManager(employee, btn) {
     const others = (currentItems || []).filter((e) => e.id !== employee.id && e.status !== 'terminated');
     if (others.length === 0) {
-      errorSlot.appendChild(errorBanner('No other active employees available to become the manager.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'employees_no_other_managers_error')));
       return;
     }
     const values = await formModal({
-      title: `Reassign manager for ${employee.fullName}`,
+      title: `${t(locale, 'employees_reassign_manager_prefix')} ${employee.fullName}`,
       fields: [
         {
           key: 'newManagerEmployeeId',
-          label: 'New manager',
+          label: t(locale, 'employees_new_manager_field'),
           type: 'select',
           options: others.map((e) => ({ value: e.id, label: `${e.fullName} (${e.title})` })),
         },
       ],
-      submitLabel: 'Reassign',
+      submitLabel: t(locale, 'employees_reassign_btn'),
     });
     if (!values || !values.newManagerEmployeeId) return;
     btn.disabled = true;
     try {
       await api.post(`/api/organization/employees/${employee.id}/reassign-manager`, { newManagerEmployeeId: values.newManagerEmployeeId });
-      toast('Manager reassigned.', 'success');
+      toast(t(locale, 'employees_manager_reassigned_toast'), 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -104,11 +104,11 @@ export async function renderEmployees(container) {
   }
 
   async function terminate(employee, btn) {
-    if (!(await confirmModal(`Terminate ${employee.fullName}? This cannot be undone.`, { confirmLabel: 'Terminate', danger: true }))) return;
+    if (!(await confirmModal(`${t(locale, 'employees_terminate_btn')} ${employee.fullName}${t(locale, 'employees_terminate_confirm_suffix')}`, { confirmLabel: t(locale, 'employees_terminate_btn'), danger: true }))) return;
     btn.disabled = true;
     try {
       await api.post(`/api/organization/employees/${employee.id}/terminate`, {});
-      toast('Employee terminated.', 'success');
+      toast(t(locale, 'employees_terminated_toast'), 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -138,8 +138,8 @@ export async function renderEmployees(container) {
         items.forEach((item) => select.appendChild(el('option', { value: item.id }, item.name)));
         select.value = previous;
       };
-      fillSelect(empBranchSelect, branches, 'No branch');
-      fillSelect(empDeptSelect, departments, 'No department');
+      fillSelect(empBranchSelect, branches, t(locale, 'employees_no_branch'));
+      fillSelect(empDeptSelect, departments, t(locale, 'employees_no_department'));
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
     }
@@ -155,25 +155,25 @@ export async function renderEmployees(container) {
       currentItems = page.items;
       const rows = table(
         [
-          { label: 'Name', key: 'fullName' },
-          { label: 'Email', key: 'email' },
-          { label: 'Title', key: 'title' },
-          { label: 'Branch', render: (r) => (r.branchId ? nameFor(branches, r.branchId) : '—') },
-          { label: 'Department', render: (r) => (r.departmentId ? nameFor(departments, r.departmentId) : '—') },
-          { label: 'Team', render: (r) => r.teamId || '—' },
-          { label: 'Manager', render: (r) => (r.managerEmployeeId ? currentItems.find((e) => e.id === r.managerEmployeeId)?.fullName || '—' : '—') },
-          { label: 'Status', render: (r) => r.status },
+          { label: t(locale, 'crm_col_name'), key: 'fullName' },
+          { label: t(locale, 'field_email'), key: 'email' },
+          { label: t(locale, 'employees_job_title_field'), key: 'title' },
+          { label: t(locale, 'branches_field_branch'), render: (r) => (r.branchId ? nameFor(branches, r.branchId) : '—') },
+          { label: t(locale, 'branches_field_department'), render: (r) => (r.departmentId ? nameFor(departments, r.departmentId) : '—') },
+          { label: t(locale, 'branches_field_team'), render: (r) => r.teamId || '—' },
+          { label: t(locale, 'employees_manager_col'), render: (r) => (r.managerEmployeeId ? currentItems.find((e) => e.id === r.managerEmployeeId)?.fullName || '—' : '—') },
+          { label: t(locale, 'units_col_status'), render: (r) => r.status },
           { label: '', render: (r) => {
             if (r.status === 'terminated') return '';
-            const reassignBtn = el('button', {}, 'Reassign manager');
+            const reassignBtn = el('button', {}, t(locale, 'employees_reassign_manager_btn'));
             reassignBtn.addEventListener('click', () => reassignManager(r, reassignBtn));
-            const terminateBtn = el('button', { class: 'danger' }, 'Terminate');
+            const terminateBtn = el('button', { class: 'danger' }, t(locale, 'employees_terminate_btn'));
             terminateBtn.addEventListener('click', () => terminate(r, terminateBtn));
             return el('div', { class: 'form-actions' }, [reassignBtn, terminateBtn]);
           } },
         ],
         page.items,
-        { empty: 'No employees yet — add one above, or you may not have permission to view the roster.' },
+        { empty: t(locale, 'employees_list_empty') },
       );
       listSlot.append(rows, paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
