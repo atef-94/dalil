@@ -466,22 +466,22 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
     clear(body);
     const { project: p, developer, phases, launches, facilities, engineeringConsultant, projectManagement, salesPhoneNumbers } = details;
 
-    const editBtn = el('button', {}, 'Edit details');
+    const editBtn = el('button', {}, t(locale, 'units_project_edit_details_btn'));
     editBtn.addEventListener('click', async () => {
       const values = await formModal({
-        title: 'Edit project details',
+        title: t(locale, 'units_project_edit_title'),
         fields: [
-          { key: 'destination', label: 'Destination', value: p.destination || '' },
-          { key: 'address', label: 'Address', value: p.address || '' },
-          { key: 'coverImageUrl', label: 'Cover image (URL)', value: p.coverImageUrl || '' },
-          { key: 'locationMapUrl', label: 'Location on map (URL)', value: p.locationMapUrl || '' },
-          { key: 'finishingType', label: 'Finishing Type', value: p.finishingType || '' },
-          { key: 'projectAreaSqm', label: 'Project Area (sqm)', type: 'number', value: p.projectAreaSqm ?? '' },
-          { key: 'priceFrom', label: 'Price From', type: 'number', value: p.priceFrom ?? '' },
-          { key: 'priceTo', label: 'Price To', type: 'number', value: p.priceTo ?? '' },
-          { key: 'cashDiscountPercent', label: 'Cash Discount %', type: 'number', value: p.cashDiscountPercent ?? '' },
-          { key: 'maintenanceFeePercent', label: 'Maintenance Fees %', type: 'number', value: p.maintenanceFeePercent ?? '' },
-          { key: 'ministerialDecisionNumber', label: 'قرار وزاري (Ministerial Decision No.)', value: p.ministerialDecisionNumber || '' },
+          { key: 'destination', label: t(locale, 'units_project_field_destination'), value: p.destination || '' },
+          { key: 'address', label: t(locale, 'units_project_field_address'), value: p.address || '' },
+          { key: 'coverImageUrl', label: t(locale, 'units_project_field_cover_image'), value: p.coverImageUrl || '' },
+          { key: 'locationMapUrl', label: t(locale, 'units_project_field_location_map'), value: p.locationMapUrl || '' },
+          { key: 'finishingType', label: t(locale, 'units_project_field_finishing_type'), value: p.finishingType || '' },
+          { key: 'projectAreaSqm', label: t(locale, 'units_project_field_area'), type: 'number', value: p.projectAreaSqm ?? '' },
+          { key: 'priceFrom', label: t(locale, 'units_project_field_price_from'), type: 'number', value: p.priceFrom ?? '' },
+          { key: 'priceTo', label: t(locale, 'units_project_field_price_to'), type: 'number', value: p.priceTo ?? '' },
+          { key: 'cashDiscountPercent', label: t(locale, 'units_project_field_cash_discount'), type: 'number', value: p.cashDiscountPercent ?? '' },
+          { key: 'maintenanceFeePercent', label: t(locale, 'units_project_field_maintenance_fee'), type: 'number', value: p.maintenanceFeePercent ?? '' },
+          { key: 'ministerialDecisionNumber', label: t(locale, 'units_project_field_ministerial_decision'), value: p.ministerialDecisionNumber || '' },
         ],
       });
       if (!values) return;
@@ -499,7 +499,7 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
           maintenanceFeePercent: values.maintenanceFeePercent ? Number(values.maintenanceFeePercent) : undefined,
           ministerialDecisionNumber: values.ministerialDecisionNumber || undefined,
         });
-        toast('Project details saved.', 'success');
+        toast(t(locale, 'units_project_saved_toast'), 'success');
         await refresh();
         await onSaved?.();
       } catch (err) {
@@ -511,85 +511,85 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
       el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [
         el('div', {}, [
           p.destination ? badge(p.destination, 'blue') : null,
-          developer ? el('span', { style: 'margin-left:8px' }, `Developer: ${developer.name}`) : null,
+          developer ? el('span', { style: 'margin-left:8px' }, `${t(locale, 'units_project_developer_label')} ${developer.name}`) : null,
         ]),
         editBtn,
       ]),
       el('div', { style: 'margin-top:8px;font-size:13px;color:var(--text-muted)' }, [
-        p.address ? el('div', {}, `Address: ${p.address}`) : null,
-        p.locationMapUrl ? el('div', {}, [el('a', { href: p.locationMapUrl, target: '_blank', rel: 'noopener' }, 'View on map')]) : null,
-        p.finishingType ? el('div', {}, `Finishing: ${p.finishingType}`) : null,
-        p.projectAreaSqm ? el('div', {}, `Project area: ${p.projectAreaSqm} sqm`) : null,
-        (p.priceFrom || p.priceTo) ? el('div', {}, `Price range: ${p.priceFrom ? Number(p.priceFrom).toLocaleString() : '—'} – ${p.priceTo ? Number(p.priceTo).toLocaleString() : '—'} ${p.currency || 'EGP'}`) : null,
-        p.cashDiscountPercent !== undefined ? el('div', {}, `Cash discount: ${p.cashDiscountPercent}%`) : null,
-        p.maintenanceFeePercent !== undefined ? el('div', {}, `Maintenance: ${p.maintenanceFeePercent}%`) : null,
-        p.ministerialDecisionNumber ? el('div', {}, `قرار وزاري: ${p.ministerialDecisionNumber}`) : null,
-        engineeringConsultant ? el('div', {}, `Engineering consultant: ${engineeringConsultant.name}`) : null,
-        projectManagement ? el('div', {}, `Project management: ${projectManagement.name}`) : null,
+        p.address ? el('div', {}, `${t(locale, 'units_project_address_label')} ${p.address}`) : null,
+        p.locationMapUrl ? el('div', {}, [el('a', { href: p.locationMapUrl, target: '_blank', rel: 'noopener' }, t(locale, 'units_project_view_on_map'))]) : null,
+        p.finishingType ? el('div', {}, `${t(locale, 'units_project_finishing_label')} ${p.finishingType}`) : null,
+        p.projectAreaSqm ? el('div', {}, `${t(locale, 'units_project_area_label')} ${p.projectAreaSqm} sqm`) : null,
+        (p.priceFrom || p.priceTo) ? el('div', {}, `${t(locale, 'units_project_price_range_label')} ${p.priceFrom ? Number(p.priceFrom).toLocaleString() : '—'} – ${p.priceTo ? Number(p.priceTo).toLocaleString() : '—'} ${p.currency || 'EGP'}`) : null,
+        p.cashDiscountPercent !== undefined ? el('div', {}, `${t(locale, 'units_project_cash_discount_label')} ${p.cashDiscountPercent}%`) : null,
+        p.maintenanceFeePercent !== undefined ? el('div', {}, `${t(locale, 'units_project_maintenance_label')} ${p.maintenanceFeePercent}%`) : null,
+        p.ministerialDecisionNumber ? el('div', {}, `${t(locale, 'units_project_ministerial_decision_label')} ${p.ministerialDecisionNumber}`) : null,
+        engineeringConsultant ? el('div', {}, `${t(locale, 'units_project_consultant_label')} ${engineeringConsultant.name}`) : null,
+        projectManagement ? el('div', {}, `${t(locale, 'units_project_management_label')} ${projectManagement.name}`) : null,
       ]),
     ]);
     body.appendChild(summary);
 
     // Facilities
-    const addFacilityBtn = el('button', {}, '+ Facility');
+    const addFacilityBtn = el('button', {}, t(locale, 'units_project_add_facility_btn'));
     addFacilityBtn.addEventListener('click', async () => {
-      const values = await formModal({ title: 'Add facility', fields: [{ key: 'name', label: 'Facility name', placeholder: 'e.g. Clubhouse' }] });
+      const values = await formModal({ title: t(locale, 'units_project_add_facility_title'), fields: [{ key: 'name', label: t(locale, 'units_project_facility_name_field'), placeholder: 'e.g. Clubhouse' }] });
       if (!values?.name?.trim()) return;
       try {
         const f = await api.post('/api/inventory/facilities', { name: values.name.trim() });
         await api.patch(`/api/inventory/projects/${project.id}`, { facilityIds: [...(p.facilityIds || []), f.id] });
-        toast('Facility added.', 'success');
+        toast(t(locale, 'units_project_facility_added_toast'), 'success');
         await refresh();
       } catch (err) {
         body.prepend(errorBanner(err.message));
       }
     });
     body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
-      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, 'Facilities'), addFacilityBtn]),
-      el('div', { style: 'margin-top:8px' }, facilities.length ? facilities.map((f) => badge(f.name)) : [el('span', { class: 'muted' }, 'None yet.')]),
+      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, t(locale, 'units_project_facilities_title')), addFacilityBtn]),
+      el('div', { style: 'margin-top:8px' }, facilities.length ? facilities.map((f) => badge(f.name)) : [el('span', { class: 'muted' }, t(locale, 'units_project_none_yet'))]),
     ]));
 
     // Phases
-    const addPhaseBtn = el('button', {}, '+ Phase');
+    const addPhaseBtn = el('button', {}, t(locale, 'units_project_add_phase_btn'));
     addPhaseBtn.addEventListener('click', async () => {
-      const values = await formModal({ title: 'Add phase', fields: [{ key: 'name', label: 'Phase name', placeholder: 'e.g. Phase 1' }] });
+      const values = await formModal({ title: t(locale, 'units_project_add_phase_title'), fields: [{ key: 'name', label: t(locale, 'units_project_phase_name_field'), placeholder: 'e.g. Phase 1' }] });
       if (!values?.name?.trim()) return;
       try {
         await api.post(`/api/inventory/projects/${project.id}/phases`, { name: values.name.trim(), order: phases.length });
-        toast('Phase added.', 'success');
+        toast(t(locale, 'units_project_phase_added_toast'), 'success');
         await refresh();
       } catch (err) {
         body.prepend(errorBanner(err.message));
       }
     });
     body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
-      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, 'Phases'), addPhaseBtn]),
-      table([{ label: 'Name', key: 'name' }, { label: 'Order', render: (ph) => String(ph.order) }], phases, { empty: 'No phases yet.' }),
+      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, t(locale, 'units_project_phases_title')), addPhaseBtn]),
+      table([{ label: t(locale, 'units_col_name'), key: 'name' }, { label: t(locale, 'units_col_order'), render: (ph) => String(ph.order) }], phases, { empty: t(locale, 'units_project_no_phases') }),
     ]));
 
     // Launches
-    const addLaunchBtn = el('button', {}, '+ Launch');
+    const addLaunchBtn = el('button', {}, t(locale, 'units_project_add_launch_btn'));
     addLaunchBtn.addEventListener('click', async () => {
       const values = await formModal({
-        title: 'Add launch',
+        title: t(locale, 'units_project_add_launch_title'),
         fields: [
-          { key: 'name', label: 'Launch name', placeholder: 'e.g. New Release' },
-          { key: 'launchDate', label: 'Launch date', type: 'date' },
-          { key: 'notes', label: 'Notes', type: 'textarea' },
+          { key: 'name', label: t(locale, 'units_project_launch_name_field'), placeholder: 'e.g. New Release' },
+          { key: 'launchDate', label: t(locale, 'units_project_launch_date_field'), type: 'date' },
+          { key: 'notes', label: t(locale, 'units_project_notes_field'), type: 'textarea' },
         ],
       });
       if (!values?.name?.trim()) return;
       try {
         await api.post(`/api/inventory/projects/${project.id}/launches`, { name: values.name.trim(), launchDate: values.launchDate || undefined, notes: values.notes || undefined });
-        toast('Launch added.', 'success');
+        toast(t(locale, 'units_project_launch_added_toast'), 'success');
         await refresh();
       } catch (err) {
         body.prepend(errorBanner(err.message));
       }
     });
     body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
-      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, 'Launches'), addLaunchBtn]),
-      table([{ label: 'Name', key: 'name' }, { label: 'Date', render: (l) => l.launchDate || '—' }], launches, { empty: 'No launches yet.' }),
+      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, t(locale, 'units_project_launches_title')), addLaunchBtn]),
+      table([{ label: t(locale, 'units_col_name'), key: 'name' }, { label: t(locale, 'units_col_date'), render: (l) => l.launchDate || '—' }], launches, { empty: t(locale, 'units_project_no_launches') }),
     ]));
 
     // Unit Specs (Catalog) — the project's marketed product ranges (Unit
@@ -597,36 +597,36 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
     // Catalog import or added manually; distinct from real, physically
     // coded Units below.
     body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
-      el('h4', { style: 'margin:0 0 8px' }, 'Unit Specs (Catalog)'),
+      el('h4', { style: 'margin:0 0 8px' }, t(locale, 'units_project_unit_specs_title')),
       table(
         [
-          { label: 'Unit Type', key: 'unitType' },
-          { label: 'Bedrooms', render: (s) => (s.bedrooms !== undefined && s.bedrooms !== null ? String(s.bedrooms) : '—') },
-          { label: 'BUA (sqm)', render: (s) => (s.buaFromSqm || s.buaToSqm ? `${s.buaFromSqm ?? '—'} – ${s.buaToSqm ?? '—'}` : '—') },
-          { label: 'Price', render: (s) => (s.priceFrom || s.priceTo ? `${s.priceFrom ? Number(s.priceFrom).toLocaleString() : '—'} – ${s.priceTo ? Number(s.priceTo).toLocaleString() : '—'}` : '—') },
-          { label: 'Finishing', render: (s) => s.finishingType || '—' },
+          { label: t(locale, 'units_col_unit_type'), key: 'unitType' },
+          { label: t(locale, 'units_col_bedrooms'), render: (s) => (s.bedrooms !== undefined && s.bedrooms !== null ? String(s.bedrooms) : '—') },
+          { label: t(locale, 'units_col_bua'), render: (s) => (s.buaFromSqm || s.buaToSqm ? `${s.buaFromSqm ?? '—'} – ${s.buaToSqm ?? '—'}` : '—') },
+          { label: t(locale, 'units_col_price'), render: (s) => (s.priceFrom || s.priceTo ? `${s.priceFrom ? Number(s.priceFrom).toLocaleString() : '—'} – ${s.priceTo ? Number(s.priceTo).toLocaleString() : '—'}` : '—') },
+          { label: t(locale, 'units_col_finishing'), render: (s) => s.finishingType || '—' },
         ],
         unitSpecs,
-        { empty: 'No catalog ranges yet — import a Project Catalog file, or none apply to this project.' },
+        { empty: t(locale, 'units_project_no_unit_specs') },
       ),
     ]));
 
     // Sales phone numbers
-    const addPhoneBtn = el('button', {}, '+ Sales Phone Number');
+    const addPhoneBtn = el('button', {}, t(locale, 'units_project_add_phone_btn'));
     addPhoneBtn.addEventListener('click', async () => {
-      const values = await formModal({ title: 'Add sales direct phone number', fields: [{ key: 'phoneNumber', label: 'Phone number', placeholder: 'e.g. +20 100 000 0000' }] });
+      const values = await formModal({ title: t(locale, 'units_project_add_phone_title'), fields: [{ key: 'phoneNumber', label: t(locale, 'units_project_phone_field'), placeholder: 'e.g. +20 100 000 0000' }] });
       if (!values?.phoneNumber?.trim()) return;
       try {
         await api.post(`/api/inventory/projects/${project.id}/sales-phone-numbers`, { phoneNumber: values.phoneNumber.trim() });
-        toast('Sales phone number added.', 'success');
+        toast(t(locale, 'units_project_phone_added_toast'), 'success');
         await refresh();
       } catch (err) {
         body.prepend(errorBanner(err.message));
       }
     });
     body.appendChild(el('div', { class: 'card' }, [
-      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, 'Sales Direct Phone Numbers'), addPhoneBtn]),
-      el('div', { style: 'margin-top:8px' }, salesPhoneNumbers.length ? salesPhoneNumbers.map((s) => badge(s.phoneNumber)) : [el('span', { class: 'muted' }, 'None yet.')]),
+      el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [el('h4', { style: 'margin:0' }, t(locale, 'units_project_phones_title')), addPhoneBtn]),
+      el('div', { style: 'margin-top:8px' }, salesPhoneNumbers.length ? salesPhoneNumbers.map((s) => badge(s.phoneNumber)) : [el('span', { class: 'muted' }, t(locale, 'units_project_none_yet'))]),
     ]));
   }
 
@@ -647,10 +647,10 @@ async function renderManageTab(container, locale) {
   const headerActions = el('div');
   container.appendChild(el('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:8px' }, headerActions));
   if (can('unit', 'create')) {
-    const importBtn = el('button', {}, 'Import Units');
+    const importBtn = el('button', {}, t(locale, 'units_manage_import_btn'));
     importBtn.addEventListener('click', () => {
       openImportWizard({
-        title: 'Import Units',
+        title: t(locale, 'units_manage_import_btn'),
         uploadPath: '/api/inventory/units/import/upload',
         onImported: () => { load(); loadImportHistory(); },
         uploadOptions: [
@@ -692,14 +692,14 @@ async function renderManageTab(container, locale) {
   // ---- Developers ----
   const developersListSlot = el('div');
   const newDeveloperNameInput = el('input', { type: 'text', placeholder: 'e.g. Emaar' });
-  const addDeveloperBtn = el('button', {}, 'Add developer');
+  const addDeveloperBtn = el('button', {}, t(locale, 'units_manage_add_developer_btn'));
   addDeveloperBtn.addEventListener('click', async () => {
     if (!newDeveloperNameInput.value.trim()) return;
     addDeveloperBtn.disabled = true;
     try {
       await api.post('/api/inventory/developers', { name: newDeveloperNameInput.value.trim() });
       newDeveloperNameInput.value = '';
-      toast('Developer added.', 'success');
+      toast(t(locale, 'units_manage_developer_added_toast'), 'success');
       await loadDevelopers();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -708,9 +708,9 @@ async function renderManageTab(container, locale) {
     }
   });
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Developers'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'units_manage_developers_title')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Developer name'), newDeveloperNameInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_developer_name_field')), newDeveloperNameInput]),
       el('div', { style: 'align-self:flex-end' }, addDeveloperBtn),
     ]),
     developersListSlot,
@@ -723,15 +723,15 @@ async function renderManageTab(container, locale) {
       developers = page.items;
       developersListSlot.appendChild(table(
         [
-          { label: 'Name', key: 'name' },
+          { label: t(locale, 'units_col_name'), key: 'name' },
           { label: '', render: (d) => {
-            const btn = el('button', {}, 'Portfolio');
+            const btn = el('button', {}, t(locale, 'units_manage_portfolio_btn'));
             btn.addEventListener('click', () => viewDeveloperPortfolio(d));
             return btn;
           } },
         ],
         developers,
-        { empty: 'No developers yet — add one above.' },
+        { empty: t(locale, 'units_manage_no_developers') },
       ));
     } catch (err) {
       developersListSlot.appendChild(errorBanner(err.message));
@@ -740,14 +740,14 @@ async function renderManageTab(container, locale) {
 
   async function viewDeveloperPortfolio(developer) {
     const body = el('div', {}, loadingState());
-    contentModal(`${developer.name} — Portfolio`, body);
+    contentModal(`${developer.name} — ${t(locale, 'units_manage_portfolio_title')}`, body);
     try {
       const result = await api.get(`/api/inventory/developers/${developer.id}/portfolio`);
       clear(body);
       body.appendChild(table(
-        [{ label: 'Project', key: 'name' }, { label: 'Destination', render: (p) => p.destination || '—' }],
+        [{ label: t(locale, 'units_col_project'), key: 'name' }, { label: t(locale, 'units_col_destination'), render: (p) => p.destination || '—' }],
         result.projects,
-        { empty: 'No projects yet for this developer.' },
+        { empty: t(locale, 'units_manage_no_projects_for_developer') },
       ));
     } catch (err) {
       clear(body);
@@ -759,17 +759,17 @@ async function renderManageTab(container, locale) {
   const newProjectNameInput = el('input', { type: 'text', placeholder: 'e.g. Marina Towers' });
   const newProjectLocationInput = el('input', { type: 'text', placeholder: 'e.g. North Coast (optional)' });
   const newProjectDestinationInput = el('input', { type: 'text', placeholder: 'e.g. New Cairo' });
-  const newProjectDeveloperSelect = selectInput([{ value: '', label: '— none —' }]);
-  const addProjectBtn = el('button', {}, 'Add project');
+  const newProjectDeveloperSelect = selectInput([{ value: '', label: t(locale, 'units_manage_none_option') }]);
+  const addProjectBtn = el('button', {}, t(locale, 'units_manage_add_project_btn'));
   addProjectBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!newProjectNameInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('Enter a project name.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'units_manage_enter_project_name_error')));
       return;
     }
     addProjectBtn.disabled = true;
     try {
-      const project = await api.post('/api/inventory/projects', {
+      await api.post('/api/inventory/projects', {
         name: newProjectNameInput.value.trim(),
         location: newProjectLocationInput.value.trim() || undefined,
         destination: newProjectDestinationInput.value.trim() || undefined,
@@ -779,7 +779,7 @@ async function renderManageTab(container, locale) {
       newProjectLocationInput.value = '';
       newProjectDestinationInput.value = '';
       newProjectDeveloperSelect.value = '';
-      toast(`Project "${project.name}" created.`, 'success');
+      toast(t(locale, 'units_manage_project_created_toast'), 'success');
       await loadProjects();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -790,12 +790,12 @@ async function renderManageTab(container, locale) {
 
   const projectsListSlot = el('div');
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Projects'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'units_manage_projects_title')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Project name'), newProjectNameInput]),
-      el('div', {}, [el('label', {}, 'Location'), newProjectLocationInput]),
-      el('div', {}, [el('label', {}, 'Destination'), newProjectDestinationInput]),
-      el('div', {}, [el('label', {}, 'Developer'), newProjectDeveloperSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_project_name_field')), newProjectNameInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_location_field')), newProjectLocationInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_destination_field')), newProjectDestinationInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_developer_field')), newProjectDeveloperSelect]),
       el('div', { style: 'align-self:flex-end' }, addProjectBtn),
     ]),
     projectsListSlot,
@@ -811,27 +811,27 @@ async function renderManageTab(container, locale) {
       const page = await api.get('/api/inventory/projects', { limit: 200 });
       projects = page.items;
       newProjectDeveloperSelect.innerHTML = '';
-      newProjectDeveloperSelect.appendChild(el('option', { value: '' }, '— none —'));
+      newProjectDeveloperSelect.appendChild(el('option', { value: '' }, t(locale, 'units_manage_none_option')));
       developers.forEach((d) => newProjectDeveloperSelect.appendChild(el('option', { value: d.id }, d.name)));
       projectSelect.innerHTML = '';
       projects.forEach((p) => projectSelect.appendChild(el('option', { value: p.id }, p.name)));
       filterDestinationSelect.innerHTML = '';
-      filterDestinationSelect.appendChild(el('option', { value: '' }, 'Any destination'));
+      filterDestinationSelect.appendChild(el('option', { value: '' }, t(locale, 'units_manage_any_destination_option')));
       [...new Set(projects.map((p) => p.destination).filter(Boolean))].forEach((d) => filterDestinationSelect.appendChild(el('option', { value: d }, d)));
 
       projectsListSlot.appendChild(table(
         [
-          { label: 'Name', key: 'name' },
-          { label: 'Destination', render: (p) => p.destination || '—' },
-          { label: 'Developer', render: (p) => developerName(p.developerId) },
+          { label: t(locale, 'units_col_name'), key: 'name' },
+          { label: t(locale, 'units_col_destination'), render: (p) => p.destination || '—' },
+          { label: t(locale, 'units_col_developer'), render: (p) => developerName(p.developerId) },
           { label: '', render: (p) => {
-            const btn = el('button', {}, 'Details');
+            const btn = el('button', {}, t(locale, 'units_manage_details_btn'));
             btn.addEventListener('click', () => openProjectDetailModal(p, { locale, onSaved: loadProjects }));
             return btn;
           } },
         ],
         page.items,
-        { empty: 'No projects yet — add one above.' },
+        { empty: t(locale, 'units_manage_no_projects') },
       ));
     } catch (err) {
       projectsListSlot.appendChild(errorBanner(err.message));
@@ -851,12 +851,12 @@ async function renderManageTab(container, locale) {
   const buildingInput = el('input', { type: 'text', placeholder: 'e.g. B3' });
   const gardenAreaInput = el('input', { type: 'number', min: '0', placeholder: 'optional' });
   const finishingInput = el('input', { type: 'text', placeholder: 'e.g. Fully Finished' });
-  const createBtn = el('button', { class: 'primary' }, 'Add unit');
+  const createBtn = el('button', { class: 'primary' }, t(locale, 'units_manage_add_unit_btn'));
 
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!projectSelect.value || !codeInput.value.trim() || !typeInput.value.trim() || !(Number(areaInput.value) > 0) || !(Number(priceInput.value) > 0)) {
-      errorSlot.appendChild(errorBanner('Select a project, and fill in code, type, and a positive area and price.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'units_manage_add_unit_error')));
       return;
     }
     createBtn.disabled = true;
@@ -876,7 +876,7 @@ async function renderManageTab(container, locale) {
         finishingType: finishingInput.value.trim() || undefined,
       });
       [codeInput, typeInput, areaInput, priceInput, bedroomsInput, floorInput, designTypeInput, viewInput, buildingInput, gardenAreaInput, finishingInput].forEach((i) => (i.value = ''));
-      toast('Unit added.', 'success');
+      toast(t(locale, 'units_manage_unit_added_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -886,42 +886,42 @@ async function renderManageTab(container, locale) {
   });
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Add a unit'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'units_manage_add_unit_title')),
     el('div', { class: 'form-row', style: 'flex-wrap:wrap' }, [
-      el('div', {}, [el('label', {}, 'Project'), projectSelect]),
-      el('div', {}, [el('label', {}, 'Unit code'), codeInput]),
-      el('div', {}, [el('label', {}, 'Type'), typeInput]),
-      el('div', {}, [el('label', {}, 'Area (sqm)'), areaInput]),
-      el('div', {}, [el('label', {}, 'List price'), priceInput]),
-      el('div', {}, [el('label', {}, 'Bedrooms'), bedroomsInput]),
-      el('div', {}, [el('label', {}, 'Floor'), floorInput]),
-      el('div', {}, [el('label', {}, 'Design type'), designTypeInput]),
-      el('div', {}, [el('label', {}, 'View'), viewInput]),
-      el('div', {}, [el('label', {}, 'Building'), buildingInput]),
-      el('div', {}, [el('label', {}, 'Garden area (sqm)'), gardenAreaInput]),
-      el('div', {}, [el('label', {}, 'Finishing'), finishingInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_project_field')), projectSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_unit_code_field')), codeInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_type_field')), typeInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_area_field')), areaInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_list_price_field')), priceInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_bedrooms_field')), bedroomsInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_floor_field')), floorInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_design_type_field')), designTypeInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_view_field')), viewInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_building_field')), buildingInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_garden_area_field')), gardenAreaInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_finishing_field')), finishingInput]),
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
 
   // ---- Search + advanced filters ----
-  const search = searchInput('Search by code or type…', (value) => { q = value; offset = 0; load(); });
-  const filterMinPrice = el('input', { type: 'number', placeholder: 'Min price' });
-  const filterMaxPrice = el('input', { type: 'number', placeholder: 'Max price' });
-  const filterMinArea = el('input', { type: 'number', placeholder: 'Min area (sqm)' });
-  const filterMaxArea = el('input', { type: 'number', placeholder: 'Max area (sqm)' });
-  const filterBedrooms = el('input', { type: 'number', min: '0', placeholder: 'Bedrooms' });
-  const filterFinishing = el('input', { type: 'text', placeholder: 'Finishing' });
-  const filterDestinationSelect = selectInput([{ value: '', label: 'Any destination' }]);
+  const search = searchInput(t(locale, 'units_manage_search_placeholder'), (value) => { q = value; offset = 0; load(); });
+  const filterMinPrice = el('input', { type: 'number', placeholder: t(locale, 'units_manage_min_price_field') });
+  const filterMaxPrice = el('input', { type: 'number', placeholder: t(locale, 'units_manage_max_price_field') });
+  const filterMinArea = el('input', { type: 'number', placeholder: t(locale, 'units_manage_min_area_field') });
+  const filterMaxArea = el('input', { type: 'number', placeholder: t(locale, 'units_manage_max_area_field') });
+  const filterBedrooms = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_bedrooms_field') });
+  const filterFinishing = el('input', { type: 'text', placeholder: t(locale, 'units_manage_finishing_field') });
+  const filterDestinationSelect = selectInput([{ value: '', label: t(locale, 'units_manage_any_destination_option') }]);
   const filterStatusSelect = selectInput([
-    { value: 'any', label: 'Any status' },
-    { value: 'available', label: 'Available' },
-    { value: 'held', label: 'Held' },
-    { value: 'reserved', label: 'Reserved' },
-    { value: 'contracted', label: 'Contracted' },
+    { value: 'any', label: t(locale, 'units_manage_status_any') },
+    { value: 'available', label: t(locale, 'units_manage_status_available') },
+    { value: 'held', label: t(locale, 'units_manage_status_held') },
+    { value: 'reserved', label: t(locale, 'units_manage_status_reserved') },
+    { value: 'contracted', label: t(locale, 'units_manage_status_contracted') },
   ]);
-  const applyFiltersBtn = el('button', { class: 'primary' }, 'Apply filters');
-  const clearFiltersBtn = el('button', {}, 'Clear');
+  const applyFiltersBtn = el('button', { class: 'primary' }, t(locale, 'units_manage_apply_filters_btn'));
+  const clearFiltersBtn = el('button', {}, t(locale, 'units_manage_clear_filters_btn'));
   applyFiltersBtn.addEventListener('click', () => {
     filters = {
       minPrice: filterMinPrice.value || undefined,
@@ -947,16 +947,16 @@ async function renderManageTab(container, locale) {
 
   container.appendChild(el('div', { class: 'card' }, [
     el('div', { class: 'form-row', style: 'max-width:320px' }, [search]),
-    el('h4', { style: 'margin:12px 0 6px' }, 'Advanced filters'),
+    el('h4', { style: 'margin:12px 0 6px' }, t(locale, 'units_manage_advanced_filters')),
     el('div', { class: 'form-row', style: 'flex-wrap:wrap' }, [
-      el('div', {}, [el('label', {}, 'Min price'), filterMinPrice]),
-      el('div', {}, [el('label', {}, 'Max price'), filterMaxPrice]),
-      el('div', {}, [el('label', {}, 'Min area'), filterMinArea]),
-      el('div', {}, [el('label', {}, 'Max area'), filterMaxArea]),
-      el('div', {}, [el('label', {}, 'Bedrooms'), filterBedrooms]),
-      el('div', {}, [el('label', {}, 'Finishing'), filterFinishing]),
-      el('div', {}, [el('label', {}, 'Destination'), filterDestinationSelect]),
-      el('div', {}, [el('label', {}, 'Status'), filterStatusSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_min_price_field')), filterMinPrice]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_max_price_field')), filterMaxPrice]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_min_area_field')), filterMinArea]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_max_area_field')), filterMaxArea]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_bedrooms_field')), filterBedrooms]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_finishing_field')), filterFinishing]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_destination_field')), filterDestinationSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_status_field')), filterStatusSelect]),
       el('div', { style: 'align-self:flex-end;display:flex;gap:6px' }, [applyFiltersBtn, clearFiltersBtn]),
     ]),
   ]));
@@ -967,8 +967,8 @@ async function renderManageTab(container, locale) {
   const importHistorySlot = el('div');
   if (can('unit', 'view')) {
     container.appendChild(el('div', { class: 'card' }, [
-      el('h3', { style: 'margin-top:0' }, 'Import History'),
-      el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, 'Every Inventory Import run for this company, newest first.'),
+      el('h3', { style: 'margin-top:0' }, t(locale, 'units_manage_import_history_title')),
+      el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, t(locale, 'units_manage_import_history_hint')),
       importHistorySlot,
     ]));
   }
@@ -980,14 +980,14 @@ async function renderManageTab(container, locale) {
       const sessions = await api.get('/api/imports/history', { targetType: 'inventory_unit' });
       importHistorySlot.appendChild(table(
         [
-          { label: 'File', key: 'fileName' },
-          { label: 'Type', render: (s) => s.fileType.toUpperCase() },
-          { label: 'Rows', render: (s) => String(s.rawRows.length) },
-          { label: 'Status', render: (s) => statusBadge(s.status) },
-          { label: 'Uploaded', render: (s) => new Date(s.createdAt).toLocaleString() },
+          { label: t(locale, 'units_col_file'), key: 'fileName' },
+          { label: t(locale, 'units_col_type'), render: (s) => s.fileType.toUpperCase() },
+          { label: t(locale, 'units_col_rows'), render: (s) => String(s.rawRows.length) },
+          { label: t(locale, 'units_col_status'), render: (s) => statusBadge(s.status) },
+          { label: t(locale, 'units_col_uploaded'), render: (s) => new Date(s.createdAt).toLocaleString() },
         ],
         sessions,
-        { empty: 'No imports yet.' },
+        { empty: t(locale, 'units_manage_no_imports') },
       ));
     } catch (err) {
       importHistorySlot.appendChild(errorBanner(err.message));
@@ -997,7 +997,7 @@ async function renderManageTab(container, locale) {
   async function hold(unit, btn) {
     try {
       await api.post(`/api/inventory/units/${unit.id}/hold`, {});
-      toast('Unit held for 15 minutes.', 'success');
+      toast(t(locale, 'units_manage_hold_toast'), 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -1019,17 +1019,17 @@ async function renderManageTab(container, locale) {
       clear(listSlot);
       listSlot.append(table(
         [
-          { label: 'Code', key: 'code' },
-          { label: 'Project', render: (u) => projectName(u.projectId) },
-          { label: 'Type', key: 'unitType' },
-          { label: 'Beds', render: (u) => (u.bedrooms !== undefined ? String(u.bedrooms) : '—') },
-          { label: 'Area', render: (u) => `${u.areaSqm} m²` },
-          { label: 'Price', render: (u) => Number(u.listPrice).toLocaleString() },
-          { label: 'Finishing', render: (u) => u.finishingType || '—' },
-          { label: 'Status', render: (u) => statusBadge(u.status) },
+          { label: t(locale, 'units_col_code'), key: 'code' },
+          { label: t(locale, 'units_col_project'), render: (u) => projectName(u.projectId) },
+          { label: t(locale, 'units_col_type'), key: 'unitType' },
+          { label: t(locale, 'units_col_beds'), render: (u) => (u.bedrooms !== undefined ? String(u.bedrooms) : '—') },
+          { label: t(locale, 'units_col_area'), render: (u) => `${u.areaSqm} m²` },
+          { label: t(locale, 'units_col_price'), render: (u) => Number(u.listPrice).toLocaleString() },
+          { label: t(locale, 'units_col_finishing'), render: (u) => u.finishingType || '—' },
+          { label: t(locale, 'units_col_status'), render: (u) => statusBadge(u.status) },
           { label: '', render: (u) => {
             if (u.status !== 'available') return '';
-            const btn = el('button', {}, 'Hold');
+            const btn = el('button', {}, t(locale, 'units_manage_hold_btn'));
             btn.addEventListener('click', () => {
               btn.disabled = true;
               hold(u, btn);
@@ -1038,7 +1038,7 @@ async function renderManageTab(container, locale) {
           } },
         ],
         page.items,
-        { empty: 'No units match — add one above or adjust your filters.' },
+        { empty: t(locale, 'units_manage_no_units') },
       ), paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));
