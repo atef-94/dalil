@@ -905,6 +905,11 @@ export interface AuditLogEntry {
   resourceId: string;
   metadata?: Record<string, unknown>;
   createdAt: string;
+  /** Who actually initiated this: a human user (the default, and the only
+   * value every pre-existing entry implicitly has) or the AI Agent acting
+   * autonomously via AutomationService.executeActionDirect(). Optional so
+   * every audit call site written before this existed stays valid. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- HR ----
@@ -1030,6 +1035,10 @@ export interface Message {
   status: MessageStatus;
   createdAt: string;
   readAt?: string;
+  /** Set when this message/comment/log was created by the AI Agent
+   * executing a chosen action rather than a human typing it in — see
+   * AuditLogEntry.actorType for the same distinction on audit rows. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- Customer Portal ----
@@ -1061,6 +1070,12 @@ export interface Task {
   createdByUserId: string;
   createdAt: string;
   completedAt?: string;
+  /** Who actually completed/cancelled it — distinct from createdByUserId,
+   * since a follow-up is very often completed by someone other than
+   * whoever scheduled it. Set alongside completedAt. */
+  completedByUserId?: string;
+  /** See Message.actorType — set when the AI Agent created this task. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- File Import Pipeline ----

@@ -473,6 +473,50 @@ test('update_lead_status action still resolves a legacy literal "status" param t
   assert.equal(updated!.stageId, contacted.id);
 });
 
+test('update_lead_status via a workflow run writes a real audit-trail entry attributed to the human who owns the workflow', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'no_answer')!;
+
+  await h.automation.createWorkflow({
+    companyId: 'c1',
+    name: 'Advance lead',
+    createdByUserId: 'owner-1',
+    trigger: { type: 'event', eventType: 'lead.created' },
+    steps: [{ name: 'Mark contacted', action: { type: 'update_lead_status', params: { leadId: lead.id, stageId: contacted.id } } }],
+  });
+  await h.automation.handleEvent({ companyId: 'c1', type: 'lead.created', payload: {} });
+
+  const entries = await h.auditLogRepo.findAll(() => true);
+  const stageEntry = entries.find((e) => e.resource === 'lead' && e.resourceId === lead.id && e.metadata?.toStageId === contacted.id);
+  assert.ok(stageEntry, 'expected a lead audit entry recording the stage move');
+  assert.equal(stageEntry!.actorUserId, 'owner-1');
+  assert.notEqual(stageEntry!.actorType, 'ai_agent');
+});
+
+test('executeActionDirect (the AI Agent execution path) tags its lead-mutating audit entries as ai_agent', async () => {
+  const h = await freshHarness();
+  await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);
+  const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100', ownerEmployeeUserId: 'owner-1' });
+  const contacted = (await h.crmStages.listStages('c1')).find((s) => s.key === 'no_answer')!;
+
+  await h.automation.executeActionDirect('c1', 'owner-1', { type: 'update_lead_status', params: { leadId: lead.id, stageId: contacted.id } });
+
+  const entries = await h.auditLogRepo.findAll(() => true);
+  const stageEntry = entries.find((e) => e.resource === 'lead' && e.resourceId === lead.id && e.metadata?.toStageId === contacted.id);
+  assert.ok(stageEntry, 'expected a lead audit entry recording the AI-driven stage move');
+  assert.equal(stageEntry!.actorType, 'ai_agent');
+
+  await h.automation.executeActionDirect('c1', 'owner-1', { type: 'assign_lead_owner', params: { leadId: lead.id, ownerEmployeeUserId: 'emp-9' } });
+  const entries2 = await h.auditLogRepo.findAll(() => true);
+  const ownerEntry = entries2.find((e) => e.resource === 'lead' && e.resourceId === lead.id && e.action === 'assign');
+  assert.ok(ownerEntry, 'expected a lead audit entry recording the AI-driven owner reassignment');
+  assert.equal(ownerEntry!.actorType, 'ai_agent');
+  assert.equal(ownerEntry!.metadata?.previousOwnerUserId, 'owner-1');
+  assert.equal(ownerEntry!.metadata?.newOwnerUserId, 'emp-9');
+});
+
 test('assign_lead_owner action reassigns the lead through CrmService', async () => {
   const h = await freshHarness();
   await seedUserWithGrants(h, 'c1', 'owner-1', [{ action: 'edit', resource: 'lead' }]);

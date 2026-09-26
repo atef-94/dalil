@@ -412,7 +412,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const importSessions = new ImportSessionService(repos.importSessions);
   const leadImport = new LeadImportService(repos.leads, repos.users, crm);
   const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
-  const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
+  const leadTimeline = new LeadTimelineService(
+    repos.leads,
+    repos.auditEntries,
+    repos.messages,
+    repos.tasks,
+    repos.opportunities,
+    repos.contracts,
+    repos.users,
+    repos.employees,
+    repos.reservations,
+  );
   const inventory = new InventoryService(
     repos.units,
     repos.unitHolds,
@@ -2342,7 +2352,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       managerEmployeeId: ownerKeys.managerEmployeeId,
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
-    const body = parseJsonBody<{ stageId: string; lostReason?: string }>(ctx.body);
+    const body = parseJsonBody<{ stageId: string; lostReason?: string; note?: string }>(ctx.body);
     const fromStageId = lead.stageId;
     const updated = await crm.moveToStage(ctx.params.leadId!, actor.companyId, body.stageId, body.lostReason);
     const stage = await crmStages.getStage(updated.stageId, actor.companyId);
@@ -2362,7 +2372,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
       // `typeof meta.toStatus === 'string'` detection — intentionally left
       // unmodified, see the CRM restructuring plan — still renders a
       // readable "Status changed to ..." timeline entry for stage moves.
-      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason },
+      // `note` is an optional reason/comment tied to this one transition
+      // (shown alongside "Previous Stage / New Stage" in the Lead
+      // Timeline) — distinct from a standalone Comment/Note, which still
+      // goes through the Message architecture untouched.
+      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason, note: body.note?.trim() || undefined },
     });
     // Both events fire together during the transition period: 'status_changed'
     // keeps any pre-existing workflow/AiPolicy row triggered on the legacy
@@ -2414,6 +2428,28 @@ export async function buildApplication(options: AppOptions): Promise<Application
       preferredTransferMethod?: string;
     }>(ctx.body);
     const updated = await crm.updateCustomFields(ctx.params.leadId!, actor.companyId, body);
+    // "Important Lead Data Changes" in the Lead Timeline: only the fields
+    // that actually changed value, each with its previous/new value — not
+    // a blanket "lead edited" entry, and never overwriting a prior change
+    // (this is one more append-only AuditLog row, same as every other
+    // audited mutation).
+    const leadBefore = lead as unknown as Record<string, unknown>;
+    const leadAfter = updated as unknown as Record<string, unknown>;
+    const changedFields = (Object.keys(body) as (keyof typeof body)[]).filter((key) => body[key] !== undefined && leadBefore[key] !== leadAfter[key]);
+    if (changedFields.length > 0) {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'lead',
+        resourceId: updated.id,
+        metadata: {
+          fieldsChanged: changedFields,
+          previousValues: Object.fromEntries(changedFields.map((k) => [k, leadBefore[k]])),
+          newValues: Object.fromEntries(changedFields.map((k) => [k, leadAfter[k]])),
+        },
+      });
+    }
     return { status: 200, body: updated };
   });
 
@@ -2431,8 +2467,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ ownerEmployeeUserId: string }>(ctx.body);
+    const previousOwnerUserId = lead.ownerEmployeeUserId;
     const updated = await crm.assignOwner(ctx.params.leadId!, actor.companyId, body.ownerEmployeeUserId);
-    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'assign', resource: 'lead', resourceId: updated.id, metadata: { newOwnerUserId: updated.ownerEmployeeUserId } });
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'assign',
+      resource: 'lead',
+      resourceId: updated.id,
+      metadata: { previousOwnerUserId, newOwnerUserId: updated.ownerEmployeeUserId },
+    });
     return { status: 200, body: updated };
   });
 
@@ -2451,12 +2495,32 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ tags?: string[]; priority?: Lead['priority'] }>(ctx.body);
     const updated = await crm.updateTagsAndPriority(ctx.params.leadId!, actor.companyId, body);
+    const previousTags = (lead.tags ?? []).join(',');
+    const newTags = (updated.tags ?? []).join(',');
+    if (previousTags !== newTags || lead.priority !== updated.priority) {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'lead',
+        resourceId: updated.id,
+        metadata: {
+          fieldsChanged: [previousTags !== newTags ? 'tags' : undefined, lead.priority !== updated.priority ? 'priority' : undefined].filter(Boolean),
+          previousValues: { tags: lead.tags, priority: lead.priority },
+          newValues: { tags: updated.tags, priority: updated.priority },
+        },
+      });
+    }
     return { status: 200, body: updated };
   });
 
   // Unified Lead Timeline: everything ACTIVE actually recorded about this
-  // lead (status/owner history, messages, tasks, opportunity, contract),
-  // in one chronological view.
+  // lead (stage/owner/field-change history, comments/calls/WhatsApp/email,
+  // follow-ups, offers, reservations, contracts), newest first, with
+  // optional type/actor/date-range filters, free-text search, and
+  // pagination — all applied server-side over the full, real history (the
+  // service never truncates it, so filtering/search/paging here can never
+  // miss an older entry the way client-side-only filtering would).
   httpServer.get('/api/crm/leads/:leadId/timeline', async (ctx) => {
     const actor = await actorOf(ctx);
     const lead = await crm.getLead(ctx.params.leadId!);
@@ -2471,7 +2535,22 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing view:lead permission for this lead');
     const timeline = await leadTimeline.getTimeline(ctx.params.leadId!, actor.companyId);
-    return { status: 200, body: timeline };
+    let entries = [...timeline.entries].reverse(); // newest first
+
+    const type = ctx.query.get('type');
+    if (type) {
+      const types = new Set(type.split(',').map((t) => t.trim()).filter(Boolean));
+      entries = entries.filter((e) => types.has(e.type));
+    }
+    const userId = ctx.query.get('userId');
+    if (userId) entries = entries.filter((e) => e.actorUserId === userId);
+    const from = ctx.query.get('from');
+    if (from) entries = entries.filter((e) => Date.parse(e.at) >= Date.parse(from));
+    const to = ctx.query.get('to');
+    if (to) entries = entries.filter((e) => Date.parse(e.at) <= Date.parse(to));
+    entries = searchFilter(entries, ['summary', 'actorName'], ctx.query.get('q'));
+
+    return { status: 200, body: paginate(entries, ctx.query) };
   });
 
   // ---- Sales ----
@@ -3944,7 +4023,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
       throw new ForbiddenError('missing edit:task permission');
     }
-    const task = await tasks.completeTask(ctx.params.taskId!, actor.companyId);
+    const task = await tasks.completeTask(ctx.params.taskId!, actor.companyId, actor.userId);
     return { status: 200, body: task };
   });
 
@@ -3953,7 +4032,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
       throw new ForbiddenError('missing edit:task permission');
     }
-    const task = await tasks.cancelTask(ctx.params.taskId!, actor.companyId);
+    const task = await tasks.cancelTask(ctx.params.taskId!, actor.companyId, actor.userId);
     return { status: 200, body: task };
   });
 

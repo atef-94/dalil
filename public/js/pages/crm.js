@@ -35,8 +35,16 @@ function offersSubSections(locale) {
 }
 
 const TIMELINE_ICONS = {
-  lead_created: '✦', status_changed: '↳', owner_changed: '⇄', message: '✉',
-  task: '☑', opportunity_created: '★', contract_signed: '✔', contract_cancelled: '✖',
+  lead_created: '✦', stage_changed: '↳', owner_changed: '⇄', lead_updated: '✎', message: '✉',
+  task_created: '☐', task_completed: '☑', opportunity_created: '★', reservation_created: '⌂',
+  contract_signed: '✔', contract_cancelled: '✖',
+};
+
+const TIMELINE_TYPE_LABELS = {
+  lead_created: 'Lead Created', stage_changed: 'Stage Changed', owner_changed: 'Owner Changed',
+  lead_updated: 'Data Changed', message: 'Comment / Activity', task_created: 'Follow-up Created',
+  task_completed: 'Follow-up Completed', opportunity_created: 'Offer Created',
+  reservation_created: 'Reservation Created', contract_signed: 'Contract Signed', contract_cancelled: 'Contract Cancelled',
 };
 
 const PRIORITY_OPTIONS = [
@@ -433,12 +441,13 @@ export async function renderCrm(container) {
       fields: [
         { key: 'stageId', label: 'New stage', type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: lead.stageId },
         { key: 'lostReason', label: 'Lost reason (required only when the new stage is Lost-flagged)' },
+        { key: 'note', label: 'Reason / note for this move (optional — shown on the Lead Timeline)', type: 'textarea' },
       ],
       submitLabel: 'Move',
     });
     if (!result) return;
     try {
-      await api.patch(`/api/crm/leads/${lead.id}/stage`, { stageId: result.stageId, lostReason: result.lostReason.trim() || undefined });
+      await api.patch(`/api/crm/leads/${lead.id}/stage`, { stageId: result.stageId, lostReason: result.lostReason.trim() || undefined, note: result.note?.trim() || undefined });
       const target = stages.find((s) => s.id === result.stageId);
       toast(`Moved to "${target?.name}".`, 'success');
       await refreshAll();
@@ -472,7 +481,122 @@ export async function renderCrm(container) {
     }
   }
 
-  // ---- Lead detail: activity timeline, comments, requirements, tags/priority, reassign, portal ----
+  // ---- Lead detail: timeline/history, comments, requirements, tags/priority, reassign, portal ----
+
+  function formatDuration(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+    const minutes = Math.floor(ms / 60000);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ${minutes % 60}m`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  }
+
+  /**
+   * The Lead Timeline / History card: a real, server-filtered/paginated
+   * view over everything ACTIVE actually recorded for this lead (see
+   * GET /api/crm/leads/:id/timeline) — never a client-side-only slice
+   * that could hide older history. Reuses the exact same
+   * selectInput/searchInput/paginationControls primitives every other
+   * list page already uses.
+   */
+  async function buildTimelineSection(leadId) {
+    const state = { type: '', q: '', from: '', to: '', offset: 0, limit: 20 };
+    const listSlot = el('div', {});
+    const paginationSlot = el('div', { style: 'margin-top:10px' });
+
+    const typeSelect = selectInput([{ value: '', label: 'All event types' }, ...Object.entries(TIMELINE_TYPE_LABELS).map(([value, label]) => ({ value, label }))]);
+    typeSelect.addEventListener('change', () => { state.type = typeSelect.value; state.offset = 0; load(); });
+
+    const fromInput = el('input', { type: 'date' });
+    fromInput.addEventListener('change', () => { state.from = fromInput.value ? new Date(fromInput.value).toISOString() : ''; state.offset = 0; load(); });
+    const toInput = el('input', { type: 'date' });
+    toInput.addEventListener('change', () => { state.to = toInput.value ? new Date(`${toInput.value}T23:59:59`).toISOString() : ''; state.offset = 0; load(); });
+
+    const search = searchInput('Search history (comments, actions, names)…', (q) => { state.q = q; state.offset = 0; load(); });
+
+    const filtersRow = el('div', { class: 'form-row', style: 'align-items:flex-end;flex-wrap:wrap' }, [
+      el('div', {}, [el('label', {}, 'Event type'), typeSelect]),
+      el('div', {}, [el('label', {}, 'From'), fromInput]),
+      el('div', {}, [el('label', {}, 'To'), toInput]),
+      el('div', { style: 'flex:1;min-width:200px' }, [el('label', {}, 'Search history'), search]),
+    ]);
+
+    function renderEntry(e) {
+      const isAi = e.actorType === 'ai_agent';
+      const d = e.detail || {};
+      const rows = [
+        el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' }, [
+          el('strong', {}, TIMELINE_TYPE_LABELS[e.type] || e.type),
+          isAi ? badge('AI Agent', 'blue') : null,
+          el('span', { class: 'muted', style: 'font-size:12px' }, new Date(e.at).toLocaleString()),
+        ]),
+        el('div', {}, e.summary),
+        el('div', { class: 'muted', style: 'font-size:12px' }, e.actorName),
+      ];
+      if (typeof d.fromStageId !== 'undefined' || typeof d.toStatus === 'string') {
+        const fromName = stages.find((s) => s.id === d.fromStageId)?.name || 'New Lead';
+        rows.push(el('div', { style: 'font-size:13px' }, `${fromName} → ${d.toStatus || '—'}`));
+        if (typeof d.timeInPreviousStageMs === 'number') {
+          rows.push(el('div', { class: 'muted', style: 'font-size:12px' }, `Time in previous stage: ${formatDuration(d.timeInPreviousStageMs)}`));
+        }
+        if (d.lostReason) rows.push(el('div', { style: 'font-size:13px' }, `Reason: ${d.lostReason}`));
+        if (d.note) rows.push(el('div', { style: 'font-size:13px' }, `Comment: ${d.note}`));
+      }
+      if (Array.isArray(d.fieldsChanged)) {
+        const fmtVal = (v) => (v === undefined || v === null || v === '' ? '—' : v);
+        for (const field of d.fieldsChanged) {
+          rows.push(el('div', { style: 'font-size:13px' }, `${field}: ${fmtVal(d.previousValues?.[field])} → ${fmtVal(d.newValues?.[field])}`));
+        }
+      }
+      if (e.type === 'owner_changed') {
+        rows.push(el('div', { style: 'font-size:13px' }, `${d.previousOwnerUserId || '—'} → ${d.newOwnerUserId || '—'}`));
+      }
+      if (e.type === 'message' && d.body) {
+        rows.push(el('div', { style: 'font-size:13px;white-space:pre-wrap' }, `"${d.body}"`));
+      }
+      return el('div', { style: 'display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border,#e5e5e5)' }, [
+        el('span', {}, TIMELINE_ICONS[e.type] || '•'),
+        el('div', { style: 'flex:1' }, rows),
+      ]);
+    }
+
+    async function load() {
+      clear(listSlot);
+      listSlot.appendChild(loadingState());
+      try {
+        const page = await api.get(`/api/crm/leads/${leadId}/timeline`, {
+          type: state.type || undefined,
+          q: state.q || undefined,
+          from: state.from || undefined,
+          to: state.to || undefined,
+          limit: state.limit,
+          offset: state.offset,
+        });
+        clear(listSlot);
+        if (page.items.length === 0) {
+          listSlot.appendChild(el('p', { class: 'muted' }, 'No matching activity.'));
+        } else {
+          listSlot.appendChild(el('div', {}, page.items.map(renderEntry)));
+        }
+        clear(paginationSlot);
+        paginationSlot.appendChild(paginationControls(page, (offset) => { state.offset = offset; load(); }));
+      } catch (err) {
+        clear(listSlot);
+        listSlot.appendChild(errorBanner(err.message));
+      }
+    }
+
+    const card = el('div', { class: 'card' }, [
+      el('h4', { style: 'margin-top:0' }, 'Timeline / History'),
+      filtersRow,
+      listSlot,
+      paginationSlot,
+    ]);
+    await load();
+    return card;
+  }
 
   async function openLeadDetail(lead, reload) {
     const body = el('div', {});
@@ -490,12 +614,9 @@ export async function renderCrm(container) {
 
     async function refreshDetail() {
       clear(body);
-      let fresh, timeline, score;
+      let fresh, score;
       try {
-        [fresh, timeline] = await Promise.all([
-          api.get(`/api/crm/leads/${lead.id}`),
-          api.get(`/api/crm/leads/${lead.id}/timeline`),
-        ]);
+        fresh = await api.get(`/api/crm/leads/${lead.id}`);
         score = await api.get(`/api/crm/leads/${lead.id}/score`).catch(() => null);
       } catch (err) {
         clear(body);
@@ -774,22 +895,12 @@ export async function renderCrm(container) {
         el('div', { class: 'form-actions' }, [scheduleBtn]),
       ]));
 
-      // ---- Activity timeline ----
-      const timelineCard = el('div', { class: 'card' }, [el('h4', { style: 'margin-top:0' }, 'Activity timeline')]);
-      if (timeline.entries.length === 0) {
-        timelineCard.appendChild(el('p', { class: 'muted' }, 'No activity recorded yet.'));
-      } else {
-        timelineCard.appendChild(el('div', {}, [...timeline.entries].reverse().map((e) => el('div', {
-          style: 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#e5e5e5)',
-        }, [
-          el('span', {}, TIMELINE_ICONS[e.type] || '•'),
-          el('div', {}, [
-            el('div', {}, e.summary),
-            el('div', { class: 'muted', style: 'font-size:12px' }, new Date(e.at).toLocaleString()),
-          ]),
-        ]))));
-      }
-      body.appendChild(timelineCard);
+      // ---- Timeline / History: the complete, permanent record of this
+      // lead's journey (stage/owner/data changes, comments/calls/WhatsApp/
+      // email, follow-ups, offers, reservations, contracts, AI actions) —
+      // server-filtered/paginated so nothing older is ever silently
+      // dropped just because it's not on the first page. ----
+      body.appendChild(await buildTimelineSection(lead.id));
     }
 
     await refreshDetail();

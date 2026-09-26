@@ -12,6 +12,7 @@ export interface SendMessageInput {
   channel?: MessageChannel;
   relatedResource?: MessageRelatedResource;
   relatedResourceId?: string;
+  actorType?: 'user' | 'ai_agent';
 }
 
 /**
@@ -40,6 +41,7 @@ export class CommunicationService {
       channel: input.channel ?? 'internal',
       status: 'sent',
       createdAt: new Date().toISOString(),
+      actorType: input.actorType,
     };
     return this.messages.save(message);
   }

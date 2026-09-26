@@ -103,6 +103,12 @@ interface ActionExecutionContext {
   companyId: string;
   actorUserId: string;
   triggerPayload: Record<string, unknown>;
+  /** 'ai_agent' only for the AI Execution Layer's executeActionDirect()
+   * path — every workflow-run step is attributed to the human who owns
+   * that workflow (workflow.createdByUserId), same as always. Threaded
+   * into any lead-mutating audit entry / Task / Message this action
+   * creates so the Lead Timeline can show "AI Agent" vs a real name. */
+  actorType: 'user' | 'ai_agent';
 }
 
 // Built-in starting points surfaced by GET /api/automation/templates and the
@@ -677,6 +683,7 @@ export class AutomationService {
             companyId: workflow.companyId,
             actorUserId: workflow.createdByUserId,
             triggerPayload: run.triggerPayload,
+            actorType: 'user',
           });
           succeeded = true;
           break;
@@ -797,7 +804,7 @@ export class AutomationService {
    * separate or lighter-weight path for AI-initiated actions.
    */
   async executeActionDirect(companyId: string, actorUserId: string, action: WorkflowActionConfig, contextPayload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    return this.executeAction(action, { companyId, actorUserId, triggerPayload: contextPayload });
+    return this.executeAction(action, { companyId, actorUserId, triggerPayload: contextPayload, actorType: 'ai_agent' });
   }
 
   /** Non-throwing permission check for a given action type — lets a caller
@@ -916,6 +923,7 @@ export class AutomationService {
           relatedResource: params.relatedResource as MessageRelatedResource | undefined,
           relatedResourceId: this.optionalString(params.relatedResourceId),
           createdByUserId: actorUserId,
+          actorType: ctx.actorType,
         });
         return { taskId: task.id };
       }
@@ -946,6 +954,7 @@ export class AutomationService {
           channel: params.channel as MessageChannel | undefined,
           relatedResource: params.relatedResource as MessageRelatedResource | undefined,
           relatedResourceId: this.optionalString(params.relatedResourceId),
+          actorType: ctx.actorType,
         });
         return { messageId: message.id };
       }
@@ -966,7 +975,24 @@ export class AutomationService {
           stageId = stages.find((s) => s.key === stageKey)?.id;
           if (!stageId) throw new AutomationError(`no CRM stage found for legacy status "${legacyStatus}"`, 404);
         }
+        const fromStageId = lead.stageId;
         const updated = await this.crm.moveToStage(leadId, companyId, stageId, this.optionalString(params.lostReason));
+        // Without this, an AI- or workflow-driven stage move left no trace
+        // in the audit trail at all (unlike the PATCH .../stage route,
+        // which has always recorded this) — the Lead Timeline would
+        // silently skip every automated move. toStatus is kept as the
+        // stage's display name purely so LeadTimelineService's existing
+        // detection (`typeof meta.toStatus === 'string'`) still renders it.
+        const toStage = await this.crmStages.getStage(updated.stageId, companyId);
+        await this.auditLog.record({
+          companyId,
+          actorUserId,
+          action: 'edit',
+          resource: 'lead',
+          resourceId: updated.id,
+          actorType: ctx.actorType,
+          metadata: { fromStageId, toStageId: updated.stageId, toStatus: toStage.name, lostReason: updated.lostReason },
+        });
         return { leadId: updated.id, stageId: updated.stageId };
       }
       case 'assign_lead_owner': {
@@ -975,7 +1001,17 @@ export class AutomationService {
         const lead = await this.crm.getLead(leadId);
         if (!lead || lead.companyId !== companyId) throw new AutomationError('lead not found for this company', 404);
         await this.requirePermission(actorUserId, action, companyId, lead.ownerEmployeeUserId);
+        const previousOwnerUserId = lead.ownerEmployeeUserId;
         const updated = await this.crm.assignOwner(leadId, companyId, ownerEmployeeUserId);
+        await this.auditLog.record({
+          companyId,
+          actorUserId,
+          action: 'assign',
+          resource: 'lead',
+          resourceId: updated.id,
+          actorType: ctx.actorType,
+          metadata: { previousOwnerUserId, newOwnerUserId: updated.ownerEmployeeUserId },
+        });
         return { leadId: updated.id, ownerEmployeeUserId: updated.ownerEmployeeUserId };
       }
       case 'update_campaign_status': {
