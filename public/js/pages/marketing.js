@@ -12,16 +12,16 @@ export async function renderMarketing(container) {
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
-  const nameInput = el('input', { type: 'text', placeholder: 'e.g. Spring Launch' });
+  const nameInput = el('input', { type: 'text', placeholder: t(locale, 'marketing_name_placeholder') });
   const channelSelect = selectInput(['digital', 'print', 'event', 'referral', 'other'].map((c) => ({ value: c, label: c })));
   const budgetInput = el('input', { type: 'number', placeholder: '5000' });
   const startInput = el('input', { type: 'date' });
-  const createBtn = el('button', { class: 'primary' }, 'Create campaign');
+  const createBtn = el('button', { class: 'primary' }, t(locale, 'marketing_create_campaign_btn'));
 
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!nameInput.value.trim() || !startInput.value || !(Number(budgetInput.value) >= 0)) {
-      errorSlot.appendChild(errorBanner('Enter a name, start date, and a non-negative budget.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'marketing_err_required')));
       return;
     }
     createBtn.disabled = true;
@@ -34,7 +34,7 @@ export async function renderMarketing(container) {
       });
       nameInput.value = '';
       budgetInput.value = '';
-      toast('Campaign created.', 'success');
+      toast(t(locale, 'marketing_created_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -44,18 +44,18 @@ export async function renderMarketing(container) {
   });
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Create a campaign'),
-    el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, 'To attribute a lead to this campaign, use the campaign\'s ID as the lead\'s "Source" when adding it on the Leads page.'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'marketing_create_campaign_title')),
+    el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, t(locale, 'marketing_hint_lead_source')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Name'), nameInput]),
-      el('div', {}, [el('label', {}, 'Channel'), channelSelect]),
-      el('div', {}, [el('label', {}, 'Budget'), budgetInput]),
-      el('div', {}, [el('label', {}, 'Start date'), startInput]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_col_name')), nameInput]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_activity_channel_field')), channelSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'marketing_budget_field')), budgetInput]),
+      el('div', {}, [el('label', {}, t(locale, 'common_field_start_date')), startInput]),
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
 
-  const search = searchInput('Search by campaign name…', (value) => { q = value; offset = 0; load(); });
+  const search = searchInput(t(locale, 'marketing_search_placeholder'), (value) => { q = value; offset = 0; load(); });
   container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
 
   const listSlot = el('div');
@@ -69,7 +69,7 @@ export async function renderMarketing(container) {
     btn.disabled = true;
     try {
       await api.post(`/api/marketing/campaigns/${campaign.id}/status`, { status: next });
-      toast(`Campaign moved to "${next}".`, 'success');
+      toast(`${t(locale, 'marketing_moved_toast_prefix')}${next}${t(locale, 'marketing_moved_toast_suffix')}`, 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -81,7 +81,7 @@ export async function renderMarketing(container) {
     btn.disabled = true;
     try {
       await api.post(`/api/marketing/campaigns/${campaign.id}/status`, { status: 'cancelled' });
-      toast('Campaign cancelled.', 'success');
+      toast(t(locale, 'marketing_cancelled_toast'), 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -92,7 +92,7 @@ export async function renderMarketing(container) {
   async function showPerformance(campaign) {
     try {
       const perf = await api.get(`/api/marketing/campaigns/${campaign.id}/performance`);
-      toast(`${perf.campaignName}: ${perf.leadCount} leads, ${perf.qualifiedCount} qualified, ${perf.convertedCount} converted (${perf.conversionRate}%).`, 'info');
+      toast(`${perf.campaignName}: ${perf.leadCount} ${t(locale, 'marketing_perf_leads_label')}, ${perf.qualifiedCount} ${t(locale, 'marketing_perf_qualified_label')}, ${perf.convertedCount} ${t(locale, 'marketing_perf_converted_label')} (${perf.conversionRate}%).`, 'info');
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
     }
@@ -106,14 +106,14 @@ export async function renderMarketing(container) {
       clear(listSlot);
       listSlot.appendChild(table(
         [
-          { label: 'Name', key: 'name' },
-          { label: 'ID (use as lead source)', render: (c) => c.id },
-          { label: 'Channel', key: 'channel' },
-          { label: 'Budget', render: (c) => Number(c.budget).toLocaleString() },
-          { label: 'Status', render: (c) => statusBadge(c.status) },
+          { label: t(locale, 'crm_col_name'), key: 'name' },
+          { label: t(locale, 'marketing_col_id_source'), render: (c) => c.id },
+          { label: t(locale, 'crm_activity_channel_field'), key: 'channel' },
+          { label: t(locale, 'marketing_budget_field'), render: (c) => Number(c.budget).toLocaleString() },
+          { label: t(locale, 'common_col_status'), render: (c) => statusBadge(c.status) },
           { label: '', render: (c) => {
             const actions = [];
-            const perfBtn = el('button', {}, 'Performance');
+            const perfBtn = el('button', {}, t(locale, 'marketing_performance_btn'));
             perfBtn.addEventListener('click', () => showPerformance(c));
             actions.push(perfBtn);
             if (NEXT_STATUS[c.status]) {
@@ -122,7 +122,7 @@ export async function renderMarketing(container) {
               actions.push(advanceBtn);
             }
             if (c.status === 'planned' || c.status === 'active') {
-              const cancelBtn = el('button', { class: 'danger' }, 'Cancel');
+              const cancelBtn = el('button', { class: 'danger' }, t(locale, 'common_cancel'));
               cancelBtn.addEventListener('click', () => cancel(c, cancelBtn));
               actions.push(cancelBtn);
             }
@@ -130,7 +130,7 @@ export async function renderMarketing(container) {
           } },
         ],
         page.items,
-        { empty: 'No campaigns yet — create one above.' },
+        { empty: t(locale, 'marketing_empty_campaigns') },
       ));
       listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {

@@ -1,8 +1,11 @@
 import { el, clear, table, errorBanner, statusBadge, loadingState } from '../ui.js';
+import { t } from '../i18n.js';
+import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
 export async function renderPortal(container) {
   clear(container);
+  const locale = getLocale();
   const body = el('div');
   body.appendChild(loadingState());
   container.appendChild(body);
@@ -14,17 +17,17 @@ export async function renderPortal(container) {
     ]);
 
     clear(body);
-    body.appendChild(el('div', { class: 'page-header' }, el('h1', {}, `Welcome, ${me.fullName}`)));
+    body.appendChild(el('div', { class: 'page-header' }, el('h1', {}, `${t(locale, 'portal_welcome_prefix')} ${me.fullName}`)));
 
     if (contractsPage.items.length === 0) {
-      body.appendChild(el('div', { class: 'empty-state' }, 'You have no contracts on file yet.'));
+      body.appendChild(el('div', { class: 'empty-state' }, t(locale, 'portal_no_contracts')));
       container.appendChild(body);
       return;
     }
 
     for (const contract of contractsPage.items) {
       const card = el('div', { class: 'card' }, [
-        el('h3', { style: 'margin-top:0' }, [`Contract ${contract.id.slice(0, 8)}… `, statusBadge(contract.status)]),
+        el('h3', { style: 'margin-top:0' }, [`${t(locale, 'portal_contract_prefix')} ${contract.id.slice(0, 8)}… `, statusBadge(contract.status)]),
       ]);
       const scheduleSlot = el('div');
       scheduleSlot.appendChild(loadingState());
@@ -37,20 +40,20 @@ export async function renderPortal(container) {
         const totalDue = schedule.reduce((sum, l) => sum + l.amount, 0);
         const totalPaid = schedule.reduce((sum, l) => sum + l.amountPaid, 0);
         scheduleSlot.appendChild(el('div', { class: 'stat-grid' }, [
-          el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, totalDue.toLocaleString()), el('div', { class: 'label' }, 'Total due')]),
-          el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, totalPaid.toLocaleString()), el('div', { class: 'label' }, 'Total paid')]),
-          el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, (totalDue - totalPaid).toLocaleString()), el('div', { class: 'label' }, 'Outstanding')]),
+          el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, totalDue.toLocaleString()), el('div', { class: 'label' }, t(locale, 'portal_total_due_label'))]),
+          el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, totalPaid.toLocaleString()), el('div', { class: 'label' }, t(locale, 'portal_total_paid_label'))]),
+          el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, (totalDue - totalPaid).toLocaleString()), el('div', { class: 'label' }, t(locale, 'portal_outstanding_label'))]),
         ]));
         scheduleSlot.appendChild(table(
           [
-            { label: 'Installment', key: 'label' },
-            { label: 'Due date', render: (l) => new Date(l.dueDate).toLocaleDateString() },
-            { label: 'Amount', render: (l) => Number(l.amount).toLocaleString() },
-            { label: 'Paid', render: (l) => Number(l.amountPaid).toLocaleString() },
-            { label: 'Status', render: (l) => statusBadge(l.status) },
+            { label: t(locale, 'portal_col_installment'), key: 'label' },
+            { label: t(locale, 'sales_col_due_date'), render: (l) => new Date(l.dueDate).toLocaleDateString() },
+            { label: t(locale, 'sales_col_amount'), render: (l) => Number(l.amount).toLocaleString() },
+            { label: t(locale, 'contracts_col_paid'), render: (l) => Number(l.amountPaid).toLocaleString() },
+            { label: t(locale, 'common_col_status'), render: (l) => statusBadge(l.status) },
           ],
           schedule,
-          { empty: 'No payment schedule yet for this contract.' },
+          { empty: t(locale, 'portal_schedule_empty') },
         ));
       } catch (err) {
         clear(scheduleSlot);
