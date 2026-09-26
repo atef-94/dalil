@@ -15,15 +15,17 @@ export async function renderOperations(container) {
   container.appendChild(errorSlot);
 
   const unitSelect = selectInput([]);
-  const titleInput = el('input', { type: 'text', placeholder: 'e.g. AC not cooling' });
+  const titleInput = el('input', { type: 'text', placeholder: t(locale, 'operations_ticket_title_placeholder') });
+  // Raw enum-as-label select, deliberately left untranslated — same treatment
+  // as the identical pattern in scenario-simulation.js/finance.js.
   const prioritySelect = selectInput(['low', 'medium', 'high', 'urgent'].map((p) => ({ value: p, label: p })));
-  const descriptionInput = el('input', { type: 'text', placeholder: 'Description (optional)' });
-  const createBtn = el('button', { class: 'primary' }, 'Open ticket');
+  const descriptionInput = el('input', { type: 'text', placeholder: t(locale, 'crm_stage_description_field') });
+  const createBtn = el('button', { class: 'primary' }, t(locale, 'operations_open_ticket_btn'));
 
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!unitSelect.value || !titleInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('Choose a unit and enter a title.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'operations_ticket_required_error')));
       return;
     }
     createBtn.disabled = true;
@@ -36,7 +38,7 @@ export async function renderOperations(container) {
       });
       titleInput.value = '';
       descriptionInput.value = '';
-      toast('Maintenance ticket opened.', 'success');
+      toast(t(locale, 'operations_ticket_opened_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -46,17 +48,17 @@ export async function renderOperations(container) {
   });
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Open a maintenance ticket'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'operations_open_ticket_title')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Unit'), unitSelect]),
-      el('div', {}, [el('label', {}, 'Title'), titleInput]),
-      el('div', {}, [el('label', {}, 'Priority'), prioritySelect]),
-      el('div', {}, [el('label', {}, 'Description'), descriptionInput]),
+      el('div', {}, [el('label', {}, t(locale, 'sales_col_unit')), unitSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_label_title')), titleInput]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_col_priority')), prioritySelect]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_description')), descriptionInput]),
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
 
-  const search = searchInput('Search by title or description…', (value) => { q = value; offset = 0; load(); });
+  const search = searchInput(t(locale, 'operations_search_placeholder'), (value) => { q = value; offset = 0; load(); });
   container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
 
   const listSlot = el('div');
@@ -68,7 +70,7 @@ export async function renderOperations(container) {
     btn.disabled = true;
     try {
       await api.post(`/api/operations/tickets/${ticket.id}/status`, { status: next });
-      toast(`Ticket moved to "${next}".`, 'success');
+      toast(`${t(locale, 'operations_ticket_moved_prefix')}${next}${t(locale, 'operations_ticket_moved_suffix')}`, 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -78,15 +80,15 @@ export async function renderOperations(container) {
 
   async function assign(ticket, btn) {
     const values = await formModal({
-      title: `Assign ${ticket.title}`,
-      fields: [{ key: 'assignedToUserId', label: 'Assignee user ID', type: 'text', placeholder: 'user id' }],
-      submitLabel: 'Assign',
+      title: `${t(locale, 'operations_assign_prefix')}${ticket.title}`,
+      fields: [{ key: 'assignedToUserId', label: t(locale, 'operations_assignee_user_id_field'), type: 'text', placeholder: t(locale, 'operations_assignee_user_id_placeholder') }],
+      submitLabel: t(locale, 'roles_assign_btn'),
     });
     if (!values || !values.assignedToUserId.trim()) return;
     btn.disabled = true;
     try {
       await api.post(`/api/operations/tickets/${ticket.id}/assign`, { assignedToUserId: values.assignedToUserId.trim() });
-      toast('Ticket assigned.', 'success');
+      toast(t(locale, 'operations_ticket_assigned_toast'), 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -110,22 +112,22 @@ export async function renderOperations(container) {
       clear(listSlot);
       listSlot.appendChild(table(
         [
-          { label: 'Title', key: 'title' },
-          { label: 'Unit', render: (t) => unitSelect.querySelector(`option[value="${t.unitId}"]`)?.textContent || t.unitId },
-          { label: 'Priority', render: (t) => statusBadge(t.priority) },
-          { label: 'Status', render: (t) => statusBadge(t.status) },
-          { label: 'Assignee', render: (t) => t.assignedToUserId || '—' },
-          { label: '', render: (t) => {
-            if (t.status === 'closed') return '';
-            const advanceBtn = el('button', { class: 'primary' }, `→ ${NEXT_STATUS[t.status]}`);
-            advanceBtn.addEventListener('click', () => advance(t, advanceBtn));
-            const assignBtn = el('button', {}, 'Assign');
-            assignBtn.addEventListener('click', () => assign(t, assignBtn));
+          { label: t(locale, 'crm_label_title'), key: 'title' },
+          { label: t(locale, 'sales_col_unit'), render: (ticket) => unitSelect.querySelector(`option[value="${ticket.unitId}"]`)?.textContent || ticket.unitId },
+          { label: t(locale, 'crm_col_priority'), render: (ticket) => statusBadge(ticket.priority) },
+          { label: t(locale, 'units_col_status'), render: (ticket) => statusBadge(ticket.status) },
+          { label: t(locale, 'operations_assignee_col'), render: (ticket) => ticket.assignedToUserId || '—' },
+          { label: '', render: (ticket) => {
+            if (ticket.status === 'closed') return '';
+            const advanceBtn = el('button', { class: 'primary' }, `→ ${NEXT_STATUS[ticket.status]}`);
+            advanceBtn.addEventListener('click', () => advance(ticket, advanceBtn));
+            const assignBtn = el('button', {}, t(locale, 'roles_assign_btn'));
+            assignBtn.addEventListener('click', () => assign(ticket, assignBtn));
             return el('div', { class: 'form-actions' }, [advanceBtn, assignBtn]);
           } },
         ],
         page.items,
-        { empty: 'No maintenance tickets yet — open one above.' },
+        { empty: t(locale, 'operations_tickets_empty') },
       ));
       listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {

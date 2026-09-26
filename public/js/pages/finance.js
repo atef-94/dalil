@@ -13,10 +13,10 @@ export async function renderFinance(container) {
     headerActions,
   ]));
   if (can('payment_schedule', 'edit')) {
-    const importBtn = el('button', {}, 'Import Payments');
+    const importBtn = el('button', {}, t(locale, 'finance_import_payments_btn'));
     importBtn.addEventListener('click', () => {
       openImportWizard({
-        title: 'Import Payments',
+        title: t(locale, 'finance_import_payments_btn'),
         uploadPath: '/api/finance/payments/import/upload',
         onImported: () => { load(); },
       });
@@ -26,13 +26,13 @@ export async function renderFinance(container) {
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
-  const sweepBtn = el('button', {}, 'Sweep overdue payments now');
+  const sweepBtn = el('button', {}, t(locale, 'finance_sweep_btn'));
   sweepBtn.addEventListener('click', async () => {
     clear(errorSlot);
     sweepBtn.disabled = true;
     try {
       const result = await api.post('/api/finance/sweep-overdue', {});
-      toast(`${result.swept} schedule line(s) marked overdue.`, 'success');
+      toast(`${result.swept}${t(locale, 'finance_toast_swept_suffix')}`, 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -41,8 +41,8 @@ export async function renderFinance(container) {
     }
   });
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Overdue sweep'),
-    el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, 'Runs automatically every 60 seconds on the server; trigger it on demand here.'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'finance_overdue_sweep_heading')),
+    el('p', { style: 'color:var(--text-muted);font-size:12.5px' }, t(locale, 'finance_overdue_sweep_hint')),
     sweepBtn,
   ]));
 
@@ -50,33 +50,33 @@ export async function renderFinance(container) {
   const balanceOutput = el('div');
   const scheduleSlot = el('div');
   const contractActionsSlot = el('div');
-  const loadBalanceBtn = el('button', {}, 'Load balance & schedule');
+  const loadBalanceBtn = el('button', {}, t(locale, 'finance_load_balance_btn'));
 
   async function cancelSelectedContract() {
     if (!contractSelect.value) return;
-    if (!(await confirmModal('Cancel this contract? The unit is released back onto the market and the reservation is cancelled. Already-recorded payments stay on file.', { confirmLabel: 'Cancel contract', danger: true }))) return;
+    if (!(await confirmModal(t(locale, 'contracts_confirm_cancel_message'), { confirmLabel: t(locale, 'contracts_cancel_contract_confirm_label'), danger: true }))) return;
     try {
       await api.post(`/api/sales/contracts/${contractSelect.value}/cancel`, {});
-      toast('Contract cancelled.', 'success');
+      toast(t(locale, 'contracts_toast_cancelled'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
     }
   }
 
-  const recordAmount = el('input', { type: 'number', placeholder: 'Amount' });
+  const recordAmount = el('input', { type: 'number', placeholder: t(locale, 'sales_col_amount') });
   const recordMethod = selectInput(['cash', 'transfer', 'card', 'cheque'].map((m) => ({ value: m, label: m })));
   const recordLineSelect = selectInput([]);
-  const recordBtn = el('button', { class: 'primary' }, 'Record payment');
+  const recordBtn = el('button', { class: 'primary' }, t(locale, 'finance_record_payment_btn'));
 
   recordBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!contractSelect.value || !recordLineSelect.value) {
-      errorSlot.appendChild(errorBanner('Choose a contract and a schedule line first.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'finance_err_choose_contract_line')));
       return;
     }
     if (!(Number(recordAmount.value) > 0)) {
-      errorSlot.appendChild(errorBanner('Enter a payment amount greater than zero.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'finance_err_payment_amount_positive')));
       return;
     }
     recordBtn.disabled = true;
@@ -87,7 +87,7 @@ export async function renderFinance(container) {
         amount: Number(recordAmount.value),
         method: recordMethod.value,
       });
-      toast('Payment recorded.', 'success');
+      toast(t(locale, 'finance_toast_payment_recorded'), 'success');
       recordAmount.value = '';
       await loadContractDetail();
     } catch (err) {
@@ -98,25 +98,25 @@ export async function renderFinance(container) {
   });
 
   const refundLineSelect = selectInput([]);
-  const refundAmount = el('input', { type: 'number', placeholder: 'Amount' });
-  const refundReason = el('input', { type: 'text', placeholder: 'Why is this being refunded?' });
-  const refundBtn = el('button', { class: 'danger' }, 'Request refund');
+  const refundAmount = el('input', { type: 'number', placeholder: t(locale, 'sales_col_amount') });
+  const refundReason = el('input', { type: 'text', placeholder: t(locale, 'finance_refund_reason_placeholder') });
+  const refundBtn = el('button', { class: 'danger' }, t(locale, 'finance_request_refund_btn'));
 
   refundBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!contractSelect.value || !refundLineSelect.value) {
-      errorSlot.appendChild(errorBanner('Choose a contract and a paid schedule line first.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'finance_err_choose_contract_paid_line')));
       return;
     }
     if (!(Number(refundAmount.value) > 0)) {
-      errorSlot.appendChild(errorBanner('Enter a refund amount greater than zero.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'finance_err_refund_amount_positive')));
       return;
     }
     if (!refundReason.value.trim()) {
-      errorSlot.appendChild(errorBanner('A reason is required for every refund request.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'finance_err_reason_required')));
       return;
     }
-    if (!(await confirmModal('Refunds always require approval before any money moves. Submit this refund request?'))) return;
+    if (!(await confirmModal(t(locale, 'finance_confirm_refund_message')))) return;
     refundBtn.disabled = true;
     try {
       await api.post('/api/finance/refunds', {
@@ -125,7 +125,7 @@ export async function renderFinance(container) {
         amount: Number(refundAmount.value),
         reason: refundReason.value.trim(),
       });
-      toast('Refund request submitted — pending approval. See the Approvals page for its status.', 'success');
+      toast(t(locale, 'finance_toast_refund_submitted'), 'success');
       refundAmount.value = '';
       refundReason.value = '';
     } catch (err) {
@@ -149,38 +149,38 @@ export async function renderFinance(container) {
         api.get(`/api/contracts/${contractSelect.value}/payment-schedule`),
       ]);
       if (contract.status === 'signed') {
-        const cancelBtn = el('button', { class: 'danger' }, 'Cancel contract');
+        const cancelBtn = el('button', { class: 'danger' }, t(locale, 'contracts_cancel_contract_confirm_label'));
         cancelBtn.addEventListener('click', cancelSelectedContract);
         contractActionsSlot.appendChild(cancelBtn);
       } else {
         contractActionsSlot.appendChild(statusBadge(contract.status));
       }
       balanceOutput.appendChild(el('div', { class: 'stat-grid' }, [
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.totalDue).toLocaleString()), el('div', { class: 'label' }, 'Total due')]),
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.totalPaid).toLocaleString()), el('div', { class: 'label' }, 'Total paid')]),
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.outstanding).toLocaleString()), el('div', { class: 'label' }, 'Outstanding')]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.totalDue).toLocaleString()), el('div', { class: 'label' }, t(locale, 'finance_stat_total_due'))]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.totalPaid).toLocaleString()), el('div', { class: 'label' }, t(locale, 'finance_stat_total_paid'))]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(balance.outstanding).toLocaleString()), el('div', { class: 'label' }, t(locale, 'finance_stat_outstanding'))]),
       ]));
       lines.forEach((l) => {
         if (l.status !== 'paid') {
-          recordLineSelect.appendChild(el('option', { value: l.id }, `${l.label} — ${Number(l.amount - l.amountPaid).toLocaleString()} remaining`));
+          recordLineSelect.appendChild(el('option', { value: l.id }, `${l.label} — ${Number(l.amount - l.amountPaid).toLocaleString()}${t(locale, 'finance_remaining_suffix')}`));
         }
         if (l.amountPaid > 0) {
-          refundLineSelect.appendChild(el('option', { value: l.id }, `${l.label} — ${Number(l.amountPaid).toLocaleString()} paid`));
+          refundLineSelect.appendChild(el('option', { value: l.id }, `${l.label} — ${Number(l.amountPaid).toLocaleString()}${t(locale, 'finance_paid_suffix')}`));
         }
       });
       if (refundLineSelect.options.length === 0) {
-        refundLineSelect.appendChild(el('option', { value: '' }, 'No paid lines to refund yet'));
+        refundLineSelect.appendChild(el('option', { value: '' }, t(locale, 'finance_no_paid_lines_option')));
       }
       scheduleSlot.appendChild(table(
         [
-          { label: 'Line', key: 'label' },
-          { label: 'Due date', render: (l) => new Date(l.dueDate).toLocaleDateString() },
-          { label: 'Amount', render: (l) => Number(l.amount).toLocaleString() },
-          { label: 'Paid', render: (l) => Number(l.amountPaid).toLocaleString() },
-          { label: 'Status', render: (l) => statusBadge(l.status) },
+          { label: t(locale, 'contracts_col_line'), key: 'label' },
+          { label: t(locale, 'sales_col_due_date'), render: (l) => new Date(l.dueDate).toLocaleDateString() },
+          { label: t(locale, 'sales_col_amount'), render: (l) => Number(l.amount).toLocaleString() },
+          { label: t(locale, 'contracts_col_paid'), render: (l) => Number(l.amountPaid).toLocaleString() },
+          { label: t(locale, 'units_col_status'), render: (l) => statusBadge(l.status) },
         ],
         lines,
-        { empty: 'No schedule lines for this contract.' },
+        { empty: t(locale, 'finance_schedule_empty') },
       ));
     } catch (err) {
       balanceOutput.appendChild(errorBanner(err.message));
@@ -190,30 +190,30 @@ export async function renderFinance(container) {
   loadBalanceBtn.addEventListener('click', loadContractDetail);
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Contract balance & schedule'),
-    el('div', { class: 'form-row' }, [el('div', {}, [el('label', {}, 'Contract'), contractSelect]), el('div', { style: 'align-self:flex-end' }, loadBalanceBtn)]),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'finance_balance_schedule_heading')),
+    el('div', { class: 'form-row' }, [el('div', {}, [el('label', {}, t(locale, 'finance_contract_field')), contractSelect]), el('div', { style: 'align-self:flex-end' }, loadBalanceBtn)]),
     contractActionsSlot,
     balanceOutput,
     scheduleSlot,
   ]));
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Record a payment'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'finance_record_payment_heading')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Schedule line'), recordLineSelect]),
-      el('div', {}, [el('label', {}, 'Amount'), recordAmount]),
-      el('div', {}, [el('label', {}, 'Method'), recordMethod]),
+      el('div', {}, [el('label', {}, t(locale, 'finance_schedule_line_field')), recordLineSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'sales_col_amount')), recordAmount]),
+      el('div', {}, [el('label', {}, t(locale, 'fin_method_field')), recordMethod]),
     ]),
     el('div', { class: 'form-actions' }, [recordBtn]),
   ]));
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Request a refund'),
-    el('p', { class: 'page-subtitle' }, 'Reverses money already collected on a paid line. Always requires approval before it takes effect — see the Approvals page to track it.'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'finance_refund_heading')),
+    el('p', { class: 'page-subtitle' }, t(locale, 'finance_refund_subtitle')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Paid schedule line'), refundLineSelect]),
-      el('div', {}, [el('label', {}, 'Amount'), refundAmount]),
-      el('div', {}, [el('label', {}, 'Reason'), refundReason]),
+      el('div', {}, [el('label', {}, t(locale, 'finance_paid_schedule_line_field')), refundLineSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'sales_col_amount')), refundAmount]),
+      el('div', {}, [el('label', {}, t(locale, 'fin_reason_field')), refundReason]),
     ]),
     el('div', { class: 'form-actions' }, [refundBtn]),
   ]));

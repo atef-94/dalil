@@ -438,6 +438,22 @@ export interface Project {
   /** The project's master-plan image URL — a Unit highlights itself on
    * this image via its own masterPlanPosition. */
   masterPlanImageUrl?: string;
+  /** The single image shown on a project card in the catalog browser —
+   * same "paste a URL" convention as imageUrls; falls back to
+   * imageUrls[0] at the presentation layer when unset, never required. */
+  coverImageUrl?: string;
+  createdAt: string;
+}
+
+/** A staff user's personal bookmark on a Project — purely a UI convenience
+ * (quick access from the catalog browser's "favorites" filter), scoped to
+ * the user who set it, not a shared/team concept. Gated on the same
+ * view:project permission as browsing itself; no dedicated RBAC resource. */
+export interface ProjectFavorite {
+  id: string;
+  companyId: string;
+  userId: string;
+  projectId: string;
   createdAt: string;
 }
 
@@ -467,6 +483,10 @@ export interface Unit {
   areaSqm: number;
   listPrice: number;
   status: UnitStatus;
+  /** The raw status text a source file last used (e.g. "Available", "HOLD",
+   * "Booked") before normalization to `status` — kept for audit only; never
+   * read by business logic, which always uses the normalized `status`. */
+  sourceStatus?: string;
   floorLabel?: string;
   bedrooms?: number;
   /** Layout/model type (e.g. "Type A", "Garden", "Corner") — configurable
@@ -490,7 +510,58 @@ export interface Unit {
   floorPlanImageUrl?: string;
   /** Where this unit highlights on its project's masterPlanImageUrl. */
   masterPlanPosition?: MasterPlanPosition;
+  /** Import provenance — which import created/last updated this unit, and
+   * where in the source file. Optional: manually-created units have none. */
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
   createdAt: string;
+}
+
+/**
+ * A "Unit Specification / Product Range" — what a project catalog/market
+ * sheet describes (e.g. "Apartment, 2 Bedrooms, BUA 120-135, Price 8M-10M")
+ * as opposed to a real, individually-coded `Unit`. Deliberately its own
+ * entity rather than a Unit with fuzzy/range fields: a catalog row has no
+ * stable physical identity (no unit code, no single floor/building), so
+ * importing one must never fabricate a fake Unit row. Scoped one level
+ * finer than Project's own single land/BUA/garden/price range (which can
+ * only hold one range project-wide) — a project commonly markets several
+ * distinct unit-type/bedroom combinations, each with its own range, at the
+ * same time. Gated on the existing 'project' RBAC resource, matching every
+ * other project-master-data entity in this file (see the module comment
+ * above Developer). */
+export interface ProjectUnitSpec {
+  id: string;
+  companyId: string;
+  projectId: string;
+  phaseId?: string;
+  /** Free string, matching Unit.unitType's convention — never a hard enum. */
+  unitType: string;
+  bedrooms?: number;
+  landAreaFromSqm?: number;
+  landAreaToSqm?: number;
+  buaFromSqm?: number;
+  buaToSqm?: number;
+  gardenAreaFromSqm?: number;
+  gardenAreaToSqm?: number;
+  priceFrom?: number;
+  priceTo?: number;
+  pricePerMeter?: number;
+  /** Overrides Project.finishingType for this specific spec, same override
+   * convention as Unit.finishingType. */
+  finishingType?: string;
+  delivery?: DeliveryInfo;
+  paymentPlanTemplateIds?: string[];
+  cashDiscountPercent?: number;
+  maintenanceFeePercent?: number;
+  /** Import provenance — which import produced/last touched this spec, and
+   * where in the source file. Optional: manually-created specs have none. */
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface UnitHold {
@@ -834,6 +905,11 @@ export interface AuditLogEntry {
   resourceId: string;
   metadata?: Record<string, unknown>;
   createdAt: string;
+  /** Who actually initiated this: a human user (the default, and the only
+   * value every pre-existing entry implicitly has) or the AI Agent acting
+   * autonomously via AutomationService.executeActionDirect(). Optional so
+   * every audit call site written before this existed stays valid. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- HR ----
@@ -959,6 +1035,10 @@ export interface Message {
   status: MessageStatus;
   createdAt: string;
   readAt?: string;
+  /** Set when this message/comment/log was created by the AI Agent
+   * executing a chosen action rather than a human typing it in — see
+   * AuditLogEntry.actorType for the same distinction on audit rows. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- Customer Portal ----
@@ -990,6 +1070,12 @@ export interface Task {
   createdByUserId: string;
   createdAt: string;
   completedAt?: string;
+  /** Who actually completed/cancelled it — distinct from createdByUserId,
+   * since a follow-up is very often completed by someone other than
+   * whoever scheduled it. Set alongside completedAt. */
+  completedByUserId?: string;
+  /** See Message.actorType — set when the AI Agent created this task. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- File Import Pipeline ----

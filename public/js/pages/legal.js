@@ -14,14 +14,14 @@ export async function renderLegal(container) {
 
   const contractSelect = selectInput([]);
   const typeSelect = selectInput(['title_deed', 'power_of_attorney', 'nda', 'id_verification', 'other'].map((t) => ({ value: t, label: t })));
-  const nameInput = el('input', { type: 'text', placeholder: 'e.g. Title Deed.pdf' });
-  const notesInput = el('input', { type: 'text', placeholder: 'Notes (optional)' });
-  const addBtn = el('button', { class: 'primary' }, 'Add document');
+  const nameInput = el('input', { type: 'text', placeholder: t(locale, 'legal_name_placeholder') });
+  const notesInput = el('input', { type: 'text', placeholder: t(locale, 'legal_notes_placeholder') });
+  const addBtn = el('button', { class: 'primary' }, t(locale, 'legal_add_document_btn'));
 
   addBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!contractSelect.value || !nameInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('Choose a contract and a document name.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'legal_err_required')));
       return;
     }
     addBtn.disabled = true;
@@ -34,7 +34,7 @@ export async function renderLegal(container) {
       });
       nameInput.value = '';
       notesInput.value = '';
-      toast('Document added.', 'success');
+      toast(t(locale, 'legal_added_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -44,17 +44,17 @@ export async function renderLegal(container) {
   });
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Add a contract document'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'legal_add_document_title')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Contract'), contractSelect]),
-      el('div', {}, [el('label', {}, 'Type'), typeSelect]),
-      el('div', {}, [el('label', {}, 'Name'), nameInput]),
-      el('div', {}, [el('label', {}, 'Notes'), notesInput]),
+      el('div', {}, [el('label', {}, t(locale, 'finance_contract_field')), contractSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'units_col_type')), typeSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_col_name')), nameInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_project_notes_field')), notesInput]),
     ]),
     el('div', { class: 'form-actions' }, [addBtn]),
   ]));
 
-  const search = searchInput('Search by name or notes…', (value) => { q = value; offset = 0; load(); });
+  const search = searchInput(t(locale, 'legal_search_placeholder'), (value) => { q = value; offset = 0; load(); });
   container.appendChild(el('div', { class: 'form-row', style: 'max-width:320px' }, [search]));
 
   const listSlot = el('div');
@@ -64,7 +64,7 @@ export async function renderLegal(container) {
     btn.disabled = true;
     try {
       await api.post(`/api/legal/documents/${doc.id}/${action}`, {});
-      toast(`Document marked ${action === 'received' ? 'received' : action === 'verify' ? 'verified' : 'rejected'}.`, 'success');
+      toast(action === 'received' ? t(locale, 'legal_marked_received_toast') : action === 'verify' ? t(locale, 'legal_marked_verified_toast') : t(locale, 'legal_marked_rejected_toast'), 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -88,20 +88,20 @@ export async function renderLegal(container) {
       clear(listSlot);
       listSlot.appendChild(table(
         [
-          { label: 'Name', key: 'name' },
-          { label: 'Type', key: 'type' },
-          { label: 'Contract', render: (d) => d.contractId.slice(0, 8) + '…' },
-          { label: 'Status', render: (d) => statusBadge(d.status) },
+          { label: t(locale, 'crm_col_name'), key: 'name' },
+          { label: t(locale, 'units_col_type'), key: 'type' },
+          { label: t(locale, 'finance_contract_field'), render: (d) => d.contractId.slice(0, 8) + '…' },
+          { label: t(locale, 'common_col_status'), render: (d) => statusBadge(d.status) },
           { label: '', render: (d) => {
             if (d.status === 'pending') {
-              const btn = el('button', {}, 'Mark received');
+              const btn = el('button', {}, t(locale, 'legal_mark_received_btn'));
               btn.addEventListener('click', () => transition(d, 'received', btn));
               return btn;
             }
             if (d.status === 'received') {
-              const verifyBtn = el('button', { class: 'primary' }, 'Verify');
+              const verifyBtn = el('button', { class: 'primary' }, t(locale, 'legal_verify_btn'));
               verifyBtn.addEventListener('click', () => transition(d, 'verify', verifyBtn));
-              const rejectBtn = el('button', { class: 'danger' }, 'Reject');
+              const rejectBtn = el('button', { class: 'danger' }, t(locale, 'approvals_reject_btn'));
               rejectBtn.addEventListener('click', () => transition(d, 'reject', rejectBtn));
               return el('div', { class: 'form-actions' }, [verifyBtn, rejectBtn]);
             }
@@ -109,7 +109,7 @@ export async function renderLegal(container) {
           } },
         ],
         page.items,
-        { empty: 'No contract documents yet — add one above.' },
+        { empty: t(locale, 'legal_empty_documents') },
       ));
       listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {

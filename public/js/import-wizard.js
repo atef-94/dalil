@@ -86,6 +86,14 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
         for (const opt of uploadOptions) form.set(opt.key, String(!!uploadOptionValues[opt.key]));
         session = await api.upload(uploadPath, form);
         mapping = { ...session.suggestedMapping };
+        // If this wizard has a 'mode' mapping option (Inventory Import) and
+        // the backend's own sheet classification recognized the file as a
+        // Project Catalog, default the mode picker to match instead of
+        // always defaulting to Live Availability — the user can still
+        // override it on the mapping step.
+        if (session.detectedSheetKind === 'catalog' && Object.prototype.hasOwnProperty.call(mappingOptionValues, 'mode')) {
+          mappingOptionValues.mode = 'catalog';
+        }
         if (isFullyAutoMappable()) {
           wasAutoMapped = true;
           try {
@@ -113,6 +121,18 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
       errSlot,
       el('div', { class: 'form-actions' }, [uploadBtn]),
     ]));
+  }
+
+  const SHEET_KIND_LABELS = {
+    catalog: 'This looks like a Project Catalog file (market/product ranges, no unit codes).',
+    availability: 'This looks like a Live Availability file (real, individually-coded units).',
+    summary: 'This looks like a summary/fact-sheet, not a row-by-row data table — importing it is unlikely to produce useful results.',
+    unknown: null,
+  };
+
+  function sheetKindNote() {
+    const label = session && session.detectedSheetKind ? SHEET_KIND_LABELS[session.detectedSheetKind] : null;
+    return label ? el('p', { class: 'page-subtitle', style: 'font-style:italic' }, label) : null;
   }
 
   function sampleValuesFor(column) {
@@ -169,6 +189,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
 
     body.appendChild(el('div', {}, [
       el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}". Confirm or correct which column maps to which field — unmapped columns are ignored.`),
+      sheetKindNote(),
       ...mappingRows,
       ...optionControls,
       errSlot,
@@ -207,6 +228,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
       wasAutoMapped
         ? el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}". Every required column was recognized automatically — review the results below, or edit the column mapping if something looks wrong.`)
         : el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}".`),
+      sheetKindNote(),
       el('div', { class: 'stat-grid' }, [
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(preview.totalRows)), el('div', { class: 'label' }, 'Total rows')]),
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(validRows.length)), el('div', { class: 'label' }, 'Ready to import')]),
@@ -241,7 +263,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
         [
           { label: 'Row', render: (r) => String(r.row) },
           { label: 'Status', render: (r) => statusBadge(r.status) },
-          { label: 'Detail', render: (r) => r.reason || r.leadId || r.paymentId || r.unitId || '—' },
+          { label: 'Detail', render: (r) => r.reason || r.leadId || r.paymentId || r.unitId || r.specId || '—' },
         ],
         result.results || [],
         { empty: 'Nothing to show.' },

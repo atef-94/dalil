@@ -19,13 +19,13 @@ export async function renderAudit(container) {
       clear(listSlot);
       listSlot.append(table(
         [
-          { label: 'When', render: (e) => new Date(e.createdAt).toLocaleString() },
-          { label: 'Actor', key: 'actorUserId' },
-          { label: 'Action', key: 'action' },
-          { label: 'Resource', render: (e) => `${e.resource} (${e.resourceId.slice(0, 8)}…)` },
+          { label: t(locale, 'audit_col_when'), render: (e) => new Date(e.createdAt).toLocaleString() },
+          { label: t(locale, 'audit_col_actor'), key: 'actorUserId' },
+          { label: t(locale, 'audit_col_action'), key: 'action' },
+          { label: t(locale, 'audit_col_resource'), render: (e) => `${e.resource} (${e.resourceId.slice(0, 8)}…)` },
         ],
         page.items,
-        { empty: 'No audit entries yet.' },
+        { empty: t(locale, 'audit_empty') },
       ), paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));

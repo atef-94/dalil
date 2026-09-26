@@ -26,10 +26,10 @@ export async function renderQuotations(container) {
   const templateSelect = selectInput([]);
   const discountInput = el('input', { type: 'number', placeholder: '0', value: '0' });
   const escalationInput = el('input', { type: 'number', placeholder: '0', value: '0' });
-  const totalOverrideInput = el('input', { type: 'number', placeholder: '(defaults to unit list price)' });
-  const leadIdInput = el('input', { type: 'text', placeholder: 'lead id (optional)' });
-  const calcBtn = el('button', {}, 'Calculate preview');
-  const generateBtn = el('button', { class: 'primary' }, 'Generate quotation');
+  const totalOverrideInput = el('input', { type: 'number', placeholder: t(locale, 'quotations_total_override_placeholder') });
+  const leadIdInput = el('input', { type: 'text', placeholder: t(locale, 'quotations_lead_id_placeholder') });
+  const calcBtn = el('button', {}, t(locale, 'quotations_calc_btn'));
+  const generateBtn = el('button', { class: 'primary' }, t(locale, 'quotations_generate_btn'));
   generateBtn.disabled = true;
 
   const previewSlot = el('div');
@@ -38,27 +38,27 @@ export async function renderQuotations(container) {
     clear(previewSlot);
     if (!calc) return;
     previewSlot.appendChild(el('div', { class: 'stat-grid' }, [
-      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(calc.totalPrice).toLocaleString()), el('div', { class: 'label' }, 'Total price')]),
-      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(calc.netValue).toLocaleString()), el('div', { class: 'label' }, 'Net value')]),
-      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(calc.downPayment).toLocaleString()), el('div', { class: 'label' }, 'Down payment')]),
-      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(calc.schedule.length)), el('div', { class: 'label' }, 'Installments')]),
+      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(calc.totalPrice).toLocaleString()), el('div', { class: 'label' }, t(locale, 'quotations_stat_total_price'))]),
+      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(calc.netValue).toLocaleString()), el('div', { class: 'label' }, t(locale, 'quotations_stat_net_value'))]),
+      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, Number(calc.downPayment).toLocaleString()), el('div', { class: 'label' }, t(locale, 'quotations_stat_down_payment'))]),
+      el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(calc.schedule.length)), el('div', { class: 'label' }, t(locale, 'quotations_stat_installments'))]),
     ]));
     previewSlot.appendChild(table(
       [
         { label: '#', render: (l) => String(l.sequence) },
-        { label: 'Label', key: 'label' },
-        { label: 'Due date', render: (l) => new Date(l.dueDate).toLocaleDateString() },
-        { label: 'Amount', render: (l) => Number(l.amount).toLocaleString() },
+        { label: t(locale, 'quotations_col_label'), key: 'label' },
+        { label: t(locale, 'sales_col_due_date'), render: (l) => new Date(l.dueDate).toLocaleDateString() },
+        { label: t(locale, 'sales_col_amount'), render: (l) => Number(l.amount).toLocaleString() },
       ],
       calc.schedule,
-      { empty: 'No schedule yet.' },
+      { empty: t(locale, 'quotations_schedule_empty') },
     ));
   }
 
   calcBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!unitSelect.value || !templateSelect.value) {
-      errorSlot.appendChild(errorBanner('Choose a unit and a payment plan template.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'quotations_err_choose_unit_template')));
       return;
     }
     calcBtn.disabled = true;
@@ -92,7 +92,7 @@ export async function renderQuotations(container) {
         totalPriceOverride: totalOverrideInput.value ? Number(totalOverrideInput.value) : undefined,
         leadId: leadIdInput.value.trim() || undefined,
       });
-      toast(`Quotation ${quotation.referenceNumber} (v${quotation.version}) generated.`, 'success');
+      toast(`${t(locale, 'quotations_toast_generated_prefix')} ${quotation.referenceNumber} (v${quotation.version})${t(locale, 'quotations_toast_generated_suffix')}`, 'success');
       await loadQuotations();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -103,14 +103,14 @@ export async function renderQuotations(container) {
 
   if (can('quotation', 'create')) {
     container.appendChild(el('div', { class: 'card' }, [
-      el('h3', { style: 'margin-top:0' }, 'Generate a quotation'),
+      el('h3', { style: 'margin-top:0' }, t(locale, 'quotations_generate_heading')),
       el('div', { class: 'form-row' }, [
-        el('div', {}, [el('label', {}, 'Unit'), unitSelect]),
-        el('div', {}, [el('label', {}, 'Payment plan template'), templateSelect]),
-        el('div', {}, [el('label', {}, 'Discount %'), discountInput]),
-        el('div', {}, [el('label', {}, 'Escalation % / year'), escalationInput]),
-        el('div', {}, [el('label', {}, 'Total price override'), totalOverrideInput]),
-        el('div', {}, [el('label', {}, 'Lead ID'), leadIdInput]),
+        el('div', {}, [el('label', {}, t(locale, 'sales_col_unit')), unitSelect]),
+        el('div', {}, [el('label', {}, t(locale, 'sales_payment_plan_template_field')), templateSelect]),
+        el('div', {}, [el('label', {}, t(locale, 'quotations_discount_percent_field')), discountInput]),
+        el('div', {}, [el('label', {}, t(locale, 'quotations_escalation_field')), escalationInput]),
+        el('div', {}, [el('label', {}, t(locale, 'quotations_total_price_override_field')), totalOverrideInput]),
+        el('div', {}, [el('label', {}, t(locale, 'quotations_lead_id_field')), leadIdInput]),
       ]),
       el('div', { class: 'form-actions' }, [calcBtn, generateBtn]),
       previewSlot,
@@ -119,7 +119,7 @@ export async function renderQuotations(container) {
 
   const listSlot = el('div');
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Quotation history'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'quotations_history_heading')),
     listSlot,
   ]));
 
@@ -150,7 +150,7 @@ export async function renderQuotations(container) {
       const result = await api.get(`/api/quotations/${quotation.id}/print`);
       const win = window.open('', '_blank');
       if (!win) {
-        toast('Allow pop-ups to open the print view.', 'error');
+        toast(t(locale, 'quotations_err_allow_popups'), 'error');
         return;
       }
       win.document.write(result.html);
@@ -178,17 +178,17 @@ export async function renderQuotations(container) {
 
   async function sendOfferWhatsApp(quotation) {
     const values = await formModal({
-      title: `Send Offer ${quotation.referenceNumber} via WhatsApp`,
+      title: `${t(locale, 'crm_offer_send_whatsapp_title_prefix')} ${quotation.referenceNumber} ${t(locale, 'crm_offer_send_whatsapp_title_suffix')}`,
       fields: [
-        { key: 'to', label: 'WhatsApp number (intl format, e.g. 201234567890)', type: 'text' },
-        { key: 'message', label: 'Message', type: 'textarea', value: `Hi, here is quotation ${quotation.referenceNumber}.` },
+        { key: 'to', label: t(locale, 'crm_offer_whatsapp_number_field'), type: 'text' },
+        { key: 'message', label: t(locale, 'crm_offer_message_field'), type: 'textarea', value: `${t(locale, 'quotations_msg_greeting_prefix')} ${quotation.referenceNumber}${t(locale, 'quotations_msg_plain_suffix')}` },
       ],
-      submitLabel: 'Send',
+      submitLabel: t(locale, 'crm_send_btn'),
     });
     if (!values || !values.to?.trim()) return;
     try {
       await api.post(`/api/quotations/${quotation.id}/send-whatsapp`, { to: values.to.trim(), message: values.message });
-      toast('Offer sent via WhatsApp.', 'success');
+      toast(t(locale, 'crm_offer_sent_whatsapp_toast'), 'success');
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -196,13 +196,13 @@ export async function renderQuotations(container) {
 
   async function shareQuotation(quotation) {
     const values = await formModal({
-      title: `Share quotation ${quotation.referenceNumber}`,
+      title: `${t(locale, 'quotations_share_title_prefix')} ${quotation.referenceNumber}`,
       fields: [
-        { key: 'channel', label: 'Channel', type: 'select', options: [{ value: 'whatsapp', label: 'WhatsApp' }, { value: 'email', label: 'Email' }] },
-        { key: 'contact', label: 'WhatsApp phone (intl format, e.g. 201234567890) or email address', type: 'text' },
-        { key: 'message', label: 'Message', type: 'textarea', value: `Hi, here is quotation ${quotation.referenceNumber} for unit review.` },
+        { key: 'channel', label: t(locale, 'quotations_channel_field'), type: 'select', options: [{ value: 'whatsapp', label: t(locale, 'crm_channel_whatsapp') }, { value: 'email', label: t(locale, 'field_email') }] },
+        { key: 'contact', label: t(locale, 'quotations_share_contact_field'), type: 'text' },
+        { key: 'message', label: t(locale, 'crm_offer_message_field'), type: 'textarea', value: `${t(locale, 'quotations_msg_greeting_prefix')} ${quotation.referenceNumber}${t(locale, 'quotations_msg_for_review_suffix')}` },
       ],
-      submitLabel: 'Share',
+      submitLabel: t(locale, 'quotations_share_btn'),
     });
     if (!values) return;
     try {
@@ -212,7 +212,7 @@ export async function renderQuotations(container) {
         const waUrl = `https://wa.me/${digits}?text=${encodeURIComponent(values.message)}`;
         window.open(waUrl, '_blank');
       }
-      toast('Share logged.', 'success');
+      toast(t(locale, 'quotations_toast_share_logged'), 'success');
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -221,7 +221,7 @@ export async function renderQuotations(container) {
   async function updateStatus(quotation, status) {
     try {
       await api.patch(`/api/quotations/${quotation.id}/status`, { status });
-      toast(`Quotation marked ${status}.`, 'success');
+      toast(`${t(locale, 'quotations_toast_marked_prefix')} ${status}.`, 'success');
       await loadQuotations();
     } catch (err) {
       toast(err.message, 'error');
@@ -236,33 +236,33 @@ export async function renderQuotations(container) {
       clear(listSlot);
       listSlot.appendChild(table(
         [
-          { label: 'Reference', key: 'referenceNumber' },
-          { label: 'Version', render: (q) => `v${q.version}` },
-          { label: 'Unit', key: 'unitId' },
-          { label: 'Status', render: (q) => statusBadge(q.status) },
-          { label: 'Created', render: (q) => new Date(q.createdAt).toLocaleString() },
+          { label: t(locale, 'crm_offer_col_reference'), key: 'referenceNumber' },
+          { label: t(locale, 'quotations_col_version'), render: (q) => `v${q.version}` },
+          { label: t(locale, 'sales_col_unit'), key: 'unitId' },
+          { label: t(locale, 'units_col_status'), render: (q) => statusBadge(q.status) },
+          { label: t(locale, 'automation_col_created'), render: (q) => new Date(q.createdAt).toLocaleString() },
           { label: '', render: (q) => {
-            const excelBtn = el('button', {}, 'Excel');
+            const excelBtn = el('button', {}, t(locale, 'quotations_excel_btn'));
             excelBtn.addEventListener('click', () => downloadExcel(q));
-            const printBtn = el('button', {}, 'Print / PDF');
+            const printBtn = el('button', {}, t(locale, 'quotations_print_pdf_btn'));
             printBtn.addEventListener('click', () => openPrintView(q));
-            const offerPdfBtn = el('button', {}, 'Print PDF');
+            const offerPdfBtn = el('button', {}, t(locale, 'quotations_print_pdf_only_btn'));
             offerPdfBtn.addEventListener('click', () => downloadOfferPdf(q));
             const actions = [excelBtn, printBtn, offerPdfBtn];
             if (can('quotation', 'edit')) {
-              const shareBtn = el('button', {}, 'Share');
+              const shareBtn = el('button', {}, t(locale, 'quotations_share_btn'));
               shareBtn.addEventListener('click', () => shareQuotation(q));
               actions.push(shareBtn);
-              const waBtn = el('button', {}, 'Send via WhatsApp');
+              const waBtn = el('button', {}, t(locale, 'quotations_send_whatsapp_btn'));
               waBtn.addEventListener('click', () => sendOfferWhatsApp(q));
               actions.push(waBtn);
               if (q.status === 'generated') {
-                const sentBtn = el('button', {}, 'Mark sent');
+                const sentBtn = el('button', {}, t(locale, 'quotations_mark_sent_btn'));
                 sentBtn.addEventListener('click', () => updateStatus(q, 'sent'));
                 actions.push(sentBtn);
               }
               if (q.status === 'sent') {
-                const acceptBtn = el('button', {}, 'Mark accepted');
+                const acceptBtn = el('button', {}, t(locale, 'quotations_mark_accepted_btn'));
                 acceptBtn.addEventListener('click', () => updateStatus(q, 'accepted'));
                 actions.push(acceptBtn);
               }
@@ -271,7 +271,7 @@ export async function renderQuotations(container) {
           } },
         ],
         page.items,
-        { empty: 'No quotations generated yet.' },
+        { empty: t(locale, 'quotations_empty') },
       ));
     } catch (err) {
       listSlot.appendChild(errorBanner(err.message));

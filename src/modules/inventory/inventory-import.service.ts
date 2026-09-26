@@ -1,7 +1,7 @@
-import type { DeliveryInfo, Project, Unit } from '../../domain/types.js';
+import type { DeliveryInfo, Project, ProjectUnitSpec, Unit, UnitStatus } from '../../domain/types.js';
 import type { ImportFieldDef } from '../../infra/field-mapping.js';
-import { parseBedrooms, parseCurrencyNumber, parseDeliveryInfo, parsePercent, normalizeFinishing, splitList } from '../../infra/import-normalize.js';
-import type { InventoryService, UpdateProjectDetailsInput, UpdateUnitDetailsInput } from './inventory.service.js';
+import { parseBedrooms, parseCurrencyNumber, parseDeliveryInfo, parsePercent, normalizeFinishing, normalizeAvailabilityStatus, splitList } from '../../infra/import-normalize.js';
+import type { CreateProjectUnitSpecInput, InventoryService, UpdateProjectDetailsInput, UpdateUnitDetailsInput } from './inventory.service.js';
 
 /**
  * The Inventory Import field dictionary — covers both Unit-level columns
@@ -80,6 +80,11 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
   { key: 'deliveryDate', label: 'Delivery Date', aliases: ['delivery', 'handover', 'handover date', 'تاريخ التسليم', 'التسليم'] },
   { key: 'pricePerMeter', label: 'Price Per Meter', aliases: ['price/m2', 'price per sqm', 'price per meter', 'سعر المتر'] },
   { key: 'phaseName', label: 'Phase', aliases: ['project phase', 'المرحلة'] },
+  {
+    key: 'availabilityStatus',
+    label: 'Status',
+    aliases: ['availability status', 'availability', 'unit status', 'الحالة', 'حالة الوحدة', 'حالة التوفر'],
+  },
 
   // Project-level (new) — repeated per row for that row's project; applied
   // to the Project, never stored per-unit.
@@ -111,6 +116,38 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
   { key: 'maintenanceFeePercent', label: 'Maintenance Fees %', aliases: ['maintenance', 'رسوم الصيانة'] },
   { key: 'paymentPlan', label: 'Payment Plan', aliases: ['payment plans', 'خطة السداد'] },
 ];
+
+/**
+ * Two derived subsets of the one shared INVENTORY_IMPORT_FIELDS list, used
+ * only for sheet classification (see classifySheet in field-mapping.ts) —
+ * the mapping engine itself always uses the one full dictionary above
+ * regardless of which sheet kind is detected, so a column never resolves
+ * differently depending on classification. "Catalog" fields identify a
+ * project/market range row (no physical unit identity); "availability"
+ * fields identify a physical, individually-coded unit row. A few fields
+ * (unitType, bedrooms, finishingType, pricePerMeter) are genuinely shared
+ * vocabulary and appear in both subsets.
+ */
+const CATALOG_FIELD_KEYS = new Set([
+  'projectName', 'developerName', 'phaseName', 'unitType', 'bedrooms', 'destination',
+  'projectLandFrom', 'projectLandTo', 'projectBuaFrom', 'projectBuaTo',
+  'projectGardenFrom', 'projectGardenTo', 'projectPriceFrom', 'projectPriceTo',
+  'pricePerMeter', 'projectFinishingType', 'finishingType', 'deliveryDate',
+  'cashDiscount', 'maintenanceFeePercent', 'paymentPlan',
+]);
+const AVAILABILITY_FIELD_KEYS = new Set([
+  'projectName', 'unitCode', 'floorLabel', 'buildingLabel', 'unitType', 'bedrooms',
+  'areaSqm', 'areaSqmFrom', 'areaSqmTo', 'listPrice', 'listPriceFrom', 'listPriceTo',
+  'availabilityStatus', 'designType', 'view', 'unitGardenAreaSqm', 'pricePerMeter', 'phaseName',
+]);
+/** The field(s) that give a row real identity in each mode — see
+ * classifySheet's own doc comment for why an anchor match is required
+ * before a dictionary "claims" a sheet. */
+export const CATALOG_ANCHOR_KEYS = ['projectName', 'developerName'];
+export const AVAILABILITY_ANCHOR_KEYS = ['unitCode'];
+
+export const CATALOG_IMPORT_FIELDS: ImportFieldDef[] = INVENTORY_IMPORT_FIELDS.filter((f) => CATALOG_FIELD_KEYS.has(f.key));
+export const AVAILABILITY_IMPORT_FIELDS: ImportFieldDef[] = INVENTORY_IMPORT_FIELDS.filter((f) => AVAILABILITY_FIELD_KEYS.has(f.key));
 
 export type InventoryRangeStrategy = 'avg' | 'from' | 'to';
 
@@ -167,6 +204,12 @@ export interface ResolvedUnitExtra {
   finishingType?: string;
   delivery?: DeliveryInfo;
   pricePerMeterOverride?: number;
+  /** Set only when the row's status column value normalized successfully —
+   * see normalizeAvailabilityStatus. Absent when there was no status
+   * column value, or when it was present but unrecognized (in which case
+   * evaluateRows adds an informational issue instead of guessing). */
+  status?: UnitStatus;
+  sourceStatus?: string;
 }
 
 /** Parsed project-level fields a row may carry — applied to the row's
@@ -237,6 +280,70 @@ export interface InventoryImportResult {
   skipped: number;
   failed: number;
   results: InventoryImportRowResult[];
+}
+
+// ---- Project Catalog import (ProjectUnitSpec rows, not physical Units) ----
+// A parallel, much simpler evaluate/preview/import trio for catalog rows —
+// there is no unit-code identity, no conflict/protection state, and no
+// dedup-vs-create branching to compute up front (resolveProjectUnitSpec
+// already finds-or-updates by natural key), so this deliberately does not
+// mirror every step of the Unit path above.
+
+/** Parsed catalog-row fields — reuses the exact same raw column keys the
+ * Unit-level importer's own project-level columns already parse
+ * (projectBuaFrom/To etc.), just applied to a ProjectUnitSpec's own range
+ * instead of patching the Project's single project-wide range. */
+export interface ResolvedProjectUnitSpecExtra {
+  phaseName?: string;
+  landAreaFromSqm?: number;
+  landAreaToSqm?: number;
+  buaFromSqm?: number;
+  buaToSqm?: number;
+  gardenAreaFromSqm?: number;
+  gardenAreaToSqm?: number;
+  priceFrom?: number;
+  priceTo?: number;
+  pricePerMeter?: number;
+  finishingType?: string;
+  delivery?: DeliveryInfo;
+  cashDiscountPercent?: number;
+  maintenanceFeePercent?: number;
+}
+
+export interface ProjectUnitSpecImportRowPreview {
+  row: number;
+  status: 'valid' | 'invalid';
+  issues: string[];
+  raw: Record<string, string>;
+  resolved?: {
+    projectId: string;
+    projectName: string;
+    unitType: string;
+    bedrooms?: number;
+    extra: ResolvedProjectUnitSpecExtra;
+  };
+}
+
+export interface ProjectUnitSpecImportPreview {
+  rows: ProjectUnitSpecImportRowPreview[];
+  totalRows: number;
+  validCount: number;
+  invalidCount: number;
+}
+
+export interface ProjectUnitSpecImportRowResult {
+  row: number;
+  status: 'created' | 'updated' | 'skipped' | 'error';
+  specId?: string;
+  reason?: string;
+}
+
+export interface ProjectUnitSpecImportResult {
+  total: number;
+  succeeded: number;
+  skipped: number;
+  failed: number;
+  results: ProjectUnitSpecImportRowResult[];
 }
 
 /**
@@ -334,6 +441,14 @@ export class InventoryImportService {
       const listPrice = resolveRangeValue(raw.listPrice, raw.listPriceFrom, raw.listPriceTo, rangeStrategy);
       const unitExtra = this.parseUnitExtra(raw);
       const projectExtra = this.parseProjectExtra(raw);
+
+      const statusResult = normalizeAvailabilityStatus(raw.availabilityStatus);
+      if (statusResult && 'unknown' in statusResult) {
+        issues.push(`"Status" value "${statusResult.unknown}" is not recognized — informational only, left unchanged`);
+      } else if (statusResult) {
+        unitExtra.status = statusResult.status;
+        unitExtra.sourceStatus = statusResult.sourceStatus;
+      }
 
       if (!projectName) issues.push('"Project" is required');
       if (!unitCode && !options.autoGenerateUnitCode) issues.push('"Unit Code" is required');
@@ -516,6 +631,7 @@ export class InventoryImportService {
     mappedRows: Record<string, string>[],
     onWritten: (unit: Unit, action: InventoryImportRowAction) => Promise<void>,
     options?: InventoryImportOptions,
+    provenance?: { sourceImportId?: string; sourceSheet?: string },
   ): Promise<InventoryImportResult> {
     const evaluated = await this.evaluateRows(companyId, mappedRows, options);
     const createdProjects = new Map<string, Project>(); // pending-project key -> the real Project just created for it
@@ -539,6 +655,7 @@ export class InventoryImportService {
 
         await this.applyProjectExtra(companyId, projectId, resolved.projectExtra);
         const { phaseId } = await this.resolveUnitExtraIds(companyId, projectId, resolved.unitExtra);
+        const rowProvenance = { sourceImportId: provenance?.sourceImportId, sourceSheet: provenance?.sourceSheet, sourceRow: row.row };
 
         let unit: Unit;
         if (resolved.action === 'create') {
@@ -559,12 +676,16 @@ export class InventoryImportService {
             finishingType: resolved.unitExtra.finishingType,
             delivery: resolved.unitExtra.delivery,
             pricePerMeterOverride: resolved.unitExtra.pricePerMeterOverride,
+            initialStatus: resolved.unitExtra.status,
+            sourceStatus: resolved.unitExtra.sourceStatus,
+            ...rowProvenance,
           });
         } else {
           const updates: UpdateUnitDetailsInput = {
             unitType: resolved.unitType,
             areaSqm: resolved.areaSqm,
             listPrice: resolved.listPrice,
+            ...rowProvenance,
           };
           if (phaseId) updates.phaseId = phaseId;
           if (resolved.unitExtra.floorLabel) updates.floorLabel = resolved.unitExtra.floorLabel;
@@ -577,6 +698,21 @@ export class InventoryImportService {
           if (resolved.unitExtra.delivery) updates.delivery = resolved.unitExtra.delivery;
           if (resolved.unitExtra.pricePerMeterOverride !== undefined) updates.pricePerMeterOverride = resolved.unitExtra.pricePerMeterOverride;
           unit = await this.inventory.updateUnitDetails(resolved.existingUnitId!, companyId, updates);
+          // A recognized status differing from the unit's current one is a
+          // separate, narrower write (see updateUnitAvailabilityFromImport)
+          // — it goes through its own active-hold/reservation protection
+          // rather than updateUnitDetails's blanket "must already be
+          // available" gate, since the whole point is syncing a status
+          // change (e.g. available -> sold) the source file just reported.
+          if (resolved.unitExtra.status && resolved.unitExtra.status !== unit.status) {
+            unit = await this.inventory.updateUnitAvailabilityFromImport(
+              unit.id,
+              companyId,
+              resolved.unitExtra.status,
+              resolved.unitExtra.sourceStatus!,
+              rowProvenance,
+            );
+          }
         }
         await onWritten(unit, resolved.action);
         results.push({ row: row.row, status: resolved.action === 'create' ? 'created' : 'updated', unitId: unit.id });
@@ -584,6 +720,181 @@ export class InventoryImportService {
         results.push({ row: row.row, status: 'error', reason: err instanceof Error ? err.message : String(err) });
       }
     }
+    return {
+      total: results.length,
+      succeeded: results.filter((r) => r.status === 'created' || r.status === 'updated').length,
+      skipped: results.filter((r) => r.status === 'skipped').length,
+      failed: results.filter((r) => r.status === 'error').length,
+      results,
+    };
+  }
+
+  private parseProjectUnitSpecExtra(raw: Record<string, string>): ResolvedProjectUnitSpecExtra {
+    return {
+      phaseName: raw.phaseName?.trim() || undefined,
+      landAreaFromSqm: parseCurrencyNumber(raw.projectLandFrom),
+      landAreaToSqm: parseCurrencyNumber(raw.projectLandTo),
+      buaFromSqm: parseCurrencyNumber(raw.projectBuaFrom),
+      buaToSqm: parseCurrencyNumber(raw.projectBuaTo),
+      gardenAreaFromSqm: parseCurrencyNumber(raw.projectGardenFrom),
+      gardenAreaToSqm: parseCurrencyNumber(raw.projectGardenTo),
+      priceFrom: parseCurrencyNumber(raw.projectPriceFrom),
+      priceTo: parseCurrencyNumber(raw.projectPriceTo),
+      pricePerMeter: parseCurrencyNumber(raw.pricePerMeter),
+      finishingType: normalizeFinishing(raw.projectFinishingType || raw.finishingType),
+      delivery: parseDeliveryInfo(raw.deliveryDate),
+      cashDiscountPercent: parsePercent(raw.cashDiscount),
+      maintenanceFeePercent: parsePercent(raw.maintenanceFeePercent),
+    };
+  }
+
+  private async evaluateProjectUnitSpecRows(
+    companyId: string,
+    mappedRows: Record<string, string>[],
+    options: InventoryImportOptions = {},
+  ): Promise<ProjectUnitSpecImportRowPreview[]> {
+    const projectCache = new Map<string, Project | null>();
+    const results: ProjectUnitSpecImportRowPreview[] = [];
+
+    for (let idx = 0; idx < mappedRows.length; idx++) {
+      const row = idx + 1;
+      const raw = mappedRows[idx]!;
+      const issues: string[] = [];
+
+      const projectName = raw.projectName?.trim();
+      const unitType = raw.unitType?.trim();
+      const bedrooms = parseBedrooms(raw.bedrooms);
+      const extra = this.parseProjectUnitSpecExtra(raw);
+
+      if (!projectName) issues.push('"Project" is required');
+      if (!unitType) issues.push('"Unit Type" is required');
+      if (extra.cashDiscountPercent !== undefined && (extra.cashDiscountPercent < 0 || extra.cashDiscountPercent > 100)) {
+        issues.push('"Cash Discount" must be between 0 and 100');
+      }
+      if (extra.maintenanceFeePercent !== undefined && (extra.maintenanceFeePercent < 0 || extra.maintenanceFeePercent > 100)) {
+        issues.push('"Maintenance Fees %" must be between 0 and 100');
+      }
+      for (const [label, value] of [
+        ['Land Area', extra.landAreaFromSqm], ['Land Area', extra.landAreaToSqm],
+        ['Project BUA', extra.buaFromSqm], ['Project BUA', extra.buaToSqm],
+        ['Garden Area', extra.gardenAreaFromSqm], ['Garden Area', extra.gardenAreaToSqm],
+        ['Price', extra.priceFrom], ['Price', extra.priceTo],
+      ] as [string, number | undefined][]) {
+        if (value !== undefined && value < 0) issues.push(`"${label}" must be >= 0`);
+      }
+
+      if (issues.length > 0) {
+        results.push({ row, status: 'invalid', issues, raw });
+        continue;
+      }
+
+      const project = await this.resolveProject(companyId, projectName!, projectCache);
+      if (!project && !options.autoCreateMissingProjects) {
+        results.push({ row, status: 'invalid', issues: [`project "${projectName}" not found — create it first, then re-import`], raw });
+        continue;
+      }
+
+      results.push({
+        row,
+        status: 'valid',
+        issues: [],
+        raw,
+        resolved: {
+          projectId: project ? project.id : PENDING_PROJECT_PREFIX + projectName!.toLowerCase(),
+          projectName: project ? project.name : projectName!,
+          unitType: unitType!,
+          bedrooms,
+          extra,
+        },
+      });
+    }
+
+    return results;
+  }
+
+  async buildProjectUnitSpecPreview(
+    companyId: string,
+    mappedRows: Record<string, string>[],
+    options?: InventoryImportOptions,
+  ): Promise<ProjectUnitSpecImportPreview> {
+    const rows = await this.evaluateProjectUnitSpecRows(companyId, mappedRows, options);
+    return {
+      rows,
+      totalRows: rows.length,
+      validCount: rows.filter((r) => r.status === 'valid').length,
+      invalidCount: rows.filter((r) => r.status === 'invalid').length,
+    };
+  }
+
+  /** Writes each valid catalog row via InventoryService.resolveProjectUnitSpec
+   * — find-or-update by natural key (project + phase + unitType +
+   * bedrooms), so re-importing the same catalog file never creates
+   * duplicate specs, it just refreshes the existing one's ranges. Never
+   * creates a Unit: a catalog row has no physical identity (see this
+   * module's own top-of-file comment). */
+  async importProjectUnitSpecRows(
+    companyId: string,
+    mappedRows: Record<string, string>[],
+    options?: InventoryImportOptions,
+    provenance?: { sourceImportId?: string; sourceSheet?: string },
+  ): Promise<ProjectUnitSpecImportResult> {
+    const evaluated = await this.evaluateProjectUnitSpecRows(companyId, mappedRows, options);
+    const createdProjects = new Map<string, Project>();
+    const results: ProjectUnitSpecImportRowResult[] = [];
+
+    for (const row of evaluated) {
+      if (row.status !== 'valid') {
+        results.push({ row: row.row, status: 'skipped', reason: row.issues.join('; ') });
+        continue;
+      }
+      const resolved = row.resolved!;
+      try {
+        let projectId = resolved.projectId;
+        if (projectId.startsWith(PENDING_PROJECT_PREFIX)) {
+          let created = createdProjects.get(projectId);
+          if (!created) {
+            created = await this.inventory.createProject({ companyId, name: resolved.projectName });
+            createdProjects.set(projectId, created);
+          }
+          projectId = created.id;
+        }
+
+        const { phaseId } = resolved.extra.phaseName
+          ? await this.resolveUnitExtraIds(companyId, projectId, { phaseName: resolved.extra.phaseName })
+          : {};
+
+        const specInput: CreateProjectUnitSpecInput = {
+          companyId,
+          projectId,
+          phaseId,
+          unitType: resolved.unitType,
+          bedrooms: resolved.bedrooms,
+          landAreaFromSqm: resolved.extra.landAreaFromSqm,
+          landAreaToSqm: resolved.extra.landAreaToSqm,
+          buaFromSqm: resolved.extra.buaFromSqm,
+          buaToSqm: resolved.extra.buaToSqm,
+          gardenAreaFromSqm: resolved.extra.gardenAreaFromSqm,
+          gardenAreaToSqm: resolved.extra.gardenAreaToSqm,
+          priceFrom: resolved.extra.priceFrom,
+          priceTo: resolved.extra.priceTo,
+          pricePerMeter: resolved.extra.pricePerMeter,
+          finishingType: resolved.extra.finishingType,
+          delivery: resolved.extra.delivery,
+          cashDiscountPercent: resolved.extra.cashDiscountPercent,
+          maintenanceFeePercent: resolved.extra.maintenanceFeePercent,
+          sourceImportId: provenance?.sourceImportId,
+          sourceSheet: provenance?.sourceSheet,
+          sourceRow: row.row,
+        };
+        const existingBefore = await this.inventory.listProjectUnitSpecs(companyId, projectId);
+        const spec = await this.inventory.resolveProjectUnitSpec(specInput);
+        const wasExisting = existingBefore.some((s) => s.id === spec.id);
+        results.push({ row: row.row, status: wasExisting ? 'updated' : 'created', specId: spec.id });
+      } catch (err) {
+        results.push({ row: row.row, status: 'error', reason: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
     return {
       total: results.length,
       succeeded: results.filter((r) => r.status === 'created' || r.status === 'updated').length,

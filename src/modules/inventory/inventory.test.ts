@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRepository, type Repository } from '../../infra/repository.js';
 import { InventoryService, computePricePerMeter } from './inventory.service.js';
-import type { Consultant, Developer, Facility, Launch, Project, ProjectPhase, Reservation, SalesPhoneNumber, Unit, UnitHold } from '../../domain/types.js';
+import type { Consultant, Developer, Facility, Launch, Project, ProjectFavorite, ProjectPhase, ProjectUnitSpec, Reservation, SalesPhoneNumber, Unit, UnitHold } from '../../domain/types.js';
 
 function freshService() {
   return new InventoryService(
@@ -25,6 +25,8 @@ function freshFullService() {
     new InMemoryRepository<Facility>(),
     new InMemoryRepository<Consultant>(),
     new InMemoryRepository<SalesPhoneNumber>(),
+    new InMemoryRepository<ProjectUnitSpec>(),
+    new InMemoryRepository<ProjectFavorite>(),
   );
 }
 
@@ -492,6 +494,62 @@ test('searchProjects is scoped to the company and clamps limit to [1,200]', asyn
   assert.equal(results[0]!.name, 'Project A');
 });
 
+test('searchProjects sorts by newest, price ascending, and price descending', async () => {
+  const svc = freshFullService();
+  const cheap = await svc.createProject({ companyId: 'c1', name: 'Cheap', priceFrom: 1_000_000, priceTo: 2_000_000 });
+  await new Promise((r) => setTimeout(r, 2));
+  const pricey = await svc.createProject({ companyId: 'c1', name: 'Pricey', priceFrom: 9_000_000, priceTo: 12_000_000 });
+
+  const newest = await svc.searchProjects('c1', { sort: 'newest' });
+  assert.deepEqual(newest.map((p) => p.id), [pricey.id, cheap.id]);
+
+  const asc = await svc.searchProjects('c1', { sort: 'price_asc' });
+  assert.deepEqual(asc.map((p) => p.id), [cheap.id, pricey.id]);
+
+  const desc = await svc.searchProjects('c1', { sort: 'price_desc' });
+  assert.deepEqual(desc.map((p) => p.id), [pricey.id, cheap.id]);
+});
+
+test('searchProjects filters by bedrooms via the project catalog unit specs, falling back to physical units when no specs exist', async () => {
+  const svc = freshFullService();
+  const withSpec = await svc.createProject({ companyId: 'c1', name: 'Has Spec' });
+  await svc.createProjectUnitSpec({ companyId: 'c1', projectId: withSpec.id, unitType: 'apartment', bedrooms: 3 });
+  const withUnitOnly = await svc.createProject({ companyId: 'c1', name: 'Has Unit Only' });
+  await svc.createUnit({ companyId: 'c1', projectId: withUnitOnly.id, code: 'U1', unitType: 'apartment', areaSqm: 100, listPrice: 1_000_000, bedrooms: 2 });
+  await svc.createProject({ companyId: 'c1', name: 'No Match' });
+
+  const threeBed = await svc.searchProjects('c1', { bedrooms: 3 });
+  assert.deepEqual(threeBed.map((p) => p.name), ['Has Spec']);
+
+  const twoBed = await svc.searchProjects('c1', { bedrooms: 2 });
+  assert.deepEqual(twoBed.map((p) => p.name), ['Has Unit Only']);
+});
+
+// ---- Project favorites ----
+
+test('addProjectFavorite is idempotent, removeProjectFavorite un-favorites, and listFavoriteProjectIds is scoped per user+company', async () => {
+  const svc = freshFullService();
+  const project = await svc.createProject({ companyId: 'c1', name: 'Favorited Project' });
+
+  await svc.addProjectFavorite('c1', 'user-1', project.id);
+  await svc.addProjectFavorite('c1', 'user-1', project.id); // idempotent — no duplicate row
+  let ids = await svc.listFavoriteProjectIds('c1', 'user-1');
+  assert.deepEqual(ids, [project.id]);
+
+  const otherUserIds = await svc.listFavoriteProjectIds('c1', 'user-2');
+  assert.deepEqual(otherUserIds, []);
+
+  await svc.removeProjectFavorite('c1', 'user-1', project.id);
+  ids = await svc.listFavoriteProjectIds('c1', 'user-1');
+  assert.deepEqual(ids, []);
+});
+
+test('addProjectFavorite rejects a project belonging to a different company (cross-tenant IDOR)', async () => {
+  const svc = freshFullService();
+  const project = await svc.createProject({ companyId: 'c1', name: 'Project X' });
+  await assert.rejects(() => svc.addProjectFavorite('c2', 'user-1', project.id));
+});
+
 // ---- searchUnits ----
 
 test('searchUnits combines bedroom/area/garden/finishing/view/destination filters and defaults to available units only', async () => {
@@ -687,4 +745,101 @@ test('sweepExpiredReservationsDetailed only sweeps the given companyId when one 
   assert.equal(sweptForEveryone.length, 1);
   assert.equal(sweptForEveryone[0]!.companyId, 'c2');
   assert.equal((await svc.getUnit(unitB.id))!.status, 'available', 'an omitted companyId (the background tick) still sweeps every tenant');
+});
+
+// ---- Unit-code uniqueness: project-scoped, not company-wide ----
+
+test('two different projects in the same company may reuse the same unit code (project-scoped uniqueness)', async () => {
+  const svc = freshService();
+  const a = await svc.createUnit({ companyId: 'c1', projectId: 'proj-a', code: 'A-101', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const b = await svc.createUnit({ companyId: 'c1', projectId: 'proj-b', code: 'A-101', unitType: 'apartment', areaSqm: 120, listPrice: 1200 });
+  assert.notEqual(a.id, b.id);
+  assert.equal(a.projectId, 'proj-a');
+  assert.equal(b.projectId, 'proj-b');
+});
+
+test('duplicate unit code within the same project is still rejected regardless of casing', async () => {
+  const svc = freshService();
+  await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'a-101', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await assert.rejects(() => svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-101', unitType: 'apartment', areaSqm: 100, listPrice: 1000 }));
+});
+
+// ---- ProjectUnitSpec (catalog product ranges) ----
+
+test('createProjectUnitSpec validates required fields and is scoped by company', async () => {
+  const svc = freshFullService();
+  await assert.rejects(() => svc.createProjectUnitSpec({ companyId: 'c1', projectId: '', unitType: 'apartment' }));
+  await assert.rejects(() => svc.createProjectUnitSpec({ companyId: 'c1', projectId: 'p1', unitType: '' }));
+  const spec = await svc.createProjectUnitSpec({
+    companyId: 'c1', projectId: 'p1', unitType: 'Apartment', bedrooms: 2,
+    buaFromSqm: 120, buaToSqm: 135, priceFrom: 8_000_000, priceTo: 10_000_000,
+  });
+  assert.equal(spec.unitType, 'Apartment');
+  assert.equal(spec.buaFromSqm, 120);
+  const listed = await svc.listProjectUnitSpecs('c1', 'p1');
+  assert.equal(listed.length, 1);
+  const otherCompany = await svc.listProjectUnitSpecs('c2', 'p1');
+  assert.equal(otherCompany.length, 0);
+});
+
+test('createProjectUnitSpec rejects out-of-range percent fields and negative ranges', async () => {
+  const svc = freshFullService();
+  await assert.rejects(() => svc.createProjectUnitSpec({ companyId: 'c1', projectId: 'p1', unitType: 'apartment', cashDiscountPercent: 150 }));
+  await assert.rejects(() => svc.createProjectUnitSpec({ companyId: 'c1', projectId: 'p1', unitType: 'apartment', buaFromSqm: -5 }));
+});
+
+test('updateProjectUnitSpec is non-destructive and rejects a spec from a different company', async () => {
+  const svc = freshFullService();
+  const spec = await svc.createProjectUnitSpec({ companyId: 'c1', projectId: 'p1', unitType: 'Apartment', bedrooms: 2, priceFrom: 8_000_000 });
+  const updated = await svc.updateProjectUnitSpec(spec.id, 'c1', { priceTo: 10_000_000 });
+  assert.equal(updated.priceFrom, 8_000_000, 'omitted field kept its value');
+  assert.equal(updated.priceTo, 10_000_000);
+  await assert.rejects(() => svc.updateProjectUnitSpec(spec.id, 'c2', { priceTo: 1 }));
+});
+
+test('resolveProjectUnitSpec creates once per natural key (project + phase + unitType + bedrooms) and updates in place on a second call, never duplicating', async () => {
+  const svc = freshFullService();
+  const first = await svc.resolveProjectUnitSpec({ companyId: 'c1', projectId: 'p1', unitType: 'Apartment', bedrooms: 2, buaFromSqm: 120, buaToSqm: 135 });
+  const second = await svc.resolveProjectUnitSpec({ companyId: 'c1', projectId: 'p1', unitType: 'apartment', bedrooms: 2, buaFromSqm: 125, buaToSqm: 140 });
+  assert.equal(first.id, second.id, 'same natural key (case-insensitive unitType) resolves to the same spec, not a duplicate');
+  assert.equal(second.buaFromSqm, 125, 'the range was refreshed by the second row');
+
+  const differentBedrooms = await svc.resolveProjectUnitSpec({ companyId: 'c1', projectId: 'p1', unitType: 'Apartment', bedrooms: 3 });
+  assert.notEqual(differentBedrooms.id, first.id, 'a different bedroom count is a genuinely different spec');
+
+  const all = await svc.listProjectUnitSpecs('c1', 'p1');
+  assert.equal(all.length, 2);
+});
+
+// ---- Availability-import-driven status sync ----
+
+test('updateUnitAvailabilityFromImport moves an available unit to a new status and records sourceStatus/provenance', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const updated = await svc.updateUnitAvailabilityFromImport(unit.id, 'c1', 'contracted', 'Sold', { sourceImportId: 'imp-1', sourceRow: 5 });
+  assert.equal(updated.status, 'contracted');
+  assert.equal(updated.sourceStatus, 'Sold');
+  assert.equal(updated.sourceImportId, 'imp-1');
+  assert.equal(updated.sourceRow, 5);
+});
+
+test('updateUnitAvailabilityFromImport refuses to move a unit off a status backed by a real active hold/reservation', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await svc.reserveUnit(unit.id, 'lead-1', 'c1');
+  await assert.rejects(() => svc.updateUnitAvailabilityFromImport(unit.id, 'c1', 'available', 'Available'));
+});
+
+test('updateUnitAvailabilityFromImport allows re-syncing a status that has no backing internal hold/reservation (itself set by a prior import)', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000, initialStatus: 'contracted', sourceStatus: 'Sold' });
+  const updated = await svc.updateUnitAvailabilityFromImport(unit.id, 'c1', 'available', 'Available');
+  assert.equal(updated.status, 'available', 'no real hold/reservation ever backed the imported "Sold" status, so re-syncing it is safe');
+});
+
+test('createUnit accepts an initial non-available status for an existing-inventory-snapshot import, bypassing the hold/reservation machinery', async () => {
+  const svc = freshService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-1', unitType: 'apartment', areaSqm: 100, listPrice: 1000, initialStatus: 'reserved', sourceStatus: 'Booked' });
+  assert.equal(unit.status, 'reserved');
+  assert.equal(unit.sourceStatus, 'Booked');
 });

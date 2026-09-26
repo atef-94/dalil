@@ -15,13 +15,13 @@ export async function renderHr(container) {
   const typeSelect = selectInput(['annual', 'sick', 'unpaid', 'other'].map((t) => ({ value: t, label: t })));
   const startInput = el('input', { type: 'date' });
   const endInput = el('input', { type: 'date' });
-  const reasonInput = el('input', { type: 'text', placeholder: 'Reason (optional)' });
-  const createBtn = el('button', { class: 'primary' }, 'Request leave');
+  const reasonInput = el('input', { type: 'text', placeholder: t(locale, 'hr_reason_placeholder') });
+  const createBtn = el('button', { class: 'primary' }, t(locale, 'hr_request_leave_btn'));
 
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!employeeSelect.value || !startInput.value || !endInput.value) {
-      errorSlot.appendChild(errorBanner('Choose an employee and both dates.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'hr_err_required')));
       return;
     }
     createBtn.disabled = true;
@@ -36,7 +36,7 @@ export async function renderHr(container) {
       startInput.value = '';
       endInput.value = '';
       reasonInput.value = '';
-      toast('Leave request submitted.', 'success');
+      toast(t(locale, 'hr_submitted_toast'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -46,13 +46,13 @@ export async function renderHr(container) {
   });
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Request leave'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'hr_request_leave_btn')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Employee'), employeeSelect]),
-      el('div', {}, [el('label', {}, 'Type'), typeSelect]),
-      el('div', {}, [el('label', {}, 'Start date'), startInput]),
-      el('div', {}, [el('label', {}, 'End date'), endInput]),
-      el('div', {}, [el('label', {}, 'Reason'), reasonInput]),
+      el('div', {}, [el('label', {}, t(locale, 'comm_employee_col')), employeeSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'units_col_type')), typeSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'common_field_start_date')), startInput]),
+      el('div', {}, [el('label', {}, t(locale, 'common_field_end_date')), endInput]),
+      el('div', {}, [el('label', {}, t(locale, 'fin_reason_field')), reasonInput]),
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
@@ -64,7 +64,7 @@ export async function renderHr(container) {
     btn.disabled = true;
     try {
       await api.post(`/api/hr/leave-requests/${request.id}/${action}`, {});
-      toast(`Leave request ${action === 'approve' ? 'approved' : 'rejected'}.`, 'success');
+      toast(action === 'approve' ? t(locale, 'hr_leave_approved_toast') : t(locale, 'hr_leave_rejected_toast'), 'success');
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -88,22 +88,22 @@ export async function renderHr(container) {
       clear(listSlot);
       listSlot.appendChild(table(
         [
-          { label: 'Employee', render: (r) => employeeSelect.querySelector(`option[value="${r.employeeId}"]`)?.textContent || r.employeeId },
-          { label: 'Type', key: 'type' },
-          { label: 'From', render: (r) => new Date(r.startDate).toLocaleDateString() },
-          { label: 'To', render: (r) => new Date(r.endDate).toLocaleDateString() },
-          { label: 'Status', render: (r) => statusBadge(r.status) },
+          { label: t(locale, 'comm_employee_col'), render: (r) => employeeSelect.querySelector(`option[value="${r.employeeId}"]`)?.textContent || r.employeeId },
+          { label: t(locale, 'units_col_type'), key: 'type' },
+          { label: t(locale, 'common_col_from'), render: (r) => new Date(r.startDate).toLocaleDateString() },
+          { label: t(locale, 'crm_timeline_to_field'), render: (r) => new Date(r.endDate).toLocaleDateString() },
+          { label: t(locale, 'common_col_status'), render: (r) => statusBadge(r.status) },
           { label: '', render: (r) => {
             if (r.status !== 'pending') return '';
-            const approveBtn = el('button', { class: 'primary' }, 'Approve');
+            const approveBtn = el('button', { class: 'primary' }, t(locale, 'brokers_approve_btn'));
             approveBtn.addEventListener('click', () => decide(r, 'approve', approveBtn));
-            const rejectBtn = el('button', {}, 'Reject');
+            const rejectBtn = el('button', {}, t(locale, 'approvals_reject_btn'));
             rejectBtn.addEventListener('click', () => decide(r, 'reject', rejectBtn));
             return el('div', { class: 'form-actions' }, [approveBtn, rejectBtn]);
           } },
         ],
         page.items,
-        { empty: 'No leave requests yet — submit one above, or you may not have permission to view them.' },
+        { empty: t(locale, 'hr_empty_leave_requests') },
       ));
       listSlot.appendChild(paginationControls(page, (next) => { offset = next; load(); }));
     } catch (err) {

@@ -1,6 +1,6 @@
 import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState, selectInput } from '../ui.js';
 import { api } from '../api.js';
-import { can, getLocale } from '../state.js';
+import { can, getLocale, session } from '../state.js';
 import { t } from '../i18n.js';
 import { setAiContext, clearAiContext } from './ai-panel.js';
 import { openImportWizard } from '../import-wizard.js';
@@ -35,17 +35,41 @@ function offersSubSections(locale) {
 }
 
 const TIMELINE_ICONS = {
-  lead_created: '✦', status_changed: '↳', owner_changed: '⇄', message: '✉',
-  task: '☑', opportunity_created: '★', contract_signed: '✔', contract_cancelled: '✖',
+  lead_created: '✦', stage_changed: '↳', owner_changed: '⇄', lead_updated: '✎', message: '✉',
+  task_created: '☐', task_completed: '☑', opportunity_created: '★', reservation_created: '⌂',
+  contract_signed: '✔', contract_cancelled: '✖',
 };
 
-const PRIORITY_OPTIONS = [
-  { value: '', label: '—' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'urgent', label: 'Urgent' },
-];
+function timelineTypeLabels(locale) {
+  return {
+    lead_created: t(locale, 'crm_timeline_type_lead_created'),
+    stage_changed: t(locale, 'crm_timeline_type_stage_changed'),
+    owner_changed: t(locale, 'crm_timeline_type_owner_changed'),
+    lead_updated: t(locale, 'crm_timeline_type_lead_updated'),
+    message: t(locale, 'crm_timeline_type_message'),
+    task_created: t(locale, 'crm_timeline_type_task_created'),
+    task_completed: t(locale, 'crm_timeline_type_task_completed'),
+    opportunity_created: t(locale, 'crm_timeline_type_opportunity_created'),
+    reservation_created: t(locale, 'crm_timeline_type_reservation_created'),
+    contract_signed: t(locale, 'crm_timeline_type_contract_signed'),
+    contract_cancelled: t(locale, 'crm_timeline_type_contract_cancelled'),
+  };
+}
+
+// Purely cosmetic: rotates KPI stat-card icon chips through the accent
+// palette instead of every card reading the same color — see statCard's
+// `tone` option in ui.js. Order/values/labels are untouched.
+const STAT_TONES = ['blue', 'purple', 'teal', 'green', 'amber', 'pink'];
+
+function priorityOptions(locale) {
+  return [
+    { value: '', label: '—' },
+    { value: 'low', label: t(locale, 'crm_priority_low') },
+    { value: 'medium', label: t(locale, 'crm_priority_medium') },
+    { value: 'high', label: t(locale, 'crm_priority_high') },
+    { value: 'urgent', label: t(locale, 'crm_priority_urgent') },
+  ];
+}
 
 export async function renderCrm(container) {
   clear(container);
@@ -239,9 +263,11 @@ export async function renderCrm(container) {
     clear(bodySlot);
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_pipeline_realtime')),
-      el('div', { class: 'stat-grid' }, funnel.stages.map((s) => statCard({
+      el('div', { class: 'stat-grid' }, funnel.stages.map((s, i) => statCard({
         label: s.stageName,
         value: s.count,
+        iconName: 'leads',
+        tone: STAT_TONES[i % STAT_TONES.length],
         // Each pipeline card IS the way into that stage's lead list now —
         // the horizontal stage-tab row this used to require was removed
         // because it only duplicated these same cards.
@@ -251,22 +277,22 @@ export async function renderCrm(container) {
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_today_followups')),
       el('div', { class: 'stat-grid' }, [
-        statCard({ label: t(locale, 'crm_new_today'), value: newToday }),
-        statCard({ label: t(locale, 'crm_followups_due_today'), value: followUpsToday }),
-        statCard({ label: t(locale, 'crm_followups_overdue'), value: followUpsOverdue }),
-        statCard({ label: t(locale, 'crm_total_leads'), value: funnel.totalLeads }),
+        statCard({ label: t(locale, 'crm_new_today'), value: newToday, iconName: 'plus', tone: 'green' }),
+        statCard({ label: t(locale, 'crm_followups_due_today'), value: followUpsToday, iconName: 'bell', tone: 'amber' }),
+        statCard({ label: t(locale, 'crm_followups_overdue'), value: followUpsOverdue, iconName: 'warning', tone: 'pink' }),
+        statCard({ label: t(locale, 'crm_total_leads'), value: funnel.totalLeads, iconName: 'leads', tone: 'blue' }),
       ]),
     ]));
     bodySlot.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_conversion')),
       el('div', { class: 'stat-grid' }, [
-        statCard({ label: t(locale, 'crm_overall_win_rate'), value: `${conversion.overallWinRatePercent}%` }),
-        statCard({ label: t(locale, 'crm_lost_rate'), value: `${conversion.lostRatePercent}%` }),
-        statCard({ label: t(locale, 'crm_avg_speed'), value: speed.averageHours !== null ? `${speed.averageHours}h` : '—' }),
-        statCard({ label: t(locale, 'crm_cost_per_qualified_lead'), value: costPerLead.costPerQualifiedLead !== null ? Number(costPerLead.costPerQualifiedLead).toLocaleString() : '—' }),
+        statCard({ label: t(locale, 'crm_overall_win_rate'), value: `${conversion.overallWinRatePercent}%`, iconName: 'analytics', tone: 'green' }),
+        statCard({ label: t(locale, 'crm_lost_rate'), value: `${conversion.lostRatePercent}%`, iconName: 'warning', tone: 'pink' }),
+        statCard({ label: t(locale, 'crm_avg_speed'), value: speed.averageHours !== null ? `${speed.averageHours}h` : '—', iconName: 'history', tone: 'purple' }),
+        statCard({ label: t(locale, 'crm_cost_per_qualified_lead'), value: costPerLead.costPerQualifiedLead !== null ? Number(costPerLead.costPerQualifiedLead).toLocaleString() : '—', iconName: 'commissions', tone: 'teal' }),
       ]),
       conversion.stageConversion.length > 0 ? el('div', { class: 'stat-grid', style: 'margin-top:10px' },
-        conversion.stageConversion.map((s) => statCard({ label: `${s.fromStageName} → ${s.toStageName}`, value: `${s.conversionPercent}%` })),
+        conversion.stageConversion.map((s, i) => statCard({ label: `${s.fromStageName} → ${s.toStageName}`, value: `${s.conversionPercent}%`, iconName: 'analytics', tone: STAT_TONES[i % STAT_TONES.length] })),
       ) : null,
     ]));
   }
@@ -346,20 +372,20 @@ export async function renderCrm(container) {
         clear(target);
         target.appendChild(table(
           [
-            { label: 'Title', key: 'title' },
-            { label: 'Status', render: (t) => statusBadge(t.status) },
-            { label: 'Due', render: (t) => (t.dueAt ? new Date(t.dueAt).toLocaleString() : '—') },
-            { label: '', render: (t) => {
-              if (t.status !== 'open') return '';
+            { label: t(locale, 'crm_label_title'), key: 'title' },
+            { label: t(locale, 'units_col_status'), render: (row) => statusBadge(row.status) },
+            { label: t(locale, 'crm_task_col_due'), render: (row) => (row.dueAt ? new Date(row.dueAt).toLocaleString() : '—') },
+            { label: '', render: (row) => {
+              if (row.status !== 'open') return '';
               const actions = el('div', { style: 'display:flex;gap:6px' });
-              const completeBtn = el('button', {}, 'Complete');
+              const completeBtn = el('button', {}, t(locale, 'crm_task_complete_btn'));
               completeBtn.addEventListener('click', async () => {
-                try { await api.post(`/api/tasks/${t.id}/complete`, {}); toast('Task completed.', 'success'); await load(); }
+                try { await api.post(`/api/tasks/${row.id}/complete`, {}); toast(t(locale, 'crm_task_completed_toast'), 'success'); await load(); }
                 catch (err) { toast(err.message, 'error'); }
               });
-              const cancelBtn = el('button', {}, 'Cancel');
+              const cancelBtn = el('button', {}, t(locale, 'common_cancel'));
               cancelBtn.addEventListener('click', async () => {
-                try { await api.post(`/api/tasks/${t.id}/cancel`, {}); toast('Task cancelled.', 'success'); await load(); }
+                try { await api.post(`/api/tasks/${row.id}/cancel`, {}); toast(t(locale, 'crm_task_cancelled_toast'), 'success'); await load(); }
                 catch (err) { toast(err.message, 'error'); }
               });
               actions.append(completeBtn, cancelBtn);
@@ -367,7 +393,7 @@ export async function renderCrm(container) {
             } },
           ],
           page.items,
-          { empty: 'No tasks assigned to you yet — schedule a follow-up from a lead to create one.' },
+          { empty: t(locale, 'crm_task_empty') },
         ));
       } catch (err) {
         clear(target);
@@ -383,23 +409,23 @@ export async function renderCrm(container) {
   async function openAddLeadModal() {
     const defaultStage = stages.find((s) => s.id === activeTab) || stages.find((s) => s.isDefault);
     const result = await formModal({
-      title: 'Add New Lead',
+      title: t(locale, 'crm_lead_modal_title'),
       fields: [
-        { key: 'fullName', label: 'Full name' },
-        { key: 'phone', label: 'Mobile' },
-        { key: 'email', label: 'Email (optional)' },
-        { key: 'nationalId', label: 'National ID (optional — strongest duplicate check)' },
-        { key: 'sourceId', label: 'Source / Campaign (optional)' },
-        { key: 'stageId', label: 'Initial stage', type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: defaultStage?.id },
-        { key: 'priority', label: 'Priority', type: 'select', options: PRIORITY_OPTIONS },
-        { key: 'tags', label: 'Tags (comma-separated, optional)' },
-        { key: 'notes', label: 'Initial note (optional)', type: 'textarea' },
+        { key: 'fullName', label: t(locale, 'crm_lead_field_full_name') },
+        { key: 'phone', label: t(locale, 'crm_lead_field_mobile') },
+        { key: 'email', label: t(locale, 'crm_lead_field_email_optional') },
+        { key: 'nationalId', label: t(locale, 'crm_lead_field_national_id') },
+        { key: 'sourceId', label: t(locale, 'crm_lead_field_source') },
+        { key: 'stageId', label: t(locale, 'crm_lead_field_initial_stage'), type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: defaultStage?.id },
+        { key: 'priority', label: t(locale, 'crm_col_priority'), type: 'select', options: priorityOptions(locale) },
+        { key: 'tags', label: t(locale, 'crm_lead_field_tags_optional') },
+        { key: 'notes', label: t(locale, 'crm_lead_field_notes_optional'), type: 'textarea' },
       ],
-      submitLabel: 'Add lead',
+      submitLabel: t(locale, 'crm_lead_submit_add'),
     });
     if (!result) return;
     if (!result.fullName.trim() || !result.phone.trim()) {
-      reportError(new Error('Full name and phone are required.'));
+      reportError(new Error(t(locale, 'crm_lead_validation_required')));
       return;
     }
     try {
@@ -418,7 +444,7 @@ export async function renderCrm(container) {
           subject: 'Note', body: result.notes.trim(), channel: 'note', relatedResource: 'lead', relatedResourceId: lead.id,
         }).catch(() => {}); // the lead itself is already saved — a failed note shouldn't look like a failed lead creation
       }
-      toast(`Lead added — landed in "${stages.find((s) => s.id === lead.stageId)?.name || 'its stage'}".`, 'success');
+      toast(`${t(locale, 'crm_lead_added_toast_prefix')} "${stages.find((s) => s.id === lead.stageId)?.name || t(locale, 'crm_lead_added_fallback_stage')}".`, 'success');
       await refreshAll();
     } catch (err) {
       reportError(err);
@@ -429,18 +455,19 @@ export async function renderCrm(container) {
 
   async function openMoveStageModal(lead, reload) {
     const result = await formModal({
-      title: `Move "${lead.fullName}"`,
+      title: `${t(locale, 'crm_move_word')} "${lead.fullName}"`,
       fields: [
-        { key: 'stageId', label: 'New stage', type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: lead.stageId },
-        { key: 'lostReason', label: 'Lost reason (required only when the new stage is Lost-flagged)' },
+        { key: 'stageId', label: t(locale, 'crm_move_new_stage_field'), type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: lead.stageId },
+        { key: 'lostReason', label: t(locale, 'crm_move_lost_reason_field') },
+        { key: 'note', label: t(locale, 'crm_move_note_field'), type: 'textarea' },
       ],
-      submitLabel: 'Move',
+      submitLabel: t(locale, 'crm_move_word'),
     });
     if (!result) return;
     try {
-      await api.patch(`/api/crm/leads/${lead.id}/stage`, { stageId: result.stageId, lostReason: result.lostReason.trim() || undefined });
+      await api.patch(`/api/crm/leads/${lead.id}/stage`, { stageId: result.stageId, lostReason: result.lostReason.trim() || undefined, note: result.note?.trim() || undefined });
       const target = stages.find((s) => s.id === result.stageId);
-      toast(`Moved to "${target?.name}".`, 'success');
+      toast(`${t(locale, 'crm_move_toast_prefix')} "${target?.name}".`, 'success');
       await refreshAll();
       reload?.();
     } catch (err) {
@@ -453,26 +480,142 @@ export async function renderCrm(container) {
   async function askAi(lead, reload) {
     try {
       const decision = await api.post(`/api/crm/leads/${lead.id}/suggest-next-action`, {});
-      const prefix = `[${decision.confidence}% confidence] `;
+      const prefix = `[${decision.confidence}${t(locale, 'crm_ai_confidence_suffix')}] `;
       if (decision.status === 'no_action') {
-        toast(`${prefix}AI: ${decision.reasoning}`, 'info');
+        toast(`${prefix}${t(locale, 'crm_ai_prefix')} ${decision.reasoning}`, 'info');
       } else if (decision.status === 'escalated') {
-        toast(`${prefix}AI escalated to a human: ${decision.reasoning}`, 'info');
+        toast(`${prefix}${t(locale, 'crm_ai_escalated_prefix')} ${decision.reasoning}`, 'info');
       } else if (decision.resultActionStatus === 'executed') {
-        toast(`${prefix}AI executed: ${decision.reasoning}`, 'success');
+        toast(`${prefix}${t(locale, 'crm_ai_executed_prefix')} ${decision.reasoning}`, 'success');
         await refreshAll();
         reload?.();
       } else if (decision.resultActionStatus === 'pending_approval') {
-        toast(`${prefix}AI suggests: ${decision.reasoning} — awaiting approval on the Approvals page.`, 'info');
+        toast(`${prefix}${t(locale, 'crm_ai_suggests_prefix')} ${decision.reasoning} — ${t(locale, 'crm_ai_awaiting_approval')}`, 'info');
       } else {
-        toast(`${prefix}AI suggests: ${decision.reasoning}`, 'info');
+        toast(`${prefix}${t(locale, 'crm_ai_suggests_prefix')} ${decision.reasoning}`, 'info');
       }
     } catch (err) {
       reportError(err);
     }
   }
 
-  // ---- Lead detail: activity timeline, comments, requirements, tags/priority, reassign, portal ----
+  // ---- Lead detail: timeline/history, comments, requirements, tags/priority, reassign, portal ----
+
+  function formatDuration(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+    const minutes = Math.floor(ms / 60000);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ${minutes % 60}m`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  }
+
+  /**
+   * The Lead Timeline / History card: a real, server-filtered/paginated
+   * view over everything ACTIVE actually recorded for this lead (see
+   * GET /api/crm/leads/:id/timeline) — never a client-side-only slice
+   * that could hide older history. Reuses the exact same
+   * selectInput/searchInput/paginationControls primitives every other
+   * list page already uses.
+   */
+  async function buildTimelineSection(leadId) {
+    const state = { type: '', q: '', from: '', to: '', offset: 0, limit: 20 };
+    const listSlot = el('div', {});
+    const paginationSlot = el('div', { style: 'margin-top:10px' });
+
+    const typeLabels = timelineTypeLabels(locale);
+    const typeSelect = selectInput([{ value: '', label: t(locale, 'crm_timeline_all_types') }, ...Object.entries(typeLabels).map(([value, label]) => ({ value, label }))]);
+    typeSelect.addEventListener('change', () => { state.type = typeSelect.value; state.offset = 0; load(); });
+
+    const fromInput = el('input', { type: 'date' });
+    fromInput.addEventListener('change', () => { state.from = fromInput.value ? new Date(fromInput.value).toISOString() : ''; state.offset = 0; load(); });
+    const toInput = el('input', { type: 'date' });
+    toInput.addEventListener('change', () => { state.to = toInput.value ? new Date(`${toInput.value}T23:59:59`).toISOString() : ''; state.offset = 0; load(); });
+
+    const search = searchInput(t(locale, 'crm_timeline_search_placeholder'), (q) => { state.q = q; state.offset = 0; load(); });
+
+    const filtersRow = el('div', { class: 'form-row', style: 'align-items:flex-end;flex-wrap:wrap' }, [
+      el('div', {}, [el('label', {}, t(locale, 'crm_timeline_event_type_field')), typeSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_timeline_from_field')), fromInput]),
+      el('div', {}, [el('label', {}, t(locale, 'crm_timeline_to_field')), toInput]),
+      el('div', { style: 'flex:1;min-width:200px' }, [el('label', {}, t(locale, 'crm_timeline_search_field')), search]),
+    ]);
+
+    function renderEntry(e) {
+      const isAi = e.actorType === 'ai_agent';
+      const d = e.detail || {};
+      const rows = [
+        el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' }, [
+          el('strong', {}, typeLabels[e.type] || e.type),
+          isAi ? badge(t(locale, 'crm_timeline_ai_agent_badge'), 'blue') : null,
+          el('span', { class: 'muted', style: 'font-size:12px' }, new Date(e.at).toLocaleString()),
+        ]),
+        el('div', {}, e.summary),
+        el('div', { class: 'muted', style: 'font-size:12px' }, e.actorName),
+      ];
+      if (typeof d.fromStageId !== 'undefined' || typeof d.toStatus === 'string') {
+        const fromName = stages.find((s) => s.id === d.fromStageId)?.name || t(locale, 'crm_timeline_new_lead_fallback');
+        rows.push(el('div', { style: 'font-size:13px' }, `${fromName} → ${d.toStatus || '—'}`));
+        if (typeof d.timeInPreviousStageMs === 'number') {
+          rows.push(el('div', { class: 'muted', style: 'font-size:12px' }, `${t(locale, 'crm_timeline_time_in_stage_prefix')} ${formatDuration(d.timeInPreviousStageMs)}`));
+        }
+        if (d.lostReason) rows.push(el('div', { style: 'font-size:13px' }, `${t(locale, 'crm_timeline_reason_prefix')} ${d.lostReason}`));
+        if (d.note) rows.push(el('div', { style: 'font-size:13px' }, `${t(locale, 'crm_timeline_comment_prefix')} ${d.note}`));
+      }
+      if (Array.isArray(d.fieldsChanged)) {
+        const fmtVal = (v) => (v === undefined || v === null || v === '' ? '—' : v);
+        for (const field of d.fieldsChanged) {
+          rows.push(el('div', { style: 'font-size:13px' }, `${field}: ${fmtVal(d.previousValues?.[field])} → ${fmtVal(d.newValues?.[field])}`));
+        }
+      }
+      if (e.type === 'owner_changed') {
+        rows.push(el('div', { style: 'font-size:13px' }, `${d.previousOwnerUserId || '—'} → ${d.newOwnerUserId || '—'}`));
+      }
+      if (e.type === 'message' && d.body) {
+        rows.push(el('div', { style: 'font-size:13px;white-space:pre-wrap' }, `"${d.body}"`));
+      }
+      return el('div', { style: 'display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border,#e5e5e5)' }, [
+        el('span', {}, TIMELINE_ICONS[e.type] || '•'),
+        el('div', { style: 'flex:1' }, rows),
+      ]);
+    }
+
+    async function load() {
+      clear(listSlot);
+      listSlot.appendChild(loadingState());
+      try {
+        const page = await api.get(`/api/crm/leads/${leadId}/timeline`, {
+          type: state.type || undefined,
+          q: state.q || undefined,
+          from: state.from || undefined,
+          to: state.to || undefined,
+          limit: state.limit,
+          offset: state.offset,
+        });
+        clear(listSlot);
+        if (page.items.length === 0) {
+          listSlot.appendChild(el('p', { class: 'muted' }, t(locale, 'crm_timeline_no_matches')));
+        } else {
+          listSlot.appendChild(el('div', {}, page.items.map(renderEntry)));
+        }
+        clear(paginationSlot);
+        paginationSlot.appendChild(paginationControls(page, (offset) => { state.offset = offset; load(); }));
+      } catch (err) {
+        clear(listSlot);
+        listSlot.appendChild(errorBanner(err.message));
+      }
+    }
+
+    const card = el('div', { class: 'card' }, [
+      el('h4', { style: 'margin-top:0' }, t(locale, 'crm_timeline_card_title')),
+      filtersRow,
+      listSlot,
+      paginationSlot,
+    ]);
+    await load();
+    return card;
+  }
 
   async function openLeadDetail(lead, reload) {
     const body = el('div', {});
@@ -490,12 +633,9 @@ export async function renderCrm(container) {
 
     async function refreshDetail() {
       clear(body);
-      let fresh, timeline, score;
+      let fresh, score;
       try {
-        [fresh, timeline] = await Promise.all([
-          api.get(`/api/crm/leads/${lead.id}`),
-          api.get(`/api/crm/leads/${lead.id}/timeline`),
-        ]);
+        fresh = await api.get(`/api/crm/leads/${lead.id}`);
         score = await api.get(`/api/crm/leads/${lead.id}/score`).catch(() => null);
       } catch (err) {
         clear(body);
@@ -515,35 +655,35 @@ export async function renderCrm(container) {
       const header = el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:14px' }, [
         statusBadge(stage?.name || lead.stageId),
         lead.priority ? badge(lead.priority, lead.priority === 'urgent' || lead.priority === 'high' ? 'red' : '') : null,
-        deliveryStatus && deliveryStatus.status !== 'unknown' ? badge(`Delivery: ${deliveryStatus.status}`, DELIVERY_COLORS[deliveryStatus.status] || '') : null,
-        score ? el('span', { class: 'muted' }, `Score: ${score.score}/100`) : null,
+        deliveryStatus && deliveryStatus.status !== 'unknown' ? badge(`${t(locale, 'crm_delivery_status_prefix')} ${deliveryStatus.status}`, DELIVERY_COLORS[deliveryStatus.status] || '') : null,
+        score ? el('span', { class: 'muted' }, `${t(locale, 'crm_lead_score_prefix')} ${score.score}/100`) : null,
         el('span', { class: 'muted' }, lead.phone),
         lead.email ? el('span', { class: 'muted' }, lead.email) : null,
       ]);
       body.appendChild(header);
 
       const actionsRow = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px' });
-      const moveBtn = el('button', {}, 'Move stage');
+      const moveBtn = el('button', {}, t(locale, 'crm_action_move_stage'));
       moveBtn.addEventListener('click', async () => { await openMoveStageModal(lead, null); await refreshDetail(); reload?.(); });
       actionsRow.appendChild(moveBtn);
 
-      const reassignBtn = el('button', {}, 'Reassign owner');
+      const reassignBtn = el('button', {}, t(locale, 'crm_action_reassign_owner'));
       reassignBtn.addEventListener('click', () => reassignOwner(lead, refreshDetail));
       actionsRow.appendChild(reassignBtn);
 
-      const tagsBtn = el('button', {}, 'Edit tags / priority');
+      const tagsBtn = el('button', {}, t(locale, 'crm_action_edit_tags'));
       tagsBtn.addEventListener('click', () => editTagsAndPriority(lead, refreshDetail));
       actionsRow.appendChild(tagsBtn);
 
-      const reqBtn = el('button', {}, 'Requirements');
+      const reqBtn = el('button', {}, t(locale, 'crm_action_requirements'));
       reqBtn.addEventListener('click', () => editDetails(lead, refreshDetail));
       actionsRow.appendChild(reqBtn);
 
-      const portalBtn = el('button', {}, 'Grant portal access');
+      const portalBtn = el('button', {}, t(locale, 'crm_action_grant_portal'));
       portalBtn.addEventListener('click', () => grantPortalAccess(lead));
       actionsRow.appendChild(portalBtn);
 
-      const aiBtn = el('button', {}, 'Ask AI');
+      const aiBtn = el('button', {}, t(locale, 'crm_action_ask_ai'));
       aiBtn.addEventListener('click', async () => { await askAi(lead, null); await refreshDetail(); reload?.(); });
       actionsRow.appendChild(aiBtn);
       body.appendChild(actionsRow);
@@ -558,12 +698,12 @@ export async function renderCrm(container) {
       // deep-snapshot payment schedule, PDF, and WhatsApp document send
       // every other Offer surface uses; nothing here is a second path. ----
       if (can('quotation', 'create')) {
-        const unitCodeInput = el('input', { type: 'text', placeholder: 'Unit code, e.g. A-1203' });
-        const lookupBtn = el('button', {}, 'Look up');
+        const unitCodeInput = el('input', { type: 'text', placeholder: t(locale, 'crm_offer_unit_code_placeholder') });
+        const lookupBtn = el('button', {}, t(locale, 'crm_offer_lookup_btn'));
         const offerUnitInfo = el('div', { class: 'muted', style: 'margin-top:6px' });
         const offerTemplateSelect = selectInput([]);
         const offerDiscountInput = el('input', { type: 'number', placeholder: '0', value: '0' });
-        const createOfferBtn = el('button', { class: 'primary' }, 'Create Offer');
+        const createOfferBtn = el('button', { class: 'primary' }, t(locale, 'crm_offer_create_btn'));
         createOfferBtn.disabled = true;
         let foundUnit = null;
 
@@ -583,7 +723,7 @@ export async function renderCrm(container) {
             foundUnit = result.unit;
             offerUnitInfo.appendChild(el('div', {}, [
               el('strong', {}, `${result.project?.name || ''} — ${result.unit.unitType}`),
-              el('div', {}, `${result.unit.areaSqm} m² · ${Number(result.unit.listPrice).toLocaleString()}${result.unit.floorLabel ? ` · Floor ${result.unit.floorLabel}` : ''}${result.unit.buildingLabel ? ` · Building ${result.unit.buildingLabel}` : ''}`),
+              el('div', {}, `${result.unit.areaSqm} m² · ${Number(result.unit.listPrice).toLocaleString()}${result.unit.floorLabel ? ` · ${t(locale, 'units_manage_floor_field')} ${result.unit.floorLabel}` : ''}${result.unit.buildingLabel ? ` · ${t(locale, 'units_manage_building_field')} ${result.unit.buildingLabel}` : ''}`),
             ]));
             createOfferBtn.disabled = false;
           } catch (err) {
@@ -619,17 +759,17 @@ export async function renderCrm(container) {
 
         async function sendOfferWhatsApp(quotation) {
           const values = await formModal({
-            title: `Send Offer ${quotation.referenceNumber} via WhatsApp`,
+            title: `${t(locale, 'crm_offer_send_whatsapp_title_prefix')} ${quotation.referenceNumber} ${t(locale, 'crm_offer_send_whatsapp_title_suffix')}`,
             fields: [
-              { key: 'to', label: 'WhatsApp number (intl format, e.g. 201234567890)', type: 'text', value: lead.phone || '' },
-              { key: 'message', label: 'Message', type: 'textarea', value: `Hi ${lead.fullName}, here is your offer.` },
+              { key: 'to', label: t(locale, 'crm_offer_whatsapp_number_field'), type: 'text', value: lead.phone || '' },
+              { key: 'message', label: t(locale, 'crm_offer_message_field'), type: 'textarea', value: `${t(locale, 'crm_offer_whatsapp_greeting')} ${lead.fullName}${t(locale, 'crm_offer_whatsapp_message_suffix')}` },
             ],
-            submitLabel: 'Send',
+            submitLabel: t(locale, 'crm_send_btn'),
           });
           if (!values || !values.to?.trim()) return;
           try {
             await api.post(`/api/quotations/${quotation.id}/send-whatsapp`, { to: values.to.trim(), message: values.message });
-            toast('Offer sent via WhatsApp.', 'success');
+            toast(t(locale, 'crm_offer_sent_whatsapp_toast'), 'success');
             await refreshDetail();
           } catch (err) {
             toast(err.message, 'error');
@@ -642,19 +782,19 @@ export async function renderCrm(container) {
             const page = await api.get('/api/quotations', { leadId: lead.id, limit: 20 });
             offersListSlot.appendChild(table(
               [
-                { label: 'Reference', key: 'referenceNumber' },
-                { label: 'Status', render: (q) => statusBadge(q.status) },
-                { label: 'Created', render: (q) => new Date(q.createdAt).toLocaleString() },
+                { label: t(locale, 'crm_offer_col_reference'), key: 'referenceNumber' },
+                { label: t(locale, 'units_col_status'), render: (q) => statusBadge(q.status) },
+                { label: t(locale, 'crm_offer_col_created'), render: (q) => new Date(q.createdAt).toLocaleString() },
                 { label: '', render: (q) => {
-                  const printBtn = el('button', {}, 'Print');
+                  const printBtn = el('button', {}, t(locale, 'crm_offer_print_btn'));
                   printBtn.addEventListener('click', () => downloadOfferPdf(q));
-                  const waBtn = el('button', {}, 'Send via WhatsApp');
+                  const waBtn = el('button', {}, t(locale, 'catalog_share_whatsapp'));
                   waBtn.addEventListener('click', () => sendOfferWhatsApp(q));
                   return el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, [printBtn, waBtn]);
                 } },
               ],
               page.items,
-              { empty: 'No offers created yet for this lead.' },
+              { empty: t(locale, 'crm_offer_empty') },
             ));
           } catch (err) {
             offersListSlot.appendChild(errorBanner(err.message));
@@ -663,7 +803,7 @@ export async function renderCrm(container) {
 
         createOfferBtn.addEventListener('click', async () => {
           if (!foundUnit || !offerTemplateSelect.value) {
-            toast('Look up a unit and choose a payment plan first.', 'error');
+            toast(t(locale, 'crm_offer_lookup_first_toast'), 'error');
             return;
           }
           createOfferBtn.disabled = true;
@@ -674,7 +814,7 @@ export async function renderCrm(container) {
               discountPercent: Number(offerDiscountInput.value) || 0,
               leadId: lead.id,
             });
-            toast(`Offer ${quotation.referenceNumber} created.`, 'success');
+            toast(`${t(locale, 'crm_offer_created_prefix')} ${quotation.referenceNumber} ${t(locale, 'crm_offer_created_suffix')}`, 'success');
             unitCodeInput.value = '';
             clear(offerUnitInfo);
             foundUnit = null;
@@ -692,12 +832,12 @@ export async function renderCrm(container) {
         // payment-plan + PDF quote for this specific lead), so it needs a
         // different label to not read as the same feature.
         body.appendChild(el('div', { class: 'card' }, [
-          el('h4', { style: 'margin-top:0' }, 'Price Offer (unit + payment plan + PDF)'),
+          el('h4', { style: 'margin-top:0' }, t(locale, 'crm_offer_card_title')),
           el('div', { class: 'form-row' }, [
-            el('div', {}, [el('label', {}, 'Unit code'), unitCodeInput]),
+            el('div', {}, [el('label', {}, t(locale, 'units_manage_unit_code_field')), unitCodeInput]),
             el('div', { style: 'align-self:flex-end' }, lookupBtn),
-            el('div', {}, [el('label', {}, 'Payment plan'), offerTemplateSelect]),
-            el('div', {}, [el('label', {}, 'Discount %'), offerDiscountInput]),
+            el('div', {}, [el('label', {}, t(locale, 'crm_offer_payment_plan_field')), offerTemplateSelect]),
+            el('div', {}, [el('label', {}, t(locale, 'crm_offer_discount_field')), offerDiscountInput]),
           ]),
           offerUnitInfo,
           el('div', { class: 'form-actions' }, [createOfferBtn]),
@@ -708,18 +848,21 @@ export async function renderCrm(container) {
 
       // ---- Log activity: comment / call / WhatsApp note ----
       const channelSelect = el('select', {}, [
-        el('option', { value: 'note' }, 'Note'),
-        el('option', { value: 'call' }, 'Call log'),
-        el('option', { value: 'whatsapp' }, 'WhatsApp'),
-        el('option', { value: 'email' }, 'Email'),
-        el('option', { value: 'internal' }, 'Internal message'),
+        el('option', { value: 'note' }, t(locale, 'crm_channel_note')),
+        el('option', { value: 'call' }, t(locale, 'crm_channel_call')),
+        el('option', { value: 'whatsapp' }, t(locale, 'crm_channel_whatsapp')),
+        el('option', { value: 'email' }, t(locale, 'field_email')),
+        el('option', { value: 'internal' }, t(locale, 'crm_channel_internal')),
       ]);
-      const activityInput = el('textarea', { rows: 2, placeholder: 'Log a call, WhatsApp exchange, or note…' });
-      const logBtn = el('button', { class: 'primary' }, 'Log activity');
+      const activityInput = el('textarea', { rows: 2, placeholder: t(locale, 'crm_activity_placeholder') });
+      const logBtn = el('button', { class: 'primary' }, t(locale, 'crm_activity_log_btn'));
       logBtn.addEventListener('click', async () => {
         if (!activityInput.value.trim()) return;
         logBtn.disabled = true;
         try {
+          // Note: these subject values are stored data (the message's subject
+          // line), not UI chrome — left in English to match the rest of the
+          // stored record; only the on-screen select options above are localized.
           await api.post('/api/communication/messages', {
             subject: channelSelect.value === 'call' ? 'Call logged' : 'Note',
             body: activityInput.value.trim(),
@@ -728,7 +871,7 @@ export async function renderCrm(container) {
             relatedResourceId: lead.id,
           });
           activityInput.value = '';
-          toast('Activity logged.', 'success');
+          toast(t(locale, 'crm_activity_logged_toast'), 'success');
           await refreshDetail();
         } catch (err) {
           reportError(err);
@@ -737,18 +880,18 @@ export async function renderCrm(container) {
         }
       });
       body.appendChild(el('div', { class: 'card' }, [
-        el('h4', { style: 'margin-top:0' }, 'Log activity'),
+        el('h4', { style: 'margin-top:0' }, t(locale, 'crm_activity_log_btn')),
         el('div', { class: 'form-row' }, [
-          el('div', { style: 'max-width:160px' }, [el('label', {}, 'Channel'), channelSelect]),
-          el('div', { style: 'flex:2' }, [el('label', {}, 'Details'), activityInput]),
+          el('div', { style: 'max-width:160px' }, [el('label', {}, t(locale, 'crm_activity_channel_field')), channelSelect]),
+          el('div', { style: 'flex:2' }, [el('label', {}, t(locale, 'crm_activity_details_field')), activityInput]),
         ]),
         el('div', { class: 'form-actions' }, [logBtn]),
       ]));
 
       // ---- Schedule a follow-up (a Task tied to this lead) ----
-      const followUpInput = el('input', { type: 'text', placeholder: 'e.g. Call back about pricing' });
+      const followUpInput = el('input', { type: 'text', placeholder: t(locale, 'crm_followup_title_placeholder') });
       const followUpDate = el('input', { type: 'datetime-local' });
-      const scheduleBtn = el('button', {}, 'Schedule follow-up');
+      const scheduleBtn = el('button', {}, t(locale, 'crm_followup_schedule_btn'));
       scheduleBtn.addEventListener('click', async () => {
         if (!followUpInput.value.trim()) return;
         try {
@@ -757,39 +900,35 @@ export async function renderCrm(container) {
             relatedResource: 'lead',
             relatedResourceId: lead.id,
             dueAt: followUpDate.value ? new Date(followUpDate.value).toISOString() : undefined,
+            // Without this, the follow-up never appears in anyone's "My
+            // Tasks" list (GET /api/tasks/my filters strictly on
+            // assignedToUserId) — it would be created but effectively
+            // uncompletable from the Tasks tab. No assignee picker exists
+            // in this composer, so default to the scheduler themselves.
+            assignedToUserId: session.me?.id,
           });
           followUpInput.value = '';
-          toast('Follow-up scheduled.', 'success');
+          toast(t(locale, 'crm_followup_scheduled_toast'), 'success');
           await refreshDetail();
         } catch (err) {
           reportError(err);
         }
       });
       body.appendChild(el('div', { class: 'card' }, [
-        el('h4', { style: 'margin-top:0' }, 'Schedule a follow-up'),
+        el('h4', { style: 'margin-top:0' }, t(locale, 'crm_followup_card_title')),
         el('div', { class: 'form-row' }, [
-          el('div', {}, [el('label', {}, 'Title'), followUpInput]),
-          el('div', {}, [el('label', {}, 'When'), followUpDate]),
+          el('div', {}, [el('label', {}, t(locale, 'crm_label_title')), followUpInput]),
+          el('div', {}, [el('label', {}, t(locale, 'crm_followup_when_field')), followUpDate]),
         ]),
         el('div', { class: 'form-actions' }, [scheduleBtn]),
       ]));
 
-      // ---- Activity timeline ----
-      const timelineCard = el('div', { class: 'card' }, [el('h4', { style: 'margin-top:0' }, 'Activity timeline')]);
-      if (timeline.entries.length === 0) {
-        timelineCard.appendChild(el('p', { class: 'muted' }, 'No activity recorded yet.'));
-      } else {
-        timelineCard.appendChild(el('div', {}, [...timeline.entries].reverse().map((e) => el('div', {
-          style: 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#e5e5e5)',
-        }, [
-          el('span', {}, TIMELINE_ICONS[e.type] || '•'),
-          el('div', {}, [
-            el('div', {}, e.summary),
-            el('div', { class: 'muted', style: 'font-size:12px' }, new Date(e.at).toLocaleString()),
-          ]),
-        ]))));
-      }
-      body.appendChild(timelineCard);
+      // ---- Timeline / History: the complete, permanent record of this
+      // lead's journey (stage/owner/data changes, comments/calls/WhatsApp/
+      // email, follow-ups, offers, reservations, contracts, AI actions) —
+      // server-filtered/paginated so nothing older is ever silently
+      // dropped just because it's not on the first page. ----
+      body.appendChild(await buildTimelineSection(lead.id));
     }
 
     await refreshDetail();
@@ -797,14 +936,14 @@ export async function renderCrm(container) {
 
   async function reassignOwner(lead, reload) {
     const result = await formModal({
-      title: `Reassign "${lead.fullName}"`,
-      fields: [{ key: 'ownerEmployeeUserId', label: 'New owner (user id)', value: lead.ownerEmployeeUserId }],
-      submitLabel: 'Reassign',
+      title: `${t(locale, 'crm_reassign_word')} "${lead.fullName}"`,
+      fields: [{ key: 'ownerEmployeeUserId', label: t(locale, 'crm_reassign_owner_field'), value: lead.ownerEmployeeUserId }],
+      submitLabel: t(locale, 'crm_reassign_word'),
     });
     if (!result || !result.ownerEmployeeUserId.trim()) return;
     try {
       await api.patch(`/api/crm/leads/${lead.id}/owner`, { ownerEmployeeUserId: result.ownerEmployeeUserId.trim() });
-      toast('Lead reassigned.', 'success');
+      toast(t(locale, 'crm_reassign_toast'), 'success');
       await reload?.();
     } catch (err) {
       reportError(err);
@@ -813,12 +952,12 @@ export async function renderCrm(container) {
 
   async function editTagsAndPriority(lead, reload) {
     const result = await formModal({
-      title: `Tags & priority — ${lead.fullName}`,
+      title: `${t(locale, 'crm_tags_modal_title_prefix')} ${lead.fullName}`,
       fields: [
-        { key: 'priority', label: 'Priority', type: 'select', options: PRIORITY_OPTIONS, value: lead.priority || '' },
-        { key: 'tags', label: 'Tags (comma-separated)', value: (lead.tags || []).join(', ') },
+        { key: 'priority', label: t(locale, 'crm_col_priority'), type: 'select', options: priorityOptions(locale), value: lead.priority || '' },
+        { key: 'tags', label: t(locale, 'crm_tags_field_plain'), value: (lead.tags || []).join(', ') },
       ],
-      submitLabel: 'Save',
+      submitLabel: t(locale, 'crm_save_btn'),
     });
     if (!result) return;
     try {
@@ -826,7 +965,7 @@ export async function renderCrm(container) {
         priority: result.priority || undefined,
         tags: result.tags.split(',').map((t) => t.trim()).filter(Boolean),
       });
-      toast('Saved.', 'success');
+      toast(t(locale, 'crm_saved_toast'), 'success');
       await reload?.();
     } catch (err) {
       reportError(err);
@@ -835,20 +974,20 @@ export async function renderCrm(container) {
 
   async function editDetails(lead, reload) {
     const result = await formModal({
-      title: `Requirements — ${lead.fullName}`,
+      title: `${t(locale, 'crm_requirements_modal_title_prefix')} ${lead.fullName}`,
       fields: [
-        { key: 'propertyTypeWanted', label: 'Property type wanted', placeholder: 'e.g. apartment, villa', value: lead.propertyTypeWanted },
-        { key: 'purchaseGoal', label: 'Purchase goal', placeholder: 'e.g. investment, end use', value: lead.purchaseGoal },
-        { key: 'preferredLocation', label: 'Preferred location', placeholder: 'e.g. New Cairo', value: lead.preferredLocation },
-        { key: 'minAreaSqm', label: 'Min area (sqm)', type: 'number', value: lead.minAreaSqm },
-        { key: 'maxAreaSqm', label: 'Max area (sqm)', type: 'number', value: lead.maxAreaSqm },
-        { key: 'expectedDeliveryTimeline', label: 'Expected delivery timeline', placeholder: 'e.g. ready to move, off-plan ok', value: lead.expectedDeliveryTimeline },
-        { key: 'maxDownPayment', label: 'Max down payment', type: 'number', value: lead.maxDownPayment },
-        { key: 'maxInstallment', label: 'Max monthly installment', type: 'number', value: lead.maxInstallment },
-        { key: 'preferredTenorMonths', label: 'Preferred tenor (months)', type: 'number', value: lead.preferredTenorMonths },
-        { key: 'preferredTransferMethod', label: 'Preferred transfer method', placeholder: 'e.g. cash, bank transfer', value: lead.preferredTransferMethod },
+        { key: 'propertyTypeWanted', label: t(locale, 'crm_req_property_type_field'), placeholder: t(locale, 'crm_req_property_type_placeholder'), value: lead.propertyTypeWanted },
+        { key: 'purchaseGoal', label: t(locale, 'crm_req_purchase_goal_field'), placeholder: t(locale, 'crm_req_purchase_goal_placeholder'), value: lead.purchaseGoal },
+        { key: 'preferredLocation', label: t(locale, 'crm_req_location_field'), placeholder: t(locale, 'crm_req_location_placeholder'), value: lead.preferredLocation },
+        { key: 'minAreaSqm', label: t(locale, 'crm_req_min_area_field'), type: 'number', value: lead.minAreaSqm },
+        { key: 'maxAreaSqm', label: t(locale, 'crm_req_max_area_field'), type: 'number', value: lead.maxAreaSqm },
+        { key: 'expectedDeliveryTimeline', label: t(locale, 'crm_req_delivery_timeline_field'), placeholder: t(locale, 'crm_req_delivery_timeline_placeholder'), value: lead.expectedDeliveryTimeline },
+        { key: 'maxDownPayment', label: t(locale, 'crm_req_max_down_payment_field'), type: 'number', value: lead.maxDownPayment },
+        { key: 'maxInstallment', label: t(locale, 'crm_req_max_installment_field'), type: 'number', value: lead.maxInstallment },
+        { key: 'preferredTenorMonths', label: t(locale, 'crm_req_tenor_field'), type: 'number', value: lead.preferredTenorMonths },
+        { key: 'preferredTransferMethod', label: t(locale, 'crm_req_transfer_method_field'), placeholder: t(locale, 'crm_req_transfer_method_placeholder'), value: lead.preferredTransferMethod },
       ],
-      submitLabel: 'Save requirements',
+      submitLabel: t(locale, 'crm_requirements_submit'),
     });
     if (!result) return;
     const numeric = (v) => (v.trim() === '' ? undefined : Number(v));
@@ -865,7 +1004,7 @@ export async function renderCrm(container) {
         preferredTenorMonths: numeric(result.preferredTenorMonths),
         preferredTransferMethod: result.preferredTransferMethod.trim() || undefined,
       });
-      toast('Requirements saved.', 'success');
+      toast(t(locale, 'crm_requirements_saved_toast'), 'success');
       await reload?.();
     } catch (err) {
       reportError(err);
@@ -874,17 +1013,19 @@ export async function renderCrm(container) {
 
   async function grantPortalAccess(lead) {
     const result = await formModal({
-      title: `Grant customer portal access to ${lead.fullName}`,
+      title: `${t(locale, 'crm_portal_modal_title_prefix')} ${lead.fullName}`,
       fields: [
-        { key: 'email', label: 'Login email', placeholder: lead.email || 'client@example.com' },
-        { key: 'password', label: 'Temporary password', placeholder: 'At least 8 characters' },
+        // The placeholder fallback is a generic example email address — left
+        // as-is (not translated) since an email format reads the same in any locale.
+        { key: 'email', label: t(locale, 'crm_portal_email_field'), placeholder: lead.email || 'client@example.com' },
+        { key: 'password', label: t(locale, 'crm_portal_password_field'), placeholder: t(locale, 'crm_portal_password_placeholder') },
       ],
-      submitLabel: 'Grant access',
+      submitLabel: t(locale, 'crm_portal_submit'),
     });
     if (!result || !result.email.trim() || !result.password.trim()) return;
     try {
       await api.post('/api/portal/grant-access', { leadId: lead.id, email: result.email.trim(), password: result.password });
-      toast('Portal access granted — share the login details with the client.', 'success');
+      toast(t(locale, 'crm_portal_granted_toast'), 'success');
     } catch (err) {
       reportError(err);
     }
@@ -894,18 +1035,18 @@ export async function renderCrm(container) {
 
   async function openAddStageModal() {
     const result = await formModal({
-      title: 'Add CRM Section',
+      title: t(locale, 'crm_stage_modal_title'),
       fields: [
-        { key: 'name', label: 'Name', placeholder: 'e.g. Site Visit Scheduled' },
-        { key: 'description', label: 'Description (optional)' },
-        { key: 'icon', label: 'Icon (optional, free text)' },
-        { key: 'color', label: 'Color (optional, e.g. #22c55e)' },
-        { key: 'order', label: 'Pipeline position (lower sorts first)', type: 'number' },
-        { key: 'isWon', label: 'Terminal — Won', type: 'select', options: [{ value: '', label: 'No' }, { value: 'yes', label: 'Yes' }] },
-        { key: 'isLost', label: 'Terminal — Lost', type: 'select', options: [{ value: '', label: 'No' }, { value: 'yes', label: 'Yes' }] },
-        { key: 'allowAutomationMove', label: 'Automations may move leads into this stage', type: 'select', options: [{ value: 'yes', label: 'Yes' }, { value: '', label: 'No' }], value: 'yes' },
+        { key: 'name', label: t(locale, 'crm_col_name'), placeholder: t(locale, 'crm_stage_name_placeholder') },
+        { key: 'description', label: t(locale, 'crm_stage_description_field') },
+        { key: 'icon', label: t(locale, 'crm_stage_icon_field') },
+        { key: 'color', label: t(locale, 'crm_stage_color_field') },
+        { key: 'order', label: t(locale, 'crm_stage_order_field'), type: 'number' },
+        { key: 'isWon', label: t(locale, 'crm_stage_terminal_won_field'), type: 'select', options: [{ value: '', label: t(locale, 'crm_no') }, { value: 'yes', label: t(locale, 'crm_yes') }] },
+        { key: 'isLost', label: t(locale, 'crm_stage_terminal_lost_field'), type: 'select', options: [{ value: '', label: t(locale, 'crm_no') }, { value: 'yes', label: t(locale, 'crm_yes') }] },
+        { key: 'allowAutomationMove', label: t(locale, 'crm_stage_allow_automation_field'), type: 'select', options: [{ value: 'yes', label: t(locale, 'crm_yes') }, { value: '', label: t(locale, 'crm_no') }], value: 'yes' },
       ],
-      submitLabel: 'Add section',
+      submitLabel: t(locale, 'crm_stage_submit'),
     });
     if (!result || !result.name.trim()) return;
     try {
@@ -919,7 +1060,7 @@ export async function renderCrm(container) {
         isLost: result.isLost === 'yes',
         allowAutomationMove: result.allowAutomationMove === 'yes',
       });
-      toast('CRM section added — it now appears as a pipeline card, no code changes needed.', 'success');
+      toast(t(locale, 'crm_stage_added_toast'), 'success');
       await refreshAll();
     } catch (err) {
       reportError(err);

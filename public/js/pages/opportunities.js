@@ -18,17 +18,17 @@ export async function renderOpportunities(container) {
   container.appendChild(errorSlot);
 
   const leadSelect = selectInput([], { id: 'opp-lead-select' });
-  const createBtn = el('button', { class: 'primary' }, 'Create offer');
+  const createBtn = el('button', { class: 'primary' }, t(locale, 'opportunities_create_offer_btn'));
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!leadSelect.value) {
-      errorSlot.appendChild(errorBanner('No qualified lead selected — qualify a lead in Leads first.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'opportunities_err_no_qualified_lead')));
       return;
     }
     createBtn.disabled = true;
     try {
       await api.post('/api/sales/opportunities', { leadId: leadSelect.value });
-      toast('Offer created.', 'success');
+      toast(t(locale, 'opportunities_toast_offer_created'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -37,8 +37,8 @@ export async function renderOpportunities(container) {
     }
   });
   const createCard = el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Create an offer from a qualified lead'),
-    el('div', { class: 'form-row' }, [el('div', {}, [el('label', {}, 'Lead'), leadSelect])]),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'opportunities_create_heading')),
+    el('div', { class: 'form-row' }, [el('div', {}, [el('label', {}, t(locale, 'opportunities_lead_field')), leadSelect])]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]);
   container.appendChild(createCard);
@@ -51,24 +51,24 @@ export async function renderOpportunities(container) {
       const unitsPage = await api.get('/api/inventory/units', { limit: 100 });
       const available = unitsPage.items.filter((u) => u.status === 'available');
       if (available.length === 0) {
-        errorSlot.appendChild(errorBanner('No available units to reserve. Add one in Inventory first.'));
+        errorSlot.appendChild(errorBanner(t(locale, 'opportunities_err_no_available_units')));
         return;
       }
       const result = await formModal({
-        title: 'Reserve a unit',
+        title: t(locale, 'opportunities_reserve_unit_title'),
         fields: [{
           key: 'unitId',
-          label: 'Unit',
+          label: t(locale, 'sales_col_unit'),
           type: 'select',
           options: available.map((u) => ({ value: u.id, label: `${u.code} — ${Number(u.listPrice).toLocaleString()}` })),
         }],
-        submitLabel: 'Reserve',
+        submitLabel: t(locale, 'opportunities_reserve_btn'),
       });
       if (!result || !result.unitId) return;
       const unit = available.find((u) => u.id === result.unitId);
       const reservation = await api.post(`/api/sales/opportunities/${opportunity.id}/reserve-unit`, { unitId: unit.id });
       sessionReservations.set(opportunity.id, { reservationId: reservation.id, unitPrice: unit.listPrice });
-      toast('Unit reserved.', 'success');
+      toast(t(locale, 'opportunities_toast_unit_reserved'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -78,28 +78,28 @@ export async function renderOpportunities(container) {
   async function signContract(opportunity) {
     const cached = sessionReservations.get(opportunity.id);
     if (!cached) {
-      errorSlot.appendChild(errorBanner('Reservation not found in this browser session — reserve a unit for this offer again first (the reservation isn’t otherwise addressable from the offer alone).'));
+      errorSlot.appendChild(errorBanner(t(locale, 'opportunities_err_reservation_not_found')));
       return;
     }
     try {
       const templatesPage = await api.get('/api/payment-plan-templates', { limit: 100 });
       if (templatesPage.items.length === 0) {
-        errorSlot.appendChild(errorBanner('No payment plan templates exist yet. Create one in Payment Plans first.'));
+        errorSlot.appendChild(errorBanner(t(locale, 'opportunities_err_no_templates')));
         return;
       }
       const result = await formModal({
-        title: 'Sign contract',
+        title: t(locale, 'opportunities_sign_contract_btn'),
         fields: [
           {
             key: 'templateId',
-            label: 'Payment plan template',
+            label: t(locale, 'sales_payment_plan_template_field'),
             type: 'select',
-            options: templatesPage.items.map((t) => ({ value: t.id, label: t.name })),
+            options: templatesPage.items.map((tpl) => ({ value: tpl.id, label: tpl.name })),
           },
-          { key: 'totalPrice', label: 'Total contract price', type: 'number', value: String(cached.unitPrice) },
-          { key: 'discountPercent', label: 'Discount (%, optional)', type: 'number' },
+          { key: 'totalPrice', label: t(locale, 'opportunities_total_contract_price_field'), type: 'number', value: String(cached.unitPrice) },
+          { key: 'discountPercent', label: t(locale, 'sales_discount_percent_optional_field'), type: 'number' },
         ],
-        submitLabel: 'Sign contract',
+        submitLabel: t(locale, 'opportunities_sign_contract_btn'),
       });
       if (!result || !result.templateId || !result.totalPrice) return;
       const response = await api.post('/api/sales/contracts', {
@@ -112,9 +112,9 @@ export async function renderOpportunities(container) {
       // pending ActionApproval (HTTP 202) instead of a signed Contract
       // (HTTP 201) — only the latter has no actionType.
       if (response.actionType) {
-        toast('Discount exceeds the no-approval threshold — sent for approval instead of signing.', 'success');
+        toast(t(locale, 'opportunities_toast_discount_exceeds'), 'success');
       } else {
-        toast(`Contract signed (${response.id.slice(0, 8)}…).`, 'success');
+        toast(`${t(locale, 'opportunities_toast_contract_signed_prefix')} (${response.id.slice(0, 8)}…).`, 'success');
       }
       await load();
     } catch (err) {
@@ -141,23 +141,23 @@ export async function renderOpportunities(container) {
       clear(leadSelect);
       qualified.forEach((l) => leadSelect.appendChild(el('option', { value: l.id }, l.fullName)));
       if (qualified.length === 0) {
-        leadSelect.appendChild(el('option', { value: '' }, 'No qualified leads yet'));
+        leadSelect.appendChild(el('option', { value: '' }, t(locale, 'opportunities_no_qualified_leads_option')));
       }
 
       clear(listSlot);
       listSlot.appendChild(table(
         [
-          { label: 'Lead', render: (o) => leadsPage.items.find((l) => l.id === o.leadId)?.fullName ?? o.leadId },
-          { label: 'Stage', render: (o) => statusBadge(o.stage) },
+          { label: t(locale, 'opportunities_lead_field'), render: (o) => leadsPage.items.find((l) => l.id === o.leadId)?.fullName ?? o.leadId },
+          { label: t(locale, 'opportunities_col_stage'), render: (o) => statusBadge(o.stage) },
           { label: '', render: (o) => {
             const actions = el('div', { style: 'display:flex;gap:6px' });
             if (o.stage === 'open') {
-              const btn = el('button', {}, 'Reserve unit');
+              const btn = el('button', {}, t(locale, 'opportunities_reserve_unit_btn'));
               btn.addEventListener('click', () => reserveUnit(o));
               actions.appendChild(btn);
             }
             if (o.stage === 'reserved') {
-              const btn = el('button', { class: 'primary' }, 'Sign contract');
+              const btn = el('button', { class: 'primary' }, t(locale, 'opportunities_sign_contract_btn'));
               btn.addEventListener('click', () => signContract(o));
               actions.appendChild(btn);
             }
@@ -165,7 +165,7 @@ export async function renderOpportunities(container) {
           } },
         ],
         oppsPage.items,
-        { empty: 'No offers yet.' },
+        { empty: t(locale, 'opportunities_empty') },
       ));
       listSlot.appendChild(paginationControls(oppsPage, (next) => { offset = next; load(); }));
     } catch (err) {
