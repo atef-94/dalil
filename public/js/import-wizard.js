@@ -1,5 +1,7 @@
 import { el, clear, field, selectInput, contentModal, toast, errorBanner, statusBadge, table } from './ui.js';
 import { api } from './api.js';
+import { getLocale } from './state.js';
+import { t } from './i18n.js';
 
 /**
  * A generic upload -> map -> preview -> confirm -> summary wizard, shared
@@ -27,6 +29,7 @@ import { api } from './api.js';
  * instead of building its own wizard, per this file's whole point.
  */
 export function openImportWizard({ title, uploadPath, onImported, uploadOptions = [], mappingOptions = [] }) {
+  const locale = getLocale();
   const basePath = uploadPath.replace(/\/upload$/, '');
   const body = el('div', { class: 'import-wizard' });
   const modal = contentModal(title, body, { wide: true });
@@ -68,7 +71,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
   function renderUploadStep() {
     clear(body);
     const fileInput = el('input', { type: 'file', accept: '.csv,.xlsx,.xls,.pdf' });
-    const uploadBtn = el('button', { class: 'primary' }, 'Upload & continue');
+    const uploadBtn = el('button', { class: 'primary' }, t(locale, 'import_upload_btn'));
     const errSlot = el('div');
     const optionControls = uploadOptions.map((opt) => optionCheckbox(opt, uploadOptionValues));
 
@@ -76,7 +79,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
       clear(errSlot);
       const file = fileInput.files && fileInput.files[0];
       if (!file) {
-        errSlot.appendChild(errorBanner('Choose a file first.'));
+        errSlot.appendChild(errorBanner(t(locale, 'import_choose_file_error')));
         return;
       }
       uploadBtn.disabled = true;
@@ -115,24 +118,24 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     });
 
     body.appendChild(el('div', {}, [
-      el('p', { class: 'page-subtitle' }, 'Upload a .csv, .xlsx/.xls, or .pdf file. When every required column is recognized automatically, you\'ll go straight to a preview — otherwise you\'ll be asked to confirm the column mapping first. Either way, nothing is imported until you confirm.'),
-      field('File', fileInput),
+      el('p', { class: 'page-subtitle' }, t(locale, 'import_upload_hint')),
+      field(t(locale, 'import_file_field'), fileInput),
       ...optionControls,
       errSlot,
       el('div', { class: 'form-actions' }, [uploadBtn]),
     ]));
   }
 
-  const SHEET_KIND_LABELS = {
-    catalog: 'This looks like a Project Catalog file (market/product ranges, no unit codes).',
-    availability: 'This looks like a Live Availability file (real, individually-coded units).',
-    summary: 'This looks like a summary/fact-sheet, not a row-by-row data table — importing it is unlikely to produce useful results.',
+  const SHEET_KIND_LABEL_KEYS = {
+    catalog: 'import_sheet_kind_catalog',
+    availability: 'import_sheet_kind_availability',
+    summary: 'import_sheet_kind_summary',
     unknown: null,
   };
 
   function sheetKindNote() {
-    const label = session && session.detectedSheetKind ? SHEET_KIND_LABELS[session.detectedSheetKind] : null;
-    return label ? el('p', { class: 'page-subtitle', style: 'font-style:italic' }, label) : null;
+    const key = session && session.detectedSheetKind ? SHEET_KIND_LABEL_KEYS[session.detectedSheetKind] : null;
+    return key ? el('p', { class: 'page-subtitle', style: 'font-style:italic' }, t(locale, key)) : null;
   }
 
   function sampleValuesFor(column) {
@@ -142,7 +145,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
 
   function renderMappingStep() {
     clear(body);
-    const fieldOptions = [{ value: '', label: '— Do not import —' }, ...session.fields.map((f) => ({ value: f.key, label: f.label + (f.required ? ' (required)' : '') }))];
+    const fieldOptions = [{ value: '', label: t(locale, 'import_do_not_import_option') }, ...session.fields.map((f) => ({ value: f.key, label: f.label + (f.required ? t(locale, 'import_required_suffix') : '') }))];
 
     const mappingRows = session.detectedColumns.map((column) => {
       const select = selectInput(fieldOptions, {});
@@ -155,7 +158,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
           el('label', {}, `"${column}"`),
           el('div', { style: 'font-size:12px;color:var(--text-muted)' }, sampleValuesFor(column)),
         ]),
-        el('div', {}, [el('label', {}, 'Maps to'), select]),
+        el('div', {}, [el('label', {}, t(locale, 'import_maps_to_field')), select]),
       ]);
     });
 
@@ -169,8 +172,8 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
       return optionCheckbox(opt, mappingOptionValues);
     });
 
-    const backBtn = el('button', {}, 'Back');
-    const nextBtn = el('button', { class: 'primary' }, 'Preview import');
+    const backBtn = el('button', {}, t(locale, 'import_back_btn'));
+    const nextBtn = el('button', { class: 'primary' }, t(locale, 'import_preview_import_btn'));
     const errSlot = el('div');
 
     backBtn.addEventListener('click', renderUploadStep);
@@ -188,7 +191,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     });
 
     body.appendChild(el('div', {}, [
-      el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}". Confirm or correct which column maps to which field — unmapped columns are ignored.`),
+      el('p', { class: 'page-subtitle' }, `${session.totalRows}${t(locale, 'import_rows_detected_middle')}${session.fileName}${t(locale, 'import_mapping_confirm_suffix')}`),
       sheetKindNote(),
       ...mappingRows,
       ...optionControls,
@@ -203,8 +206,8 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     const validRows = rows.filter((r) => r.status === 'valid');
     const problemRows = rows.filter((r) => r.status !== 'valid');
 
-    const backBtn = el('button', {}, wasAutoMapped ? 'Edit column mapping' : 'Back to mapping');
-    const confirmBtn = el('button', { class: 'primary' }, `Import ${validRows.length} row(s)`);
+    const backBtn = el('button', {}, wasAutoMapped ? t(locale, 'import_edit_mapping_btn') : t(locale, 'import_back_to_mapping_btn'));
+    const confirmBtn = el('button', { class: 'primary' }, `${t(locale, 'import_import_rows_prefix')}${validRows.length}${t(locale, 'import_import_rows_suffix')}`);
     confirmBtn.disabled = validRows.length === 0;
     const errSlot = el('div');
 
@@ -226,22 +229,22 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
 
     body.appendChild(el('div', {}, [
       wasAutoMapped
-        ? el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}". Every required column was recognized automatically — review the results below, or edit the column mapping if something looks wrong.`)
-        : el('p', { class: 'page-subtitle' }, `${session.totalRows} row(s) detected in "${session.fileName}".`),
+        ? el('p', { class: 'page-subtitle' }, `${session.totalRows}${t(locale, 'import_rows_detected_middle')}${session.fileName}${t(locale, 'import_preview_automapped_suffix')}`)
+        : el('p', { class: 'page-subtitle' }, `${session.totalRows}${t(locale, 'import_rows_detected_middle')}${session.fileName}${t(locale, 'import_preview_plain_suffix')}`),
       sheetKindNote(),
       el('div', { class: 'stat-grid' }, [
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(preview.totalRows)), el('div', { class: 'label' }, 'Total rows')]),
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(validRows.length)), el('div', { class: 'label' }, 'Ready to import')]),
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(problemRows.length)), el('div', { class: 'label' }, 'Will be skipped')]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(preview.totalRows)), el('div', { class: 'label' }, t(locale, 'import_stat_total_rows'))]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(validRows.length)), el('div', { class: 'label' }, t(locale, 'import_stat_ready'))]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(problemRows.length)), el('div', { class: 'label' }, t(locale, 'import_stat_will_skip'))]),
       ]),
       table(
         [
-          { label: 'Row', render: (r) => String(r.row) },
-          { label: 'Status', render: (r) => statusBadge(r.status) },
-          { label: 'Details', render: (r) => (r.issues && r.issues.length > 0 ? r.issues.join('; ') : '—') },
+          { label: t(locale, 'import_col_row'), render: (r) => String(r.row) },
+          { label: t(locale, 'units_col_status'), render: (r) => statusBadge(r.status) },
+          { label: t(locale, 'import_col_details'), render: (r) => (r.issues && r.issues.length > 0 ? r.issues.join('; ') : '—') },
         ],
         rows,
-        { empty: 'No rows found.' },
+        { empty: t(locale, 'import_no_rows_empty') },
       ),
       errSlot,
       el('div', { class: 'form-actions' }, [backBtn, confirmBtn]),
@@ -250,23 +253,23 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
 
   function renderSummaryStep(result) {
     clear(body);
-    toast(`Import complete: ${result.succeeded} imported, ${result.skipped} skipped, ${result.failed} failed.`, result.failed > 0 ? 'error' : 'success');
-    const doneBtn = el('button', { class: 'primary' }, 'Done');
+    toast(`${t(locale, 'import_toast_complete_prefix')}${result.succeeded}${t(locale, 'import_toast_imported_mid')}${result.skipped}${t(locale, 'import_toast_skipped_mid')}${result.failed}${t(locale, 'import_toast_failed_suffix')}`, result.failed > 0 ? 'error' : 'success');
+    const doneBtn = el('button', { class: 'primary' }, t(locale, 'import_done_btn'));
     doneBtn.addEventListener('click', () => modal.close());
     body.appendChild(el('div', {}, [
       el('div', { class: 'stat-grid' }, [
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(result.succeeded)), el('div', { class: 'label' }, 'Imported')]),
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(result.skipped)), el('div', { class: 'label' }, 'Skipped')]),
-        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(result.failed)), el('div', { class: 'label' }, 'Failed')]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(result.succeeded)), el('div', { class: 'label' }, t(locale, 'import_stat_imported'))]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(result.skipped)), el('div', { class: 'label' }, t(locale, 'import_stat_skipped_label'))]),
+        el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(result.failed)), el('div', { class: 'label' }, t(locale, 'import_stat_failed'))]),
       ]),
       table(
         [
-          { label: 'Row', render: (r) => String(r.row) },
-          { label: 'Status', render: (r) => statusBadge(r.status) },
-          { label: 'Detail', render: (r) => r.reason || r.leadId || r.paymentId || r.unitId || r.specId || '—' },
+          { label: t(locale, 'import_col_row'), render: (r) => String(r.row) },
+          { label: t(locale, 'units_col_status'), render: (r) => statusBadge(r.status) },
+          { label: t(locale, 'import_col_detail'), render: (r) => r.reason || r.leadId || r.paymentId || r.unitId || r.specId || '—' },
         ],
         result.results || [],
-        { empty: 'Nothing to show.' },
+        { empty: t(locale, 'import_nothing_to_show_empty') },
       ),
       el('div', { class: 'form-actions' }, [doneBtn]),
     ]));

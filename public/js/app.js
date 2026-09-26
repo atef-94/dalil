@@ -149,7 +149,7 @@ async function showApp() {
   const topbarTitle = el('div', { id: 'topbar-title' }, '');
 
   const backdrop = el('div', { id: 'sidebar-backdrop' });
-  const sidebarToggle = el('button', { id: 'sidebar-toggle', class: 'icon-btn ghost', 'aria-label': 'Toggle navigation' }, icon('menu'));
+  const sidebarToggle = el('button', { id: 'sidebar-toggle', class: 'icon-btn ghost', 'aria-label': t(locale, 'app_toggle_navigation') }, icon('menu'));
   const sidebarEl = el('aside', { id: 'sidebar' }, [
     el('div', { class: 'brand' }, [el('div', { class: 'mark' }, 'A'), t(locale, 'appName')]),
     el('div', { class: 'company-name' }, session.me?.employee?.title ? `${session.me.email} · ${session.me.employee.title}` : session.me?.email || ''),
@@ -225,7 +225,7 @@ async function showApp() {
       if (err.status === 403) {
         content.appendChild(deniedState(err.message));
       } else {
-        content.appendChild(errorBanner(err.message || 'Something went wrong loading this page.'));
+        content.appendChild(errorBanner(err.message || t(locale, 'app_page_load_error')));
       }
     }
   }

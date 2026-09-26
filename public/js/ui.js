@@ -347,7 +347,7 @@ export function confirmModal(message, { confirmLabel = tt('common_confirm'), can
     const body = el('div', {}, [
       el('p', { style: 'margin:0 0 18px' }, message),
     ]);
-    const { close } = openModalShell('Please confirm', body);
+    const { close } = openModalShell(tt('common_please_confirm'), body);
     const cancelBtn = el('button', {}, cancelLabel);
     const confirmBtn = el('button', { class: danger ? 'danger' : 'primary' }, confirmLabel);
     cancelBtn.addEventListener('click', () => { close(); resolve(false); });

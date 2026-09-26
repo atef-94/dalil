@@ -255,12 +255,12 @@ async function renderCatalogTab(root, locale) {
       const tableEl = el('table', {}, [
         el('thead', {}, el('tr', {}, [el('th', {}, ''), ...details.map((d) => el('th', {}, d.project.name))])),
         el('tbody', {}, [
-          rowFor('Developer', (d) => d.developer?.name || '—'),
-          rowFor('Destination', (d) => d.project.destination || '—'),
-          rowFor('Price', (d) => (d.project.priceFrom || d.project.priceTo) ? `${formatNumber(locale, d.project.priceFrom)} – ${formatNumber(locale, d.project.priceTo)}` : '—'),
-          rowFor('BUA (sqm)', (d) => (d.project.buaFromSqm || d.project.buaToSqm) ? `${d.project.buaFromSqm ?? '—'} – ${d.project.buaToSqm ?? '—'}` : '—'),
-          rowFor('Finishing', (d) => d.project.finishingType || '—'),
-          rowFor('Cash discount', (d) => (d.project.cashDiscountPercent !== undefined ? `${d.project.cashDiscountPercent}%` : '—')),
+          rowFor(t(locale, 'units_col_developer'), (d) => d.developer?.name || '—'),
+          rowFor(t(locale, 'units_col_destination'), (d) => d.project.destination || '—'),
+          rowFor(t(locale, 'units_col_price'), (d) => (d.project.priceFrom || d.project.priceTo) ? `${formatNumber(locale, d.project.priceFrom)} – ${formatNumber(locale, d.project.priceTo)}` : '—'),
+          rowFor(t(locale, 'units_col_bua'), (d) => (d.project.buaFromSqm || d.project.buaToSqm) ? `${d.project.buaFromSqm ?? '—'} – ${d.project.buaToSqm ?? '—'}` : '—'),
+          rowFor(t(locale, 'units_col_finishing'), (d) => d.project.finishingType || '—'),
+          rowFor(t(locale, 'catalog_compare_cash_discount'), (d) => (d.project.cashDiscountPercent !== undefined ? `${d.project.cashDiscountPercent}%` : '—')),
         ]),
       ]);
       body.appendChild(el('div', { class: 'table-wrap' }, tableEl));
@@ -380,9 +380,9 @@ async function renderCatalogTab(root, locale) {
           } else {
             footerPanel.appendChild(table(
               [
-                { label: 'Type', key: 'unitType' },
-                { label: 'Beds', render: (s) => (s.bedrooms !== undefined && s.bedrooms !== null ? String(s.bedrooms) : '—') },
-                { label: 'Price', render: (s) => ((s.priceFrom || s.priceTo) ? `${formatNumber(locale, s.priceFrom)} – ${formatNumber(locale, s.priceTo)}` : '—') },
+                { label: t(locale, 'units_col_type'), key: 'unitType' },
+                { label: t(locale, 'units_col_beds'), render: (s) => (s.bedrooms !== undefined && s.bedrooms !== null ? String(s.bedrooms) : '—') },
+                { label: t(locale, 'units_col_price'), render: (s) => ((s.priceFrom || s.priceTo) ? `${formatNumber(locale, s.priceFrom)} – ${formatNumber(locale, s.priceTo)}` : '—') },
               ],
               specs.slice(0, 5),
             ));
@@ -654,33 +654,33 @@ async function renderManageTab(container, locale) {
         uploadPath: '/api/inventory/units/import/upload',
         onImported: () => { load(); loadImportHistory(); },
         uploadOptions: [
-          { key: 'fillDownBlankCells', label: 'My file has merged cells — repeat the value above into blank cells (e.g. a Project/Developer name shown once above a block of unit rows)', default: false },
-          { key: 'sheetNameAsProject', label: 'Each sheet (tab) in this file is a different project — use the sheet name as the Project (e.g. a sheet named "Stayn" → Project "Stayn")', default: false },
+          { key: 'fillDownBlankCells', label: t(locale, 'units_import_opt_fill_down'), default: false },
+          { key: 'sheetNameAsProject', label: t(locale, 'units_import_opt_sheet_as_project'), default: false },
         ],
         mappingOptions: [
           {
             key: 'mode',
             type: 'select',
-            label: 'What does this file contain?',
+            label: t(locale, 'units_import_opt_mode_label'),
             options: [
-              { value: 'availability', label: 'Live Availability — real, individually-coded units (Code / Floor / Price / Status)' },
-              { value: 'catalog', label: 'Project Catalog — a market/product range, no unit codes (Developer / Project / Phase / BUA From-To / Price From-To)' },
+              { value: 'availability', label: t(locale, 'units_import_opt_mode_availability') },
+              { value: 'catalog', label: t(locale, 'units_import_opt_mode_catalog') },
             ],
             default: 'availability',
           },
           {
             key: 'rangeStrategy',
             type: 'select',
-            label: "If a row has a range (e.g. Price From/To or BUA From/To) instead of one value, use:",
+            label: t(locale, 'units_import_opt_range_strategy_label'),
             options: [
-              { value: 'avg', label: 'Average of From & To' },
-              { value: 'from', label: 'The "From" value' },
-              { value: 'to', label: 'The "To" value' },
+              { value: 'avg', label: t(locale, 'units_import_opt_range_avg') },
+              { value: 'from', label: t(locale, 'units_import_opt_range_from') },
+              { value: 'to', label: t(locale, 'units_import_opt_range_to') },
             ],
             default: 'avg',
           },
-          { key: 'autoGenerateUnitCode', type: 'checkbox', label: "Auto-generate a unit code for rows that don't have one", default: true },
-          { key: 'autoCreateMissingProjects', type: 'checkbox', label: "Automatically create any project named in the file that doesn't exist yet", default: true },
+          { key: 'autoGenerateUnitCode', type: 'checkbox', label: t(locale, 'units_import_opt_auto_gen_code'), default: true },
+          { key: 'autoCreateMissingProjects', type: 'checkbox', label: t(locale, 'units_import_opt_auto_create_projects'), default: true },
         ],
       });
     });
