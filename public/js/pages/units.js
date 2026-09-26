@@ -533,7 +533,7 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
     // Facilities
     const addFacilityBtn = el('button', {}, t(locale, 'units_project_add_facility_btn'));
     addFacilityBtn.addEventListener('click', async () => {
-      const values = await formModal({ title: t(locale, 'units_project_add_facility_title'), fields: [{ key: 'name', label: t(locale, 'units_project_facility_name_field'), placeholder: 'e.g. Clubhouse' }] });
+      const values = await formModal({ title: t(locale, 'units_project_add_facility_title'), fields: [{ key: 'name', label: t(locale, 'units_project_facility_name_field'), placeholder: t(locale, 'units_project_facility_name_placeholder') }] });
       if (!values?.name?.trim()) return;
       try {
         const f = await api.post('/api/inventory/facilities', { name: values.name.trim() });
@@ -552,7 +552,7 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
     // Phases
     const addPhaseBtn = el('button', {}, t(locale, 'units_project_add_phase_btn'));
     addPhaseBtn.addEventListener('click', async () => {
-      const values = await formModal({ title: t(locale, 'units_project_add_phase_title'), fields: [{ key: 'name', label: t(locale, 'units_project_phase_name_field'), placeholder: 'e.g. Phase 1' }] });
+      const values = await formModal({ title: t(locale, 'units_project_add_phase_title'), fields: [{ key: 'name', label: t(locale, 'units_project_phase_name_field'), placeholder: t(locale, 'units_project_phase_name_placeholder') }] });
       if (!values?.name?.trim()) return;
       try {
         await api.post(`/api/inventory/projects/${project.id}/phases`, { name: values.name.trim(), order: phases.length });
@@ -573,7 +573,7 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
       const values = await formModal({
         title: t(locale, 'units_project_add_launch_title'),
         fields: [
-          { key: 'name', label: t(locale, 'units_project_launch_name_field'), placeholder: 'e.g. New Release' },
+          { key: 'name', label: t(locale, 'units_project_launch_name_field'), placeholder: t(locale, 'units_project_launch_name_placeholder') },
           { key: 'launchDate', label: t(locale, 'units_project_launch_date_field'), type: 'date' },
           { key: 'notes', label: t(locale, 'units_project_notes_field'), type: 'textarea' },
         ],
@@ -614,7 +614,7 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
     // Sales phone numbers
     const addPhoneBtn = el('button', {}, t(locale, 'units_project_add_phone_btn'));
     addPhoneBtn.addEventListener('click', async () => {
-      const values = await formModal({ title: t(locale, 'units_project_add_phone_title'), fields: [{ key: 'phoneNumber', label: t(locale, 'units_project_phone_field'), placeholder: 'e.g. +20 100 000 0000' }] });
+      const values = await formModal({ title: t(locale, 'units_project_add_phone_title'), fields: [{ key: 'phoneNumber', label: t(locale, 'units_project_phone_field'), placeholder: t(locale, 'units_project_phone_placeholder') }] });
       if (!values?.phoneNumber?.trim()) return;
       try {
         await api.post(`/api/inventory/projects/${project.id}/sales-phone-numbers`, { phoneNumber: values.phoneNumber.trim() });
@@ -691,7 +691,7 @@ async function renderManageTab(container, locale) {
 
   // ---- Developers ----
   const developersListSlot = el('div');
-  const newDeveloperNameInput = el('input', { type: 'text', placeholder: 'e.g. Emaar' });
+  const newDeveloperNameInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_developer_name_placeholder') });
   const addDeveloperBtn = el('button', {}, t(locale, 'units_manage_add_developer_btn'));
   addDeveloperBtn.addEventListener('click', async () => {
     if (!newDeveloperNameInput.value.trim()) return;
@@ -756,9 +756,9 @@ async function renderManageTab(container, locale) {
   }
 
   // ---- Projects ----
-  const newProjectNameInput = el('input', { type: 'text', placeholder: 'e.g. Marina Towers' });
-  const newProjectLocationInput = el('input', { type: 'text', placeholder: 'e.g. North Coast (optional)' });
-  const newProjectDestinationInput = el('input', { type: 'text', placeholder: 'e.g. New Cairo' });
+  const newProjectNameInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_project_name_placeholder') });
+  const newProjectLocationInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_location_placeholder') });
+  const newProjectDestinationInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_destination_placeholder') });
   const newProjectDeveloperSelect = selectInput([{ value: '', label: t(locale, 'units_manage_none_option') }]);
   const addProjectBtn = el('button', {}, t(locale, 'units_manage_add_project_btn'));
   addProjectBtn.addEventListener('click', async () => {
@@ -840,17 +840,17 @@ async function renderManageTab(container, locale) {
 
   // ---- Add a unit ----
   const projectSelect = selectInput([]);
-  const codeInput = el('input', { type: 'text', placeholder: 'A-101' });
-  const typeInput = el('input', { type: 'text', placeholder: 'apartment' });
-  const areaInput = el('input', { type: 'number', placeholder: '120' });
-  const priceInput = el('input', { type: 'number', placeholder: '1500000' });
-  const bedroomsInput = el('input', { type: 'number', min: '0', placeholder: '3' });
-  const floorInput = el('input', { type: 'text', placeholder: 'Ground / 1 / 2…' });
-  const designTypeInput = el('input', { type: 'text', placeholder: 'e.g. Corner' });
-  const viewInput = el('input', { type: 'text', placeholder: 'e.g. Garden, Pool' });
-  const buildingInput = el('input', { type: 'text', placeholder: 'e.g. B3' });
-  const gardenAreaInput = el('input', { type: 'number', min: '0', placeholder: 'optional' });
-  const finishingInput = el('input', { type: 'text', placeholder: 'e.g. Fully Finished' });
+  const codeInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_unit_code_placeholder') });
+  const typeInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_type_placeholder') });
+  const areaInput = el('input', { type: 'number', placeholder: t(locale, 'units_manage_area_placeholder') });
+  const priceInput = el('input', { type: 'number', placeholder: t(locale, 'units_manage_list_price_placeholder') });
+  const bedroomsInput = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_bedrooms_placeholder') });
+  const floorInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_floor_placeholder') });
+  const designTypeInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_design_type_placeholder') });
+  const viewInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_view_placeholder') });
+  const buildingInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_building_placeholder') });
+  const gardenAreaInput = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_garden_area_placeholder') });
+  const finishingInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_finishing_placeholder') });
   const createBtn = el('button', { class: 'primary' }, t(locale, 'units_manage_add_unit_btn'));
 
   createBtn.addEventListener('click', async () => {
