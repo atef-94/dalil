@@ -90,7 +90,7 @@ import { runImport, SkipRow } from './infra/csv-import.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
-import { seedDemoData } from './infra/seed.js';
+import { seedDemoData, lockDemoData } from './infra/seed.js';
 import { EventBus, type DomainEvent } from './infra/event-bus.js';
 
 import { RbacEvaluator } from './modules/permissions/rbac.evaluator.js';
@@ -581,6 +581,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
       crmStages: repos.crmStages,
       leads: repos.leads,
     });
+  } else {
+    // Demo seeding was just turned off on a deployment that may already
+    // have a persisted demo login from before — lock it out rather than
+    // leaving the old, publicly-documented password live. See lockDemoData.
+    await lockDemoData({ users: repos.users });
   }
 
   const globalRateLimiter = new SlidingWindowRateLimiter(options.rateLimitWindowMs ?? 60_000, options.rateLimitMax ?? 300);
