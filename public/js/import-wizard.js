@@ -138,6 +138,20 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     return key ? el('p', { class: 'page-subtitle', style: 'font-style:italic' }, t(locale, key)) : null;
   }
 
+  /** Surfaces formula-error cells (e.g. "#REF!") the backend found while
+   * parsing an .xlsx file — these cells were read as blank rather than as
+   * real data, so a row with one can silently import with a missing field
+   * unless the user is told exactly which row/column had the problem. */
+  function formulaErrorsNote() {
+    const errors = session && session.formulaErrors;
+    if (!errors || errors.length === 0) return null;
+    return el('div', { class: 'error-banner', style: 'flex-direction:column;align-items:stretch;gap:6px' }, [
+      el('strong', {}, `${errors.length}${t(locale, 'import_formula_errors_heading_suffix')}`),
+      el('ul', { style: 'margin:0;padding-inline-start:20px;max-height:140px;overflow-y:auto;font-size:12.5px' },
+        errors.map((e) => el('li', {}, e))),
+    ]);
+  }
+
   function sampleValuesFor(column) {
     const values = (session.sampleRows || []).map((r) => r[column]).filter((v) => v);
     return values.length > 0 ? values.slice(0, 2).join(', ') : '(blank)';
@@ -193,6 +207,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     body.appendChild(el('div', {}, [
       el('p', { class: 'page-subtitle' }, `${session.totalRows}${t(locale, 'import_rows_detected_middle')}${session.fileName}${t(locale, 'import_mapping_confirm_suffix')}`),
       sheetKindNote(),
+      formulaErrorsNote(),
       ...mappingRows,
       ...optionControls,
       errSlot,
@@ -232,6 +247,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
         ? el('p', { class: 'page-subtitle' }, `${session.totalRows}${t(locale, 'import_rows_detected_middle')}${session.fileName}${t(locale, 'import_preview_automapped_suffix')}`)
         : el('p', { class: 'page-subtitle' }, `${session.totalRows}${t(locale, 'import_rows_detected_middle')}${session.fileName}${t(locale, 'import_preview_plain_suffix')}`),
       sheetKindNote(),
+      formulaErrorsNote(),
       el('div', { class: 'stat-grid' }, [
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(preview.totalRows)), el('div', { class: 'label' }, t(locale, 'import_stat_total_rows'))]),
         el('div', { class: 'stat-card' }, [el('div', { class: 'value' }, String(validRows.length)), el('div', { class: 'label' }, t(locale, 'import_stat_ready'))]),

@@ -99,6 +99,7 @@ export class ImportSessionService {
     let headers: string[];
     let rows: Record<string, string>[];
     let reliable = true;
+    let formulaErrors: string[] = [];
 
     if (fileType === 'csv') {
       rows = parseCsvRecords(input.fileBuffer.toString('utf8'));
@@ -126,6 +127,9 @@ export class ImportSessionService {
       const headerSet = new Set<string>([projectColumn]);
       rows = [];
       for (const sheet of sheets) {
+        if (sheet.formulaErrors.length > 0) {
+          formulaErrors.push(...sheet.formulaErrors.map((e) => `sheet "${sheet.sheetName}", ${e}`));
+        }
         const sheetMapping = suggestMapping(sheet.headers, input.fields);
         const renameHeader = new Map<string, string>();
         for (const header of sheet.headers) {
@@ -153,6 +157,7 @@ export class ImportSessionService {
       const parsed = await parseXlsx(input.fileBuffer, input.fields);
       headers = parsed.headers;
       rows = parsed.rows;
+      formulaErrors = parsed.formulaErrors;
     } else {
       const parsed = await parsePdfTable(input.fileBuffer);
       headers = parsed.headers;
@@ -194,6 +199,7 @@ export class ImportSessionService {
       suggestedMapping: suggestMapping(headers, input.fields),
       rawRows: rows,
       reliable,
+      formulaErrors: formulaErrors.length > 0 ? formulaErrors : undefined,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + SESSION_TTL_MS).toISOString(),
     };

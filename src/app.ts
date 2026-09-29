@@ -1773,6 +1773,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           totalRows: session.rawRows.length,
           fields: INVENTORY_IMPORT_FIELDS,
           detectedSheetKind,
+          formulaErrors: session.formulaErrors,
         },
       };
     },
@@ -2288,6 +2289,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: LEAD_IMPORT_FIELDS,
+          formulaErrors: session.formulaErrors,
         },
       };
     },
@@ -3049,6 +3051,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: PAYMENT_IMPORT_FIELDS,
+          formulaErrors: session.formulaErrors,
         },
       };
     },

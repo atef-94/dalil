@@ -230,6 +230,85 @@ test('createSession with sheetNameAsColumn merges every sheet, injecting the she
   assert.equal(session.rawRows[1]!['Unit Type'], 'Duplex');
 });
 
+// ---- Section 5 fix: formula-error cells detected by the xlsx parser must
+// survive into the ImportSession, not be silently discarded ----
+
+test('createSession surfaces formulaErrors from a single-sheet .xlsx onto the session', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet('Units');
+  sheet.addRow(['Unit Type', 'Area (sqm) — From']);
+  const row = sheet.addRow(['Apartment', null]);
+  row.getCell(2).value = { formula: 'A1/0', result: { error: '#DIV/0!' } } as unknown as ExcelJS.CellValue;
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'units.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+  });
+
+  assert.ok(session.formulaErrors, 'expected formulaErrors to be populated');
+  assert.equal(session.formulaErrors!.length, 1);
+  assert.match(session.formulaErrors![0]!, /#DIV\/0!/);
+  // The broken cell itself still reads as blank, never fabricated data.
+  assert.equal(session.rawRows[0]!['Area (sqm) — From'], '');
+});
+
+test('createSession leaves formulaErrors undefined for a clean .xlsx (no error cells)', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet('Units');
+  sheet.addRow(['Unit Type', 'Area (sqm) — From']);
+  sheet.addRow(['Apartment', '150']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'units.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+  });
+
+  assert.equal(session.formulaErrors, undefined);
+});
+
+test('createSession with sheetNameAsColumn collects formulaErrors across sheets, each prefixed with its sheet name', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type', 'Area (sqm) — From']);
+  const staynRow = stayn.addRow(['Apartment', null]);
+  staynRow.getCell(2).value = { formula: 'X', result: { error: '#REF!' } } as unknown as ExcelJS.CellValue;
+
+  const connect4 = wb.addWorksheet('Connect4');
+  connect4.addRow(['Unit Type', 'Area (sqm) — From']);
+  connect4.addRow(['Duplex', '220']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.ok(session.formulaErrors, 'expected formulaErrors to be populated');
+  assert.equal(session.formulaErrors!.length, 1);
+  assert.match(session.formulaErrors![0]!, /sheet "Stayn".*#REF!/);
+});
+
 test('createSession with sheetNameAsColumn leaves a row alone when it already has a real value in that column', async () => {
   const svc = service();
   const wb = new ExcelJS.Workbook();

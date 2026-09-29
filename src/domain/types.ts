@@ -1259,6 +1259,14 @@ export interface ImportSession {
    * unchanged at confirm time so the two steps never resolve a row
    * differently. */
   importOptions?: Record<string, unknown>;
+  /** Formula-error cells (e.g. "#REF!", "#DIV/0!") found while parsing an
+   * .xlsx/.xls file — each entry names the row, column, and error text.
+   * These cells are always read as blank in rawRows (never treated as real
+   * data), but reported here rather than silently discarded, so the
+   * frontend can flag the affected rows to the user before they import
+   * data next to a broken formula without knowing it. Always undefined for
+   * CSV/PDF imports, which have no formula concept. */
+  formulaErrors?: string[];
   createdAt: string;
   expiresAt: string;
 }
