@@ -243,16 +243,24 @@ export interface PaymentPlanTemplate {
    * on `create:quotation` instead, since the ad-hoc template is never
    * independently reusable or listed. */
   adHoc?: boolean;
-  /** Interest/payment-free period before the first installment is due —
-   * distinct from termMonths (the installment schedule's own length). */
+  /** DEAD FIELD, audited and confirmed unreachable (Section 7): neither
+   * CreateTemplateInput nor UpdateTemplateInput (Partial<CreateTemplateInput>)
+   * expose this, no route accepts it, and schedule-generator.ts never reads
+   * it — a template can never actually carry a value here despite the
+   * optional type allowing one. Was presumably real before the payment-plan
+   * redesign (see the 'PPR' commits) rewrote schedule-generator.ts around
+   * the current two payment methods; the grace-period concept was dropped
+   * there without removing this field. Left in place (not deleted) pending
+   * a product decision on whether to properly wire a real grace-period rule
+   * into schedule-generator.ts or remove this field outright. */
   gracePeriodMonths?: number;
-  /** % of total price due at handover, on top of the regular installment
-   * schedule — schedule-generator.ts adds this as its own schedule line
-   * when set. */
+  /** DEAD FIELD — see gracePeriodMonths's comment; same audit finding, same
+   * unreachable status (not in CreateTemplateInput/UpdateTemplateInput, not
+   * read by schedule-generator.ts despite this field's name suggesting a
+   * handover-time schedule line). */
   deliveryPaymentPercent?: number;
-  /** How many months of installments continue after delivery (a "payment
-   * after delivery" plan) — 0/undefined means the plan fully settles
-   * before or at delivery. */
+  /** DEAD FIELD — see gracePeriodMonths's comment; same audit finding, same
+   * unreachable status. */
   paymentAfterDeliveryMonths?: number;
   /** The cash-discount percentage that applied when this template version
    * was created — a snapshot, not a live value: updateTemplate() bumps

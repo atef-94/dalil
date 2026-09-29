@@ -288,3 +288,51 @@ test('a template with no paymentMethod set behaves exactly like equal_installmen
   const b = generateSchedule({ template: equalTemplate, totalPrice: 500_000 });
   assert.deepEqual(a.lines.map((l) => l.amount), b.lines.map((l) => l.amount));
 });
+
+// ---- Section 7 audit: large installment counts, rounding, and an
+// escalationPercentPerYear <= -100 bug that produced negative installment
+// amounts on a real (>=13 month) plan while still reporting isValid: true ----
+
+test('escalationPercentPerYear of exactly -100 is rejected (would zero/negate later installments)', () => {
+  const template = baseTemplate({ termMonths: 24 });
+  assert.throws(() => generateSchedule({ template, totalPrice: 120_000, escalationPercentPerYear: -100 }), /escalationPercentPerYear/);
+});
+
+test('escalationPercentPerYear below -100 is rejected (previously produced negative installment amounts that still summed to the right total)', () => {
+  const template = baseTemplate({ termMonths: 24 });
+  assert.throws(() => generateSchedule({ template, totalPrice: 120_000, escalationPercentPerYear: -150 }), /escalationPercentPerYear/);
+});
+
+test('escalationPercentPerYear between -100 and 0 (a legitimate shrinking-installments plan) is accepted and every installment stays positive', () => {
+  const template = baseTemplate({ termMonths: 24 });
+  const { lines, validation } = generateSchedule({ template, totalPrice: 120_000, escalationPercentPerYear: -50 });
+  const installments = lines.filter((l) => l.kind === 'installment');
+  assert.ok(installments.every((l) => l.amount > 0), 'every installment must stay positive');
+  assert.equal(validation.isValid, true);
+});
+
+test('a large plan (60 monthly installments) reconciles exactly with no negative or zero installment lines', () => {
+  const template = baseTemplate({ downPaymentType: 'percentage', downPaymentValue: 5, frequency: 'monthly', termMonths: 60 });
+  const { lines, validation } = generateSchedule({ template, totalPrice: 3_333_333.37, escalationPercentPerYear: 5 });
+  const installments = lines.filter((l) => l.kind === 'installment');
+  assert.equal(installments.length, 60);
+  assert.ok(installments.every((l) => l.amount > 0), 'every installment must be positive');
+  assert.equal(validation.isValid, true);
+  assert.equal(validation.remainingBalance, 0);
+  assert.equal(validation.overpayment, 0);
+  // The residual from 60-way division must land in the final installment,
+  // not silently drift away — assert the raw sum reconciles to the cent.
+  const downPayment = lines.find((l) => l.kind === 'down_payment')!.amount;
+  const sum = Math.round((downPayment + installments.reduce((s, l) => s + l.amount, 0)) * 100) / 100;
+  assert.equal(sum, validation.totalPayable);
+});
+
+test('a maximum-length plan (240 monthly installments) still reconciles exactly (rounding does not drift over many lines)', () => {
+  const template = baseTemplate({ downPaymentType: 'percentage', downPaymentValue: 0, frequency: 'monthly', termMonths: 240 });
+  const { lines, validation } = generateSchedule({ template, totalPrice: 10_000_000.01 });
+  const installments = lines.filter((l) => l.kind === 'installment');
+  assert.equal(installments.length, 240);
+  assert.equal(validation.isValid, true);
+  const sum = Math.round(installments.reduce((s, l) => s + l.amount, 0) * 100) / 100;
+  assert.equal(sum, 10_000_000.01);
+});

@@ -142,6 +142,17 @@ export function generateSchedule(input: GenerateScheduleInput): GenerateSchedule
     throw new ValidationError('discountPercent must be between 0 and 100 (exclusive)');
   }
   const escalationPercentPerYear = input.escalationPercentPerYear ?? 0;
+  // Each elapsed year's weight is (1 + escalationPercentPerYear/100)^years —
+  // at exactly -100 that base is 0 (every installment past year 1 becomes
+  // 0), and below -100 it goes negative, which an odd elapsed-years count
+  // then keeps negative: a real, reproducible bug where a long-enough plan
+  // (>=13 months) silently produced negative installment amounts that still
+  // summed to the right total and passed validation as "isValid: true".
+  // A shrinking-installments plan is legitimate business-wise (escalation
+  // between -100 and 0), so only the mathematically-broken range is rejected.
+  if (escalationPercentPerYear <= -100) {
+    throw new ValidationError('escalationPercentPerYear must be greater than -100');
+  }
   const startDate = input.startDate ?? new Date();
   const method = effectivePaymentMethod(template);
 
