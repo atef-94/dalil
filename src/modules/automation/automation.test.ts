@@ -106,7 +106,7 @@ async function freshHarness(retryBaseDelayMs = 0, maxConcurrentRuns = 10, compan
   const salesPhones = new InMemoryRepository<SalesPhoneNumber>();
   const inventory = new InventoryService(units, holds, reservations, projects, developers, phases, launches, facilities, consultants, salesPhones);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
-  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, new InMemoryRepository<Project>(), paymentPlans);
   const leadScoring = new LeadScoringService(leads, crmStages);
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);

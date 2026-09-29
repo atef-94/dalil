@@ -1,12 +1,28 @@
-import type { PaymentFrequency, PaymentPlanTemplate, PaymentScheduleLineStatus } from '../../domain/types.js';
+import type {
+  PaymentFrequency, PaymentPlanTemplate, PaymentPlanScheduledPayment,
+  PaymentScheduleLineStatus, PaymentScheduleLineKind,
+} from '../../domain/types.js';
 import { ValidationError } from '../../infra/errors.js';
 
 export interface GeneratedLine {
   sequence: number;
   label: string;
+  kind: PaymentScheduleLineKind;
   dueDate: string; // ISO date
   amount: number;
   status: PaymentScheduleLineStatus;
+}
+
+export interface ScheduleValidation {
+  totalPayable: number;
+  remainingBalance: number;
+  isValid: boolean;
+  overpayment: number;
+}
+
+export interface GenerateScheduleResult {
+  lines: GeneratedLine[];
+  validation: ScheduleValidation;
 }
 
 export interface GenerateScheduleInput {
@@ -23,6 +39,14 @@ const FREQUENCY_MONTHS: Record<Exclude<PaymentFrequency, 'custom'>, number> = {
   semiannual: 6,
   annual: 12,
 };
+
+// undefined always means 'equal_installments' — see PaymentPlanTemplate.paymentMethod's
+// own comment: every template constructed before this field existed (and every
+// existing call-site across the codebase that builds one without it) keeps behaving
+// exactly as before, with zero migration required.
+function effectivePaymentMethod(template: PaymentPlanTemplate): 'equal_installments' | 'installments_plus_scheduled' {
+  return template.paymentMethod ?? 'equal_installments';
+}
 
 function intervalMonths(template: PaymentPlanTemplate): number {
   if (template.frequency === 'custom') {
@@ -76,9 +100,37 @@ export function validateTemplate(template: PaymentPlanTemplate): void {
     if (fee.amount < 0) throw new ValidationError('fee amounts must be non-negative');
     if (fee.dueMonthOffset < 0) throw new ValidationError('fee dueMonthOffset must be non-negative');
   }
+  if (effectivePaymentMethod(template) === 'installments_plus_scheduled') {
+    if (template.recurringInstallmentAmount !== undefined && template.recurringInstallmentAmount < 0) {
+      throw new ValidationError('recurringInstallmentAmount must be non-negative');
+    }
+    for (const sp of template.scheduledPayments ?? []) {
+      validateScheduledPayment(sp);
+    }
+  }
 }
 
-export function generateSchedule(input: GenerateScheduleInput): GeneratedLine[] {
+function validateScheduledPayment(sp: PaymentPlanScheduledPayment): void {
+  if (sp.amount < 0) throw new ValidationError('scheduled payment amount must be non-negative');
+  if (!sp.dueDate || Number.isNaN(new Date(sp.dueDate).getTime())) {
+    throw new ValidationError('scheduled payment dueDate must be a valid date');
+  }
+}
+
+const CENT_TOLERANCE = 0.01;
+
+function reconcile(effectivePrice: number, totalPayable: number): ScheduleValidation {
+  const diff = Math.round((effectivePrice - totalPayable) * 100) / 100;
+  if (diff > CENT_TOLERANCE) {
+    return { totalPayable, remainingBalance: diff, isValid: false, overpayment: 0 };
+  }
+  if (diff < -CENT_TOLERANCE) {
+    return { totalPayable, remainingBalance: 0, isValid: false, overpayment: Math.round(-diff * 100) / 100 };
+  }
+  return { totalPayable, remainingBalance: 0, isValid: true, overpayment: 0 };
+}
+
+export function generateSchedule(input: GenerateScheduleInput): GenerateScheduleResult {
   const { template } = input;
   validateTemplate(template);
 
@@ -91,6 +143,7 @@ export function generateSchedule(input: GenerateScheduleInput): GeneratedLine[] 
   }
   const escalationPercentPerYear = input.escalationPercentPerYear ?? 0;
   const startDate = input.startDate ?? new Date();
+  const method = effectivePaymentMethod(template);
 
   const effectivePrice = Math.round(input.totalPrice * (1 - discountPercent / 100) * 100) / 100;
   const downPaymentAmount =
@@ -106,20 +159,43 @@ export function generateSchedule(input: GenerateScheduleInput): GeneratedLine[] 
   const numberOfInstallments = Math.max(1, Math.floor(template.termMonths / months));
 
   const lines: GeneratedLine[] = [];
-  let sequence = 0;
 
   lines.push({
-    sequence: sequence++,
+    sequence: 0,
     label: 'Down Payment',
+    kind: 'down_payment',
     dueDate: startDate.toISOString(),
     amount: downPaymentAmount,
     status: 'upcoming',
   });
 
-  if (remaining > 0) {
+  let installmentsTotal = 0;
+  if (method === 'installments_plus_scheduled' && template.recurringInstallmentAmount !== undefined) {
+    // A manually fixed recurring amount (e.g. "50,000/quarter") — no
+    // escalation, no forced sum-to-`remaining`: the gap (if any) is exactly
+    // what scheduledPayments below is meant to cover, and validation
+    // surfaces it rather than silently absorbing it into the last line the
+    // way the auto-calculated path does.
+    const fixedAmount = Math.round(template.recurringInstallmentAmount * 100) / 100;
+    for (let i = 0; i < numberOfInstallments; i++) {
+      const dueDate = addMonths(startDate, (i + 1) * months);
+      lines.push({
+        sequence: 0,
+        label: `Installment ${i + 1}`,
+        kind: 'installment',
+        dueDate: dueDate.toISOString(),
+        amount: fixedAmount,
+        status: 'upcoming',
+      });
+      installmentsTotal += fixedAmount;
+    }
+  } else if (remaining > 0) {
     // Weight each installment by (1 + escalation)^(elapsed years), then
     // normalize so the raw weighted amounts still sum to `remaining` exactly
-    // before cent-rounding takes over.
+    // before cent-rounding takes over. Used both for 'equal_installments'
+    // and for 'installments_plus_scheduled' when no manual override amount
+    // was given (the recurring installment then falls back to this same
+    // auto-calculated equal share).
     const weights = Array.from({ length: numberOfInstallments }, (_, i) => {
       const elapsedYears = Math.floor((i * months) / 12);
       return Math.pow(1 + escalationPercentPerYear / 100, elapsedYears);
@@ -131,24 +207,56 @@ export function generateSchedule(input: GenerateScheduleInput): GeneratedLine[] 
     for (let i = 0; i < numberOfInstallments; i++) {
       const dueDate = addMonths(startDate, (i + 1) * months);
       lines.push({
-        sequence: sequence++,
+        sequence: 0,
         label: `Installment ${i + 1}`,
+        kind: 'installment',
         dueDate: dueDate.toISOString(),
         amount: amounts[i]!,
         status: 'upcoming',
       });
+      installmentsTotal += amounts[i]!;
+    }
+  }
+
+  let scheduledPaymentsTotal = 0;
+  if (method === 'installments_plus_scheduled') {
+    for (const sp of template.scheduledPayments ?? []) {
+      const amount = Math.round(sp.amount * 100) / 100;
+      lines.push({
+        sequence: 0,
+        label: sp.label?.trim() || 'Scheduled Payment',
+        kind: 'scheduled_payment',
+        dueDate: new Date(sp.dueDate).toISOString(),
+        amount,
+        status: 'upcoming',
+      });
+      scheduledPaymentsTotal += amount;
     }
   }
 
   for (const fee of template.fees) {
     lines.push({
-      sequence: sequence++,
+      sequence: 0,
       label: fee.label,
+      kind: 'fee',
       dueDate: addMonths(startDate, fee.dueMonthOffset).toISOString(),
       amount: fee.amount,
       status: 'upcoming',
     });
   }
 
-  return lines;
+  // Scheduled payments carry independent, user-picked exact dates (section
+  // 11 of the spec this was built for: never tied to the installment
+  // cadence), so the only way to produce one coherent, chronologically
+  // ordered schedule (section 12) across down payment / installments /
+  // scheduled payments / fees is to sort by date after building every line,
+  // then reassign sequence numbers — insertion order alone isn't reliable
+  // once scheduled payments can fall before, between, or after installments.
+  lines.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  lines.forEach((line, i) => { line.sequence = i; });
+
+  const totalPayable = Math.round((downPaymentAmount + installmentsTotal + scheduledPaymentsTotal) * 100) / 100;
+  const validation = reconcile(effectivePrice, totalPayable);
+
+  return { lines, validation };
 }

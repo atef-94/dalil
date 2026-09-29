@@ -176,6 +176,33 @@ export interface PaymentPlanFeeLine {
   dueMonthOffset: number;
 }
 
+/** A user-picked, one-off payment with its own exact due date — independent
+ * of the recurring-installment cadence entirely (a scheduled payment can
+ * fall between two installments, before the first one, or share a date with
+ * another scheduled payment; schedule-generator.ts sorts the final unified
+ * schedule chronologically rather than relying on insertion order). Only
+ * used when `PaymentPlanTemplate.paymentMethod === 'installments_plus_scheduled'`. */
+export interface PaymentPlanScheduledPayment {
+  id: string;
+  amount: number;
+  dueDate: string;
+  label?: string;
+}
+
+/** Two ways of distributing the same payable amount inside the same
+ * Payment Plan entity — deliberately not two separate template "types":
+ * 'equal_installments' is today's original behavior (recurring installments
+ * sized to exactly sum the remaining amount, optionally escalation-
+ * weighted); 'installments_plus_scheduled' keeps a recurring installment
+ * (either the same auto-calculated amount, or a manually fixed
+ * `recurringInstallmentAmount`) and lets the user add arbitrary one-off
+ * `scheduledPayments` with independent exact dates on top.
+ * Named `PaymentPlanMethod` (not `PaymentMethod`) to avoid colliding with
+ * the existing `PaymentMethod` type in the Finance section below (cash/
+ * transfer/card/cheque — how a real Payment was actually settled, an
+ * unrelated concept). */
+export type PaymentPlanMethod = 'equal_installments' | 'installments_plus_scheduled';
+
 export interface PaymentPlanTemplate {
   id: string;
   companyId: string;
@@ -188,6 +215,34 @@ export interface PaymentPlanTemplate {
   customMonthInterval?: number;
   termMonths: number;
   fees: PaymentPlanFeeLine[];
+  /** Optional so every existing PaymentPlanTemplate (and every existing
+   * object literal across the codebase's services/tests that constructs
+   * one) keeps compiling and behaving unchanged: undefined is always
+   * treated as 'equal_installments' at read time (schedule-generator.ts,
+   * payment-plans.service.ts) — the same default a real migration would
+   * backfill, applied at the point of use instead of requiring a write to
+   * every persisted row. */
+  paymentMethod?: PaymentPlanMethod;
+  /** Only meaningful when paymentMethod === 'installments_plus_scheduled'.
+   * When set, every recurring installment uses this exact amount instead of
+   * the auto-calculated equal share (the spec's example: a normal
+   * auto-calculated installment might be 100,000/quarter, but the user
+   * wants 50,000/quarter with the rest paid via scheduledPayments). When
+   * unset in this mode, the recurring installment falls back to the same
+   * auto-calculated amount 'equal_installments' would use. */
+  recurringInstallmentAmount?: number;
+  /** Only meaningful when paymentMethod === 'installments_plus_scheduled'. */
+  scheduledPayments?: PaymentPlanScheduledPayment[];
+  /** True for a template created inline from a single Quotation's own
+   * one-off payment terms (QuotationService.generate() with `inlineTerms`)
+   * rather than authored as a reusable company/project template. Still the
+   * same PaymentPlanTemplate entity — never a parallel type — just excluded
+   * from the reusable-template picker/list so ad-hoc, single-use terms
+   * don't clutter it. A sales user creating a Quotation with inline terms
+   * never needs `create:payment_plan_template` RBAC for this: it's gated
+   * on `create:quotation` instead, since the ad-hoc template is never
+   * independently reusable or listed. */
+  adHoc?: boolean;
   /** Interest/payment-free period before the first installment is due —
    * distinct from termMonths (the installment schedule's own length). */
   gracePeriodMonths?: number;
@@ -212,6 +267,15 @@ export interface PaymentPlanTemplate {
 
 export type PaymentScheduleLineStatus = 'upcoming' | 'due' | 'overdue' | 'paid';
 
+/** What kind of line this is, for the unified schedule table's "Payment
+ * Type" column — distinct from `label`, which is free display text.
+ * Optional/undefined on lines generated before this field existed (older
+ * persisted PaymentScheduleLine rows and old Quotation.scheduleSnapshot
+ * entries): renderers fall back to inferring from `label` in that case,
+ * exactly as they did before this field existed, so nothing already
+ * generated needs a migration. */
+export type PaymentScheduleLineKind = 'down_payment' | 'installment' | 'scheduled_payment' | 'fee';
+
 export interface PaymentScheduleLine {
   id: string;
   companyId: string;
@@ -220,6 +284,7 @@ export interface PaymentScheduleLine {
   sourceTemplateVersion: number;
   sequence: number;
   label: string;
+  kind?: PaymentScheduleLineKind;
   dueDate: string;
   amount: number;
   amountPaid: number;
@@ -236,6 +301,38 @@ export interface PaymentScheduleLine {
 
 export type QuotationStatus = 'draft' | 'generated' | 'sent' | 'accepted' | 'expired' | 'cancelled';
 
+/** A deep, point-in-time copy of the unit's financial/physical attributes
+ * at the moment a Quotation was generated — closes a gap the original
+ * "deep snapshot" design left open: `scheduleSnapshot` already freezes the
+ * payment numbers, but the unit's own attributes (area, finishing, view,
+ * price/meter, maintenance, parking) were always re-read live from the
+ * `Unit` row, so a re-downloaded PDF for an old quotation could silently
+ * show today's unit data instead of what existed at generation time. Also
+ * the only representation used when the quotation has no real `unitId` at
+ * all (a manually-entered unit, never in Inventory — section 2B of the
+ * spec this was built for): in that case this snapshot IS the unit, there
+ * is nothing else to fall back to. */
+export interface QuotationUnitSnapshot {
+  code: string;
+  unitType: string;
+  areaSqm: number;
+  buildingLabel?: string;
+  floorLabel?: string;
+  bedrooms?: number;
+  view?: string[];
+  gardenAreaSqm?: number;
+  finishingType?: string;
+  /** listPrice/areaSqm at snapshot time, or the manually-entered total
+   * unit price divided by area — never recomputed later. */
+  pricePerMeter: number;
+  totalUnitPrice: number;
+  maintenanceFeePercent?: number;
+  maintenanceFeeAmount?: number;
+  parkingIncluded?: boolean;
+  parkingSpaces?: number;
+  parkingPrice?: number;
+}
+
 export interface Quotation {
   id: string;
   companyId: string;
@@ -246,9 +343,22 @@ export interface Quotation {
    * quotation for the same unit/client is always a new version, never an
    * overwrite of a prior one. */
   version: number;
-  unitId: string;
-  projectId: string;
+  /** Absent when this quotation was built from a manually-entered unit
+   * (section 2B: "Payment Plan not connected to an existing Inventory
+   * Unit") rather than a real Inventory `Unit` — `unitSnapshot` is then the
+   * only source of unit data, and always present in that case. */
+  unitId?: string;
+  /** Optional for the same reason as unitId: a manually-entered unit may
+   * still be associated with a known Project (the user picks one) or may
+   * have none at all — never fabricated. */
+  projectId?: string;
   leadId?: string;
+  /** A deep, point-in-time copy of the unit's attributes — see
+   * QuotationUnitSnapshot's own comment. Always populated for a quotation
+   * generated after this field existed; absent on older persisted
+   * quotations (renderers fall back to a live Unit fetch in that case,
+   * same as before this field existed). */
+  unitSnapshot?: QuotationUnitSnapshot;
   paymentPlanTemplateId: string;
   /** The template's own `version` at the moment this quotation/offer was
    * generated — captured alongside scheduleSnapshot below purely for
@@ -274,10 +384,23 @@ export interface Quotation {
   scheduleSnapshot: Array<{
     sequence: number;
     label: string;
+    kind?: PaymentScheduleLineKind;
     dueDate: string;
     amount: number;
     status: PaymentScheduleLineStatus;
   }>;
+  /** The financial reconciliation computed alongside scheduleSnapshot at
+   * generate() time (see schedule-generator.ts's `validateSchedule`) —
+   * frozen the same way scheduleSnapshot is, never recomputed on read.
+   * Absent on quotations generated before this field existed; equal-
+   * installments plans always reconcile exactly by construction, so this
+   * is primarily meaningful for installments_plus_scheduled plans. */
+  validation?: {
+    totalPayable: number;
+    remainingBalance: number;
+    isValid: boolean;
+    overpayment: number;
+  };
   createdByUserId: string;
   createdAt: string;
   updatedAt: string;
@@ -500,6 +623,22 @@ export interface Unit {
   finishingType?: string;
   /** Overrides Project.delivery when this specific unit differs. */
   delivery?: DeliveryInfo;
+  /** Overrides Project.maintenanceFeePercent when this specific unit
+   * differs — same override convention as finishingType/delivery above.
+   * Maintenance itself stays company/project-level policy by default;
+   * this only exists for the (real, business-legitimate) case where one
+   * unit's maintenance differs from its project's norm. */
+  maintenanceFeePercentOverride?: number;
+  /** Parking was not previously modeled anywhere in the domain (not on
+   * Project, Unit, or ProjectUnitSpec) — added here at the Unit level,
+   * matching the granularity every other per-unit charge (price,
+   * maintenance) already carries. `parkingIncluded` distinguishes "this
+   * unit's price already covers parking" from "not included" so a Payment
+   * Plan can correctly decide whether `parkingPrice` is an additional
+   * charge on top of listPrice or purely informational. */
+  parkingIncluded?: boolean;
+  parkingSpaces?: number;
+  parkingPrice?: number;
   /** An explicit, developer-supplied price-per-meter — otherwise this is
    * computed on read as listPrice/areaSqm, never stored (and so never
    * goes stale relative to listPrice/areaSqm edits). */

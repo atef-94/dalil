@@ -50,13 +50,17 @@ async function fetchImageBuffer(url: string | undefined): Promise<Buffer | undef
 
 /** Resolves every image URL an Offer PDF might use into real bytes,
  * tolerating any individual failure. Kept separate from buildOfferPdf so
- * the PDF-layout logic itself never depends on network access. */
-export async function fetchOfferImages(unit: Unit, project: Project): Promise<OfferPdfImages> {
-  const projectImageUrls = (project.imageUrls ?? []).slice(0, 4);
+ * the PDF-layout logic itself never depends on network access. `unit`/
+ * `project` are optional — a manually-entered unit (spec section 2B) has
+ * neither a real Unit row nor necessarily a linked Project, so there is
+ * simply nothing to fetch; the PDF renders those sections as unavailable
+ * rather than fabricating them (see buildOfferPdf). */
+export async function fetchOfferImages(unit: Unit | undefined, project: Project | undefined): Promise<OfferPdfImages> {
+  const projectImageUrls = (project?.imageUrls ?? []).slice(0, 4);
   const [projectImages, masterPlanImage, floorPlanImage] = await Promise.all([
     Promise.all(projectImageUrls.map(fetchImageBuffer)).then((imgs) => imgs.filter((b): b is Buffer => !!b)),
-    fetchImageBuffer(project.masterPlanImageUrl),
-    fetchImageBuffer(unit.floorPlanImageUrl),
+    fetchImageBuffer(project?.masterPlanImageUrl),
+    fetchImageBuffer(unit?.floorPlanImageUrl),
   ]);
   return { projectImages, masterPlanImage, floorPlanImage };
 }
@@ -123,7 +127,19 @@ function drawFittedImage(doc: PDFKit.PDFDocument, buf: Buffer, x: number, drawY:
  * that couldn't be resolved (see fetchOfferImages) is simply skipped —
  * never a reason to fail generating the document.
  */
-export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalculation, unit: Unit, project: Project, images: OfferPdfImages = {}): Promise<Buffer> {
+const PAYMENT_TYPE_LABELS: Record<string, string> = {
+  down_payment: 'Down Payment',
+  installment: 'Installment',
+  scheduled_payment: 'Scheduled Payment',
+  fee: 'Fee',
+};
+
+function paymentTypeLabel(kind: string | undefined, label: string): string {
+  if (kind && PAYMENT_TYPE_LABELS[kind]) return PAYMENT_TYPE_LABELS[kind]!;
+  return label; // pre-existing rows without `kind` — same text they always rendered
+}
+
+export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalculation, unit: Unit | undefined, project: Project | undefined, images: OfferPdfImages = {}): Promise<Buffer> {
   const doc = new PDFDocument({ size: 'A4', margin: PAGE_MARGIN, bufferPages: true });
   const chunks: Buffer[] = [];
   doc.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -132,9 +148,11 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
     doc.on('error', reject);
   });
 
+  const snap = calc.unitSnapshot;
+
   // ---- Page 1: Cover ----
-  doc.fontSize(24).fillColor('#111').text(project.name, { align: 'left' });
-  if (project.destination) doc.fontSize(12).fillColor('#666').text(project.destination);
+  doc.fontSize(24).fillColor('#111').text(project?.name ?? snap.code, { align: 'left' });
+  if (project?.destination) doc.fontSize(12).fillColor('#666').text(project.destination);
   doc.moveDown(1);
   const contentWidth = doc.page.width - PAGE_MARGIN * 2;
   let coverY = doc.y;
@@ -148,36 +166,56 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
   doc.fontSize(10).fillColor('#999').text(`Offer Reference: ${quotation.referenceNumber} (v${quotation.version})`, PAGE_MARGIN, doc.page.height - PAGE_MARGIN - 20);
 
   // ---- Page 2: Unit info ----
+  // Sourced from unitSnapshot (the frozen, point-in-time copy — see
+  // QuotationUnitSnapshot's own comment), never re-read live from `unit`,
+  // so this page renders the unit exactly as it was when the offer was
+  // generated even if the real Unit/Project have since changed. `unit`/
+  // `project` are only used above (images) and below (master plan
+  // highlight) for data that isn't itself part of the frozen snapshot.
   doc.addPage();
   drawHeading(doc, 'Unit Information');
-  const deliveryLabel = unit.delivery ? formatDelivery(unit.delivery) : formatDelivery(project.delivery);
+  const deliveryLabel = unit ? (unit.delivery ? formatDelivery(unit.delivery) : formatDelivery(project?.delivery)) : '—';
+  const parkingLabel = snap.parkingIncluded === undefined
+    ? '—'
+    : snap.parkingIncluded
+      ? `Included${snap.parkingSpaces ? ` (${snap.parkingSpaces})` : ''}`
+      : `Not included${snap.parkingPrice ? ` (+${snap.parkingPrice.toLocaleString()})` : ''}`;
   drawKeyValueGrid(doc, [
-    ['Unit Code', unit.code],
-    ['Unit Type', unit.unitType],
-    ['Area (sqm)', String(unit.areaSqm)],
-    ['Building', unit.buildingLabel ?? '—'],
-    ['Floor', unit.floorLabel ?? '—'],
-    ['View', (unit.view ?? []).join(', ') || '—'],
-    ['Garden Area (sqm)', unit.gardenAreaSqm != null ? String(unit.gardenAreaSqm) : '—'],
-    ['Finishing', unit.finishingType ?? project.finishingType ?? '—'],
+    ['Unit Code', snap.code],
+    ['Unit Type', snap.unitType],
+    ['Area (sqm)', String(snap.areaSqm)],
+    ['Building', snap.buildingLabel ?? '—'],
+    ['Floor', snap.floorLabel ?? '—'],
+    ['Bedrooms', snap.bedrooms != null ? String(snap.bedrooms) : '—'],
+    ['View', (snap.view ?? []).join(', ') || '—'],
+    ['Garden Area (sqm)', snap.gardenAreaSqm != null ? String(snap.gardenAreaSqm) : '—'],
+    ['Finishing', snap.finishingType ?? '—'],
     ['Delivery', deliveryLabel],
-    ['Price / Meter', String(unit.pricePerMeterOverride ?? Math.round(unit.listPrice / unit.areaSqm))],
+    ['Price / Meter', snap.pricePerMeter.toLocaleString()],
+    ['Maintenance Fee', snap.maintenanceFeePercent != null ? `${snap.maintenanceFeePercent}% (${(snap.maintenanceFeeAmount ?? 0).toLocaleString()})` : '—'],
+    ['Parking', parkingLabel],
   ]);
 
   // ---- Page 3: Payment plan ----
   doc.addPage();
   drawHeading(doc, 'Payment Plan');
+  const v = calc.validation;
   drawKeyValueGrid(doc, [
     ['Total Price', calc.totalPrice.toLocaleString()],
     ['Discount %', `${calc.discountPercent}%`],
     ['Net Value', calc.netValue.toLocaleString()],
     ['Down Payment', calc.downPayment.toLocaleString()],
+    ['Total Payable', v.totalPayable.toLocaleString()],
+    v.overpayment > 0
+      ? ['Overpayment', v.overpayment.toLocaleString()]
+      : ['Remaining Balance', v.remainingBalance.toLocaleString()],
   ]);
   doc.moveDown(0.5);
   const tableTop = doc.y;
-  const colX = { seq: PAGE_MARGIN, label: PAGE_MARGIN + 30, date: PAGE_MARGIN + 240, amount: PAGE_MARGIN + 380 };
+  const colX = { seq: PAGE_MARGIN, type: PAGE_MARGIN + 24, label: PAGE_MARGIN + 130, date: PAGE_MARGIN + 300, amount: PAGE_MARGIN + 420 };
   doc.fontSize(9).fillColor('#666');
   doc.text('#', colX.seq, tableTop);
+  doc.text('Type', colX.type, tableTop);
   doc.text('Label', colX.label, tableTop);
   doc.text('Due Date', colX.date, tableTop);
   doc.text('Amount', colX.amount, tableTop);
@@ -194,6 +232,7 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
     }
     doc.fontSize(10).fillColor('#111');
     doc.text(String(index + 1), colX.seq, rowY);
+    doc.text(paymentTypeLabel(line.kind, line.label), colX.type, rowY, { width: colX.label - colX.type - 10 });
     doc.text(line.label, colX.label, rowY, { width: colX.date - colX.label - 10 });
     doc.text(new Date(line.dueDate).toLocaleDateString(), colX.date, rowY);
     doc.text(line.amount.toLocaleString(), colX.amount, rowY);
@@ -201,11 +240,15 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
   });
 
   // ---- Page 4: Master plan with unit highlighted ----
+  // Only rendered when both a master-plan image and a real Unit's
+  // masterPlanPosition exist — a manually-entered unit has neither, so
+  // this section is simply absent rather than showing a misleading or
+  // fabricated location (spec section 29.9: never fabricate).
   if (images.masterPlanImage) {
     doc.addPage();
     drawHeading(doc, 'Master Plan');
     const box = drawFittedImage(doc, images.masterPlanImage, PAGE_MARGIN, doc.y, contentWidth, doc.page.height - doc.y - PAGE_MARGIN);
-    const pos = unit.masterPlanPosition;
+    const pos = unit?.masterPlanPosition;
     if (pos) {
       const rectX = box.x + (pos.x / 100) * box.width;
       const rectY = box.y + (pos.y / 100) * box.height;
@@ -220,7 +263,7 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
   // ---- Page 5: Unit floor plan ----
   if (images.floorPlanImage) {
     doc.addPage();
-    drawHeading(doc, `Unit ${unit.code} — Floor Plan`);
+    drawHeading(doc, `Unit ${snap.code} — Floor Plan`);
     drawFittedImage(doc, images.floorPlanImage, PAGE_MARGIN, doc.y, contentWidth, doc.page.height - doc.y - PAGE_MARGIN);
   }
 

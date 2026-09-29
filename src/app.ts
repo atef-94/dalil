@@ -145,7 +145,7 @@ import {
 } from './modules/inventory/inventory-import.service.js';
 import { classifySheet } from './infra/field-mapping.js';
 import { DocumentIntelligenceService } from './modules/documents/document-intelligence.service.js';
-import { QuotationService } from './modules/quotations/quotation.service.js';
+import { QuotationService, type ManualUnitInput, type InlineTermsInput } from './modules/quotations/quotation.service.js';
 import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
 import { buildOfferPdf, fetchOfferImages } from './modules/quotations/offer-pdf.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
@@ -440,7 +440,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const inventoryImport = new InventoryImportService(inventory);
   const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
-  const quotations = new QuotationService(repos.quotations, repos.units, paymentPlans);
+  const quotations = new QuotationService(repos.quotations, repos.units, repos.projects, paymentPlans);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
@@ -1263,8 +1263,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // Reuses PaymentPlansService.previewSchedule under the hood (see
   // quotation.service.ts) — never a second calculation engine.
   interface QuotationRequestBody {
-    unitId: string;
-    paymentPlanTemplateId: string;
+    unitId?: string;
+    manualUnit?: ManualUnitInput;
+    manualProjectId?: string;
+    paymentPlanTemplateId?: string;
+    inlineTerms?: InlineTermsInput;
     discountPercent?: number;
     escalationPercentPerYear?: number;
     totalPriceOverride?: number;
@@ -1365,7 +1368,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const html = buildQuotationPrintHtml(quotation, calculation, calculation.unit);
+    const html = buildQuotationPrintHtml(quotation, calculation);
     return { status: 200, body: { html } };
   });
 
@@ -1396,8 +1399,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const project = await inventory.getProject(quotation.projectId);
-    if (!project) throw new NotFoundError('project not found for this quotation');
+    // A manually-entered unit (spec section 2B) may have no linked Project
+    // at all — the PDF still generates, just without the project-image/
+    // master-plan sections, never a hard failure (spec section 29.9: don't
+    // fabricate, degrade the optional sections gracefully instead).
+    const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
     const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
     return {
@@ -1418,12 +1424,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!body.to?.trim()) throw new ValidationError('"to" (the recipient WhatsApp number) is required');
 
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const project = await inventory.getProject(quotation.projectId);
-    if (!project) throw new NotFoundError('project not found for this quotation');
+    const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
     const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
 
-    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project.name}, Unit ${calculation.unit.code}`;
+    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project?.name ?? calculation.unitSnapshot.code}, Unit ${calculation.unitSnapshot.code}`;
     const result = await integrations.send(
       actor.companyId,
       'whatsapp',

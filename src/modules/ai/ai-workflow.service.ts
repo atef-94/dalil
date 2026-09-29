@@ -208,8 +208,8 @@ export class AiWorkflowService {
     let chosenMonthlyInstallment: number | undefined;
     for (const unit of candidates) {
       for (const template of templates) {
-        const scheduleLines = await this.paymentPlans.previewSchedule(template.id, run.companyId, unit.listPrice);
-        const installmentLines = scheduleLines.filter((l) => l.label !== 'Down Payment');
+        const { lines: scheduleLines } = await this.paymentPlans.previewSchedule(template.id, run.companyId, unit.listPrice);
+        const installmentLines = scheduleLines.filter((l) => l.kind !== 'down_payment');
         const avgInstallment = installmentLines.length > 0
           ? installmentLines.reduce((sum, l) => sum + l.amount, 0) / installmentLines.length
           : 0;
