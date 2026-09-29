@@ -5,7 +5,6 @@ import { t } from '../i18n.js';
 import { setAiContext, clearAiContext } from './ai-panel.js';
 import { openImportWizard } from '../import-wizard.js';
 import { renderOpportunities } from './opportunities.js';
-import { renderTemplates } from './templates.js';
 import { renderQuotations } from './quotations.js';
 import { renderCommunication } from './communication.js';
 
@@ -24,12 +23,25 @@ import { renderCommunication } from './communication.js';
  * "Offers" tab as internal sub-sections (see renderOffersHub below), each
  * still reusing the exact same page component/API/RBAC gate as before —
  * nothing here is duplicated or rebuilt, only re-nested one level deeper.
+ *
+ * Payment Plan redesign: "خطط الدفع" (Payment Plan Templates) and "عروض
+ * الأسعار" (Quotations) used to be two separate sub-tabs even though they'd
+ * become the same underlying concept (a Quotation is now a full Payment
+ * Plan: unit info + down payment/term/frequency + either equal installments
+ * or installments-plus-scheduled-payments, with reusable templates as an
+ * optional admin-only convenience folded into the same page — see
+ * quotations.js's collapsible "Manage Reusable Templates" section). They're
+ * merged into one 'sub:payment-plan' entry here. The other sub-tab that
+ * used to read "Offers" (this one rendering the Opportunities deal
+ * pipeline, a genuinely different concept — deal-stage tracking, not
+ * pricing) is relabeled to nav_deal_pipeline so it's no longer confused
+ * with pricing, per the user's explicit confirmation of this exact
+ * consolidation.
  */
 function offersSubSections(locale) {
   return [
-    { key: 'sub:offers', label: t(locale, 'nav_offers'), resource: 'opportunity', render: renderOpportunities },
-    { key: 'sub:payment-plans', label: t(locale, 'nav_templates'), resource: 'payment_plan_template', render: renderTemplates },
-    { key: 'sub:quotations', label: t(locale, 'nav_quotations'), resource: 'quotation', render: renderQuotations },
+    { key: 'sub:offers', label: t(locale, 'nav_deal_pipeline'), resource: 'opportunity', render: renderOpportunities },
+    { key: 'sub:payment-plan', label: t(locale, 'nav_payment_plans'), resource: 'quotation', render: renderQuotations },
     { key: 'sub:communications', label: t(locale, 'nav_communication'), resource: 'message', render: renderCommunication },
   ];
 }

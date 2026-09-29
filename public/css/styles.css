@@ -346,6 +346,14 @@ tbody tr.clickable { cursor: pointer; }
 .stat-card.clickable:active { transform: translateY(1px); }
 .stat-card.clickable:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 2px; }
 
+/* Payment Plan financial-reconciliation banner (quotations.js): reflects
+   the real validation state returned by schedule-generator.ts's
+   reconcile() — never a purely-visual status. */
+.pp-validation-banner { padding: 10px 14px; border-radius: 8px; font-size: 13px; font-weight: 600; margin-bottom: 14px; }
+.pp-validation-banner.pp-validation-ok { background: var(--success-bg); color: var(--success-text); }
+.pp-validation-banner.pp-validation-error { background: var(--danger-bg); color: var(--danger-text); }
+.pp-validation-banner.pp-validation-warn { background: var(--warning-bg); color: var(--warning-text); }
+
 /* A compact, vertically-stacked action-button group — used where several
    page-level actions sit to the side of the title rather than in a row. */
 .page-actions.stacked { flex-direction: column; align-items: stretch; gap: 6px; }

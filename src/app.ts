@@ -1217,7 +1217,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'payment_plan_template');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:payment_plan_template permission' } };
-    const templates = await paymentPlans.listTemplates(actor.companyId);
+    const templates = await paymentPlans.listReusableTemplates(actor.companyId);
     return { status: 200, body: paginate(templates, ctx.query) };
   });
 
@@ -1227,8 +1227,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:payment_plan_template permission');
     }
     const body = parseJsonBody<{ templateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number }>(ctx.body);
-    const lines = await paymentPlans.previewSchedule(body.templateId, actor.companyId, body.totalPrice, body.discountPercent, body.escalationPercentPerYear);
-    return { status: 200, body: lines };
+    const result = await paymentPlans.previewSchedule(body.templateId, actor.companyId, body.totalPrice, body.discountPercent, body.escalationPercentPerYear);
+    return { status: 200, body: result };
   });
 
   httpServer.post('/api/contracts/:contractId/payment-schedule/generate', async (ctx) => {
@@ -2717,7 +2717,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       repos.leads.findAll((l) => l.companyId === actor.companyId),
       inventory.listProjects(actor.companyId),
       inventory.listUnits(actor.companyId),
-      paymentPlans.listTemplates(actor.companyId),
+      paymentPlans.listReusableTemplates(actor.companyId),
       sales.listOpportunities(actor.companyId),
     ]);
     const result = await runImport(

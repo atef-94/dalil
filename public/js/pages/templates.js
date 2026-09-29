@@ -70,11 +70,11 @@ export async function renderTemplates(container) {
     }
     previewBtn.disabled = true;
     try {
-      const lines = await api.post('/api/contracts/preview/payment-schedule/preview', {
+      const result = await api.post('/api/contracts/preview/payment-schedule/preview', {
         templateId: previewTemplateSelect.value,
         totalPrice: Number(previewPriceInput.value),
       });
-      previewOutput.textContent = lines.map((l) => `${l.label.padEnd(16)} ${new Date(l.dueDate).toLocaleDateString()}  ${Number(l.amount).toLocaleString()}`).join('\n');
+      previewOutput.textContent = result.lines.map((l) => `${l.label.padEnd(16)} ${new Date(l.dueDate).toLocaleDateString()}  ${Number(l.amount).toLocaleString()}`).join('\n');
     } catch (err) {
       previewOutput.textContent = err.message;
     } finally {

@@ -1097,7 +1097,7 @@ export class AutomationService {
         const projectId = this.requireString(params.projectId, 'projectId');
         const project = await this.inventory.getProject(projectId);
         if (!project || project.companyId !== companyId) throw new AutomationError('project not found for this company', 404);
-        const templates = (await this.paymentPlans.listTemplates(companyId)).filter((t) => !t.projectId || t.projectId === projectId);
+        const templates = (await this.paymentPlans.listReusableTemplates(companyId)).filter((t) => !t.projectId || t.projectId === projectId);
         return { projectId, templates };
       }
       case 'get_developer_portfolio': {
@@ -1143,7 +1143,7 @@ export class AutomationService {
         const discountPercent = typeof params.discountPercent === 'number' ? params.discountPercent : undefined;
         const escalationPercentPerYear = typeof params.escalationPercentPerYear === 'number' ? params.escalationPercentPerYear : undefined;
         const requestedTemplateIds = Array.isArray(params.templateIds) ? (params.templateIds as unknown[]).filter((v): v is string => typeof v === 'string') : undefined;
-        const allTemplates = await this.paymentPlans.listTemplates(companyId);
+        const allTemplates = await this.paymentPlans.listReusableTemplates(companyId);
         const candidateTemplates = (requestedTemplateIds?.length
           ? allTemplates.filter((t) => requestedTemplateIds.includes(t.id))
           : allTemplates.filter((t) => !t.projectId || t.projectId === unit.projectId)
