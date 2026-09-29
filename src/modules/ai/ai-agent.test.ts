@@ -129,7 +129,7 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, new InMemoryRepository<Project>(), paymentPlans);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
   const legal = new LegalService(legalDocuments, contracts);
-  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm);
+  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm, contracts, reservations);
   const analytics = new AnalyticsService(leads, opportunities, contracts, scheduleLines, units, commissions, auditLogRepo, campaigns, crmStages);
 
   const automation = new AutomationService(

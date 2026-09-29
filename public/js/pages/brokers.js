@@ -86,7 +86,6 @@ export async function renderBrokers(container) {
 
   const commissionBrokerSelect = selectInput([]);
   const commissionContractSelect = selectInput([]);
-  const commissionAmountInput = el('input', { type: 'number', placeholder: t(locale, 'brokers_contract_amount_field') });
   const recordCommissionBtn = el('button', {}, t(locale, 'brokers_record_commission_btn'));
   recordCommissionBtn.addEventListener('click', async () => {
     clear(errorSlot);
@@ -94,17 +93,14 @@ export async function renderBrokers(container) {
       errorSlot.appendChild(errorBanner(t(locale, 'brokers_err_choose_company_contract')));
       return;
     }
-    if (!(Number(commissionAmountInput.value) > 0)) {
-      errorSlot.appendChild(errorBanner(t(locale, 'brokers_err_amount_positive')));
-      return;
-    }
     recordCommissionBtn.disabled = true;
     try {
+      // The amount is computed server-side from the signed contract's own
+      // totalPrice/discountPercent and the resolved commission rate — never
+      // trusted from this form, so there's nothing to enter here.
       await api.post(`/api/brokers/companies/${commissionBrokerSelect.value}/commissions`, {
         contractId: commissionContractSelect.value,
-        contractAmount: Number(commissionAmountInput.value),
       });
-      commissionAmountInput.value = '';
       toast(t(locale, 'brokers_toast_commission_recorded'), 'success');
       await load();
     } catch (err) {
@@ -253,7 +249,6 @@ export async function renderBrokers(container) {
     commissionsSlot.appendChild(el('div', { class: 'form-row' }, [
       el('div', {}, [el('label', {}, t(locale, 'brokers_broker_company_field')), commissionBrokerSelect]),
       el('div', {}, [el('label', {}, t(locale, 'brokers_signed_contract_field')), commissionContractSelect]),
-      el('div', {}, [el('label', {}, t(locale, 'brokers_contract_amount_field')), commissionAmountInput]),
     ]));
     commissionsSlot.appendChild(el('div', { class: 'form-actions' }, [recordCommissionBtn]));
 

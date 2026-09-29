@@ -445,7 +445,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
   const paymentImport = new PaymentImportService(repos.leads, inventory, sales, paymentPlans, finance);
-  const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
+  const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm, repos.contracts, repos.reservations);
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
   const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
@@ -3318,8 +3318,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'broker_company'))) {
       throw new ForbiddenError('missing edit:broker_company permission');
     }
-    const body = parseJsonBody<{ contractId: string; contractAmount: number }>(ctx.body);
-    const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId, body.contractAmount);
+    const body = parseJsonBody<{ contractId: string }>(ctx.body);
+    const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'broker_company', resourceId: commission.id, metadata: { brokerCommission: true, brokerCompanyId: ctx.params.brokerCompanyId, contractId: body.contractId, amount: commission.amount } });
     return { status: 201, body: commission };
   });

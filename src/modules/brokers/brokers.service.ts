@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { BrokerCompany, BrokerLead, Commission, CommissionRule } from '../../domain/types.js';
+import type { BrokerCompany, BrokerLead, Commission, CommissionRule, Contract, Reservation } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { BrokerError, ConflictError, NotFoundError, ValidationError } from '../../infra/errors.js';
+import { netContractValue } from '../../domain/money.js';
 import type { CrmService } from '../crm/crm.service.js';
 
 export interface RegisterBrokerCompanyInput {
@@ -30,6 +31,8 @@ export class BrokersService {
     private readonly commissionRules: Repository<CommissionRule>,
     private readonly commissions: Repository<Commission>,
     private readonly crm: CrmService,
+    private readonly contracts: Repository<Contract>,
+    private readonly reservations: Repository<Reservation>,
   ) {}
 
   async registerBrokerCompany(input: RegisterBrokerCompanyInput): Promise<BrokerCompany> {
@@ -166,16 +169,52 @@ export class BrokersService {
     return fallback?.ratePercent ?? 0;
   }
 
-  async recordCommissionForContract(companyId: string, brokerCompanyId: string, contractId: string, contractAmount: number): Promise<Commission> {
+  /**
+   * Validates against the real signed Contract rather than trusting a
+   * caller-supplied amount — the contract must exist in this company, be
+   * signed, and its client must be a lead this broker company actually
+   * registered and had approved (traced Contract -> Reservation ->
+   * BrokerLead.leadId). The commission amount is always computed from the
+   * contract's own totalPrice/discountPercent via the same netContractValue
+   * helper the internal Sales Commission Engine and Forecasting use, never
+   * from anything the caller passes in. At most one commission per contract.
+   */
+  async recordCommissionForContract(companyId: string, brokerCompanyId: string, contractId: string): Promise<Commission> {
     const brokerCompany = await this.brokerCompanies.findById(brokerCompanyId);
     if (!brokerCompany || brokerCompany.companyId !== companyId) throw new NotFoundError('broker company not found');
+
+    const contract = await this.contracts.findById(contractId);
+    if (!contract || contract.companyId !== companyId) throw new NotFoundError('contract not found');
+    if (contract.status !== 'signed') {
+      throw new BrokerError(`a broker commission can only be recorded against a signed contract (current status: ${contract.status})`);
+    }
+
+    const existing = await this.commissions.findAll((c) => c.companyId === companyId && c.contractId === contractId);
+    if (existing.length > 0) {
+      throw new ConflictError('a commission has already been recorded for this contract');
+    }
+
+    const reservation = await this.reservations.findById(contract.reservationId);
+    if (!reservation || reservation.companyId !== companyId) throw new NotFoundError('reservation not found for this contract');
+
+    const approvedBrokerLeads = await this.brokerLeads.findAll(
+      (bl) =>
+        bl.companyId === companyId &&
+        bl.brokerCompanyId === brokerCompanyId &&
+        bl.approvalStatus === 'approved' &&
+        bl.leadId === reservation.clientId,
+    );
+    if (approvedBrokerLeads.length === 0) {
+      throw new BrokerError('this contract\'s client is not an approved lead registered by this broker company — no commission relationship exists', 403);
+    }
+
     const ratePercent = await this.resolveRate(companyId, brokerCompanyId);
     const commission: Commission = {
       id: randomUUID(),
       companyId,
       brokerCompanyId,
       contractId,
-      amount: Math.round(((contractAmount * ratePercent) / 100) * 100) / 100,
+      amount: Math.round(((netContractValue(contract.totalPrice ?? 0, contract.discountPercent) * ratePercent) / 100) * 100) / 100,
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
