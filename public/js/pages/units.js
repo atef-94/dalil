@@ -851,6 +851,14 @@ async function renderManageTab(container, locale) {
   const buildingInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_building_placeholder') });
   const gardenAreaInput = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_garden_area_placeholder') });
   const finishingInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_finishing_placeholder') });
+  const maintenanceFeeInput = el('input', { type: 'number', min: '0', max: '100', placeholder: t(locale, 'units_manage_maintenance_fee_placeholder') });
+  const parkingIncludedSelect = selectInput([
+    { value: '', label: t(locale, 'units_manage_unspecified_option') },
+    { value: 'true', label: t(locale, 'units_manage_yes') },
+    { value: 'false', label: t(locale, 'units_manage_no') },
+  ]);
+  const parkingSpacesInput = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_parking_spaces_placeholder') });
+  const parkingPriceInput = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_parking_price_placeholder') });
   const createBtn = el('button', { class: 'primary' }, t(locale, 'units_manage_add_unit_btn'));
 
   createBtn.addEventListener('click', async () => {
@@ -874,8 +882,13 @@ async function renderManageTab(container, locale) {
         buildingLabel: buildingInput.value.trim() || undefined,
         gardenAreaSqm: gardenAreaInput.value ? Number(gardenAreaInput.value) : undefined,
         finishingType: finishingInput.value.trim() || undefined,
+        maintenanceFeePercentOverride: maintenanceFeeInput.value ? Number(maintenanceFeeInput.value) : undefined,
+        parkingIncluded: parkingIncludedSelect.value ? parkingIncludedSelect.value === 'true' : undefined,
+        parkingSpaces: parkingSpacesInput.value ? Number(parkingSpacesInput.value) : undefined,
+        parkingPrice: parkingPriceInput.value ? Number(parkingPriceInput.value) : undefined,
       });
-      [codeInput, typeInput, areaInput, priceInput, bedroomsInput, floorInput, designTypeInput, viewInput, buildingInput, gardenAreaInput, finishingInput].forEach((i) => (i.value = ''));
+      [codeInput, typeInput, areaInput, priceInput, bedroomsInput, floorInput, designTypeInput, viewInput, buildingInput, gardenAreaInput, finishingInput, maintenanceFeeInput, parkingSpacesInput, parkingPriceInput].forEach((i) => (i.value = ''));
+      parkingIncludedSelect.value = '';
       toast(t(locale, 'units_manage_unit_added_toast'), 'success');
       await load();
     } catch (err) {
@@ -900,6 +913,10 @@ async function renderManageTab(container, locale) {
       el('div', {}, [el('label', {}, t(locale, 'units_manage_building_field')), buildingInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_garden_area_field')), gardenAreaInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_finishing_field')), finishingInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_maintenance_fee_field')), maintenanceFeeInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_parking_included_field')), parkingIncludedSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_parking_spaces_field')), parkingSpacesInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_parking_price_field')), parkingPriceInput]),
     ]),
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
@@ -1005,6 +1022,66 @@ async function renderManageTab(container, locale) {
     }
   }
 
+  async function editUnit(unit) {
+    const result = await formModal({
+      title: `${t(locale, 'units_manage_edit_unit_title')} — ${unit.code}`,
+      fields: [
+        { key: 'unitType', label: t(locale, 'units_manage_type_field'), value: unit.unitType },
+        { key: 'areaSqm', label: t(locale, 'units_manage_area_field'), type: 'number', value: unit.areaSqm },
+        { key: 'listPrice', label: t(locale, 'units_manage_list_price_field'), type: 'number', value: unit.listPrice },
+        { key: 'bedrooms', label: t(locale, 'units_manage_bedrooms_field'), type: 'number', value: unit.bedrooms ?? '' },
+        { key: 'floorLabel', label: t(locale, 'units_manage_floor_field'), value: unit.floorLabel ?? '' },
+        { key: 'designType', label: t(locale, 'units_manage_design_type_field'), value: unit.designType ?? '' },
+        { key: 'view', label: t(locale, 'units_manage_view_field'), value: (unit.view || []).join(', ') },
+        { key: 'buildingLabel', label: t(locale, 'units_manage_building_field'), value: unit.buildingLabel ?? '' },
+        { key: 'gardenAreaSqm', label: t(locale, 'units_manage_garden_area_field'), type: 'number', value: unit.gardenAreaSqm ?? '' },
+        { key: 'finishingType', label: t(locale, 'units_manage_finishing_field'), value: unit.finishingType ?? '' },
+        { key: 'pricePerMeterOverride', label: t(locale, 'units_manage_price_per_meter_override_field'), type: 'number', value: unit.pricePerMeterOverride ?? '' },
+        { key: 'floorPlanImageUrl', label: t(locale, 'units_manage_floor_plan_url_field'), value: unit.floorPlanImageUrl ?? '' },
+        { key: 'maintenanceFeePercentOverride', label: t(locale, 'units_manage_maintenance_fee_field'), type: 'number', value: unit.maintenanceFeePercentOverride ?? '' },
+        {
+          key: 'parkingIncluded',
+          label: t(locale, 'units_manage_parking_included_field'),
+          type: 'select',
+          options: [
+            { value: '', label: t(locale, 'units_manage_unspecified_option') },
+            { value: 'true', label: t(locale, 'units_manage_yes') },
+            { value: 'false', label: t(locale, 'units_manage_no') },
+          ],
+          value: unit.parkingIncluded === undefined ? '' : String(unit.parkingIncluded),
+        },
+        { key: 'parkingSpaces', label: t(locale, 'units_manage_parking_spaces_field'), type: 'number', value: unit.parkingSpaces ?? '' },
+        { key: 'parkingPrice', label: t(locale, 'units_manage_parking_price_field'), type: 'number', value: unit.parkingPrice ?? '' },
+      ],
+      submitLabel: t(locale, 'units_manage_save_btn'),
+    });
+    if (!result) return;
+    try {
+      await api.patch(`/api/inventory/units/${unit.id}`, {
+        unitType: result.unitType.trim() || undefined,
+        areaSqm: result.areaSqm ? Number(result.areaSqm) : undefined,
+        listPrice: result.listPrice ? Number(result.listPrice) : undefined,
+        bedrooms: result.bedrooms !== '' ? Number(result.bedrooms) : undefined,
+        floorLabel: result.floorLabel.trim() || undefined,
+        designType: result.designType.trim() || undefined,
+        view: result.view.trim() ? result.view.split(',').map((v) => v.trim()).filter(Boolean) : undefined,
+        buildingLabel: result.buildingLabel.trim() || undefined,
+        gardenAreaSqm: result.gardenAreaSqm !== '' ? Number(result.gardenAreaSqm) : undefined,
+        finishingType: result.finishingType.trim() || undefined,
+        pricePerMeterOverride: result.pricePerMeterOverride !== '' ? Number(result.pricePerMeterOverride) : undefined,
+        floorPlanImageUrl: result.floorPlanImageUrl.trim() || undefined,
+        maintenanceFeePercentOverride: result.maintenanceFeePercentOverride !== '' ? Number(result.maintenanceFeePercentOverride) : undefined,
+        parkingIncluded: result.parkingIncluded ? result.parkingIncluded === 'true' : undefined,
+        parkingSpaces: result.parkingSpaces !== '' ? Number(result.parkingSpaces) : undefined,
+        parkingPrice: result.parkingPrice !== '' ? Number(result.parkingPrice) : undefined,
+      });
+      toast(t(locale, 'units_manage_unit_updated_toast'), 'success');
+      await load();
+    } catch (err) {
+      errorSlot.appendChild(errorBanner(err.message));
+    }
+  }
+
   function projectName(id) {
     return projects.find((p) => p.id === id)?.name || id;
   }
@@ -1029,12 +1106,19 @@ async function renderManageTab(container, locale) {
           { label: t(locale, 'units_col_status'), render: (u) => statusBadge(u.status) },
           { label: '', render: (u) => {
             if (u.status !== 'available') return '';
-            const btn = el('button', {}, t(locale, 'units_manage_hold_btn'));
-            btn.addEventListener('click', () => {
-              btn.disabled = true;
-              hold(u, btn);
+            const actions = el('div', { style: 'display:flex;gap:6px' });
+            if (can('unit', 'edit')) {
+              const editBtn = el('button', {}, t(locale, 'units_manage_edit_btn'));
+              editBtn.addEventListener('click', () => editUnit(u));
+              actions.appendChild(editBtn);
+            }
+            const holdBtn = el('button', {}, t(locale, 'units_manage_hold_btn'));
+            holdBtn.addEventListener('click', () => {
+              holdBtn.disabled = true;
+              hold(u, holdBtn);
             });
-            return btn;
+            actions.appendChild(holdBtn);
+            return actions;
           } },
         ],
         page.items,

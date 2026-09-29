@@ -836,6 +836,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: { token, userId: user.id, userType: user.userType, companyId: user.companyId } };
   });
 
+  // Auth tokens are stateless, short-lived (15-minute TTL) HMAC-signed
+  // strings with no server-side session store, so there is no session row
+  // to delete here — nothing was silently faking revocation before this
+  // route existed, there simply was no server round-trip on logout at all
+  // (the frontend only cleared its local token). This route gives logout a
+  // real server-side effect within that architecture: it requires a still-
+  // valid token, audit-logs the end of the session, and returns success;
+  // the frontend calls it before discarding its local token.
+  httpServer.post('/api/auth/logout', async (ctx) => {
+    const actor = await actorOf(ctx);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'logout', resource: 'session', resourceId: actor.userId, metadata: {} });
+    return { status: 200, body: { success: true } };
+  });
+
   // Self-service tenant signup: creates the company, the founding employee,
   // the user account, and an unrestricted "Owner" role for that user in one
   // step — the real-users onboarding path (as opposed to the four fixed

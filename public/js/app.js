@@ -1,5 +1,5 @@
 import { el, clear, icon, errorBanner, emptyState, deniedState } from './ui.js';
-import { isAuthenticated, clearToken } from './api.js';
+import { isAuthenticated, clearToken, api } from './api.js';
 import { loadSession, session, getLocale, setLocale, can } from './state.js';
 import { registerRoute, startRouter, navigate, currentPath } from './router.js';
 import { t } from './i18n.js';
@@ -140,7 +140,12 @@ async function showApp() {
   });
 
   const logoutBtn = el('button', { class: 'ghost' }, t(locale, 'logout'));
-  logoutBtn.addEventListener('click', () => {
+  logoutBtn.addEventListener('click', async () => {
+    try {
+      await api.post('/api/auth/logout', {});
+    } catch (err) {
+      // Non-fatal — the token may already be expired; log out locally regardless.
+    }
     clearToken();
     showAuth();
   });

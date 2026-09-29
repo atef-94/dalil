@@ -101,12 +101,22 @@ export async function renderOpportunities(container) {
         ],
         submitLabel: t(locale, 'opportunities_sign_contract_btn'),
       });
-      if (!result || !result.templateId || !result.totalPrice) return;
+      if (!result || !result.templateId) return;
+      const totalPrice = Number(result.totalPrice);
+      const discountPercent = result.discountPercent ? Number(result.discountPercent) : undefined;
+      if (!(totalPrice > 0)) {
+        errorSlot.appendChild(errorBanner(t(locale, 'opportunities_err_total_price_positive')));
+        return;
+      }
+      if (discountPercent !== undefined && !(discountPercent >= 0 && discountPercent < 100)) {
+        errorSlot.appendChild(errorBanner(t(locale, 'opportunities_err_discount_range')));
+        return;
+      }
       const response = await api.post('/api/sales/contracts', {
         reservationId: cached.reservationId,
         paymentPlanTemplateId: result.templateId,
-        totalPrice: Number(result.totalPrice),
-        discountPercent: result.discountPercent ? Number(result.discountPercent) : undefined,
+        totalPrice,
+        discountPercent,
       });
       // A discount above the company's configured threshold returns a
       // pending ActionApproval (HTTP 202) instead of a signed Contract

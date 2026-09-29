@@ -644,6 +644,59 @@ test('updateUnitDetails is non-destructive: patching one new field keeps the oth
   assert.deepEqual(updated.view, ['Garden'], 'untouched field survives the partial update');
 });
 
+// ---- createUnit / updateUnitDetails: unit-level parking/maintenance overrides ----
+
+test('createUnit accepts and persists the parking/maintenance override fields', async () => {
+  const svc = freshFullService();
+  const unit = await svc.createUnit({
+    companyId: 'c1',
+    projectId: 'p1',
+    code: 'A-3',
+    unitType: 'apartment',
+    areaSqm: 100,
+    listPrice: 1000,
+    maintenanceFeePercentOverride: 7.5,
+    parkingIncluded: true,
+    parkingSpaces: 2,
+    parkingPrice: 50000,
+  });
+  assert.equal(unit.maintenanceFeePercentOverride, 7.5);
+  assert.equal(unit.parkingIncluded, true);
+  assert.equal(unit.parkingSpaces, 2);
+  assert.equal(unit.parkingPrice, 50000);
+});
+
+test('createUnit rejects an out-of-range maintenanceFeePercentOverride or a negative parkingSpaces/parkingPrice', async () => {
+  const svc = freshFullService();
+  await assert.rejects(() => svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-4', unitType: 'apartment', areaSqm: 100, listPrice: 1000, maintenanceFeePercentOverride: 101 }));
+  await assert.rejects(() => svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-5', unitType: 'apartment', areaSqm: 100, listPrice: 1000, maintenanceFeePercentOverride: -1 }));
+  await assert.rejects(() => svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-6', unitType: 'apartment', areaSqm: 100, listPrice: 1000, parkingSpaces: -1 }));
+  await assert.rejects(() => svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-7', unitType: 'apartment', areaSqm: 100, listPrice: 1000, parkingPrice: -1 }));
+});
+
+test('updateUnitDetails writes the parking/maintenance override fields on an existing unit, previously write-only-through-import fields', async () => {
+  const svc = freshFullService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-8', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  const updated = await svc.updateUnitDetails(unit.id, 'c1', {
+    maintenanceFeePercentOverride: 3,
+    parkingIncluded: false,
+    parkingSpaces: 1,
+    parkingPrice: 25000,
+  });
+  assert.equal(updated.maintenanceFeePercentOverride, 3);
+  assert.equal(updated.parkingIncluded, false);
+  assert.equal(updated.parkingSpaces, 1);
+  assert.equal(updated.parkingPrice, 25000);
+});
+
+test('updateUnitDetails rejects an out-of-range maintenanceFeePercentOverride or a negative parkingSpaces/parkingPrice', async () => {
+  const svc = freshFullService();
+  const unit = await svc.createUnit({ companyId: 'c1', projectId: 'p1', code: 'A-9', unitType: 'apartment', areaSqm: 100, listPrice: 1000 });
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c1', { maintenanceFeePercentOverride: 150 }));
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c1', { parkingSpaces: -2 }));
+  await assert.rejects(() => svc.updateUnitDetails(unit.id, 'c1', { parkingPrice: -2 }));
+});
+
 // ---- Phase 0 fix: double-sell race between sweepExpiredReservationsDetailed
 // and markContracted (both now serialize on the same per-unit KeyedMutex) ----
 

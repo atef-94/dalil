@@ -115,3 +115,32 @@ test('broker company register/approve/suspend and broker commission record/appro
     assert.deepEqual(actions, ['approve', 'create', 'edit']);
   });
 });
+
+test('POST /api/auth/logout rejects an unauthenticated request', async () => {
+  await withServer(async (base) => {
+    const attempt = await call(base, 'POST', '/api/auth/logout', {});
+    assert.equal(attempt.status, 401);
+  });
+});
+
+test('POST /api/auth/logout succeeds for a real logged-in session (via login token, not the demo-user bypass) and writes an audit entry', async () => {
+  await withServer(async (base, app) => {
+    const ceoUser = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!;
+    const login = await call(base, 'POST', '/api/auth/login', {
+      companyId: app.seedResult!.companyId,
+      email: ceoUser.email,
+      password: 'demo-password-not-for-production',
+    });
+    assert.equal(login.status, 200);
+    const token = (login.body as { token: string }).token;
+
+    const logout = await call(base, 'POST', '/api/auth/logout', {}, { Authorization: `Bearer ${token}` });
+    assert.equal(logout.status, 200);
+    assert.deepEqual(logout.body, { success: true });
+
+    const audit = await call(base, 'GET', '/api/audit-log?limit=300', undefined, { 'x-demo-user': ceoUser.userId });
+    const entry = (audit.body as { items: { resourceId: string; action: string; resource: string }[] }).items
+      .find((e) => e.action === 'logout' && e.resource === 'session' && e.resourceId === ceoUser.userId);
+    assert.ok(entry, 'expected a logout audit-log entry for the CEO user');
+  });
+});

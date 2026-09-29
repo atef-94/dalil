@@ -105,6 +105,52 @@ export class PaymentPlansService {
     return generateSchedule(input);
   }
 
+  /** Fetches the template and runs generateSchedule, throwing the same
+   * ValidationError generateForContract always has if the plan doesn't
+   * reconcile — factored out so a caller (SalesService.signContract) can
+   * run this exact check as a no-side-effect pre-flight before writing
+   * anything, and so generateForContract itself doesn't duplicate the
+   * validation logic. */
+  private async validateAndGenerateSchedule(
+    templateId: string,
+    companyId: string,
+    totalPrice: number,
+    discountPercent?: number,
+    escalationPercentPerYear?: number,
+  ): Promise<{ template: PaymentPlanTemplate; generated: GenerateScheduleResult }> {
+    const template = await this.templates.findById(templateId);
+    if (!template || template.companyId !== companyId) throw new NotFoundError('template not found');
+
+    const generated = generateSchedule({ template, totalPrice, discountPercent, escalationPercentPerYear });
+    // A signed contract is a real financial commitment, not a draft — unlike
+    // a Quotation (which may legitimately be saved in an unreconciled state
+    // for later editing, per the existing draft-status precedent), a
+    // contract's schedule must reconcile before it's ever persisted.
+    if (!generated.validation.isValid) {
+      throw new ValidationError(
+        generated.validation.overpayment > 0
+          ? `payment plan overpays the total by ${generated.validation.overpayment}`
+          : `payment plan leaves a remaining balance of ${generated.validation.remainingBalance}`,
+      );
+    }
+    return { template, generated };
+  }
+
+  /** No-side-effect pre-flight: validates totalPrice/discountPercent and
+   * that the resulting schedule reconciles, without persisting anything.
+   * SalesService.signContract calls this before saving a Contract row, so a
+   * signed Contract can never exist without a payment schedule that is
+   * already known to generate successfully. */
+  async validateScheduleForContract(
+    templateId: string,
+    companyId: string,
+    totalPrice: number,
+    discountPercent?: number,
+    escalationPercentPerYear?: number,
+  ): Promise<void> {
+    await this.validateAndGenerateSchedule(templateId, companyId, totalPrice, discountPercent, escalationPercentPerYear);
+  }
+
   /**
    * Idempotent: calling this twice for the same contract does not create
    * duplicate lines — it returns the schedule already on file.
@@ -122,21 +168,7 @@ export class PaymentPlansService {
       return existing.sort((a, b) => a.sequence - b.sequence);
     }
 
-    const template = await this.templates.findById(templateId);
-    if (!template || template.companyId !== companyId) throw new NotFoundError('template not found');
-
-    const generated = generateSchedule({ template, totalPrice, discountPercent, escalationPercentPerYear });
-    // A signed contract is a real financial commitment, not a draft — unlike
-    // a Quotation (which may legitimately be saved in an unreconciled state
-    // for later editing, per the existing draft-status precedent), a
-    // contract's schedule must reconcile before it's ever persisted.
-    if (!generated.validation.isValid) {
-      throw new ValidationError(
-        generated.validation.overpayment > 0
-          ? `payment plan overpays the total by ${generated.validation.overpayment}`
-          : `payment plan leaves a remaining balance of ${generated.validation.remainingBalance}`,
-      );
-    }
+    const { template, generated } = await this.validateAndGenerateSchedule(templateId, companyId, totalPrice, discountPercent, escalationPercentPerYear);
     const lines: PaymentScheduleLine[] = [];
     for (const line of generated.lines) {
       const saved = await this.scheduleLines.save({

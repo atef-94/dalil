@@ -7,16 +7,16 @@ import { openImportWizard } from '../import-wizard.js';
 import { renderOpportunities } from './opportunities.js';
 import { renderQuotations } from './quotations.js';
 import { renderCommunication } from './communication.js';
+import { renderContracts } from './contracts.js';
+import { renderReservations } from './reservations.js';
+import { renderCustomers } from './customers.js';
 
 /**
  * Sales/CRM restructuring: Leads, Offers, and Tasks live inside this one CRM
  * workspace instead of as separate top-level sidebar sections (see app.js's
  * NAV). "Activities" (also named in the restructuring spec) isn't a
  * separate tab: it's a lead's own timeline/composer, already in the lead
- * detail panel below. Reservations, Contracts, and Follow-ups aren't tabs
- * either — each duplicated a pipeline stage card the Dashboard already
- * shows (Reservations/Contacts stages; Follow Up/Follow Up After Meeting
- * stages), so a stage card is the only way into that stage's lead list now.
+ * detail panel below.
  *
  * Payment Plans, Quotations, and Communication used to be their own
  * top-level tabs alongside Offers; they're now merged into a single
@@ -37,11 +37,27 @@ import { renderCommunication } from './communication.js';
  * pricing) is relabeled to nav_deal_pipeline so it's no longer confused
  * with pricing, per the user's explicit confirmation of this exact
  * consolidation.
+ *
+ * Reservations/Contracts/Customers: these were previously believed to be
+ * redundant with the Dashboard's per-stage pipeline cards (a stage card
+ * shows how many leads currently sit in e.g. a "Reservations" stage) and
+ * were left unwired — but a stage card is a lead-stage COUNT, not a
+ * Reservation/Contract/Customer MANAGEMENT view (expiry countdown/status
+ * filter for reservations, cancel/amend/payment-schedule for contracts,
+ * 360° profile for customers). That left three fully-built, fully-tested
+ * pages (reservations.js/contracts.js/customers.js) with real backend
+ * routes and no way to reach them at all — a genuine gap, not a deliberate
+ * design choice. Restored here as three more sub-sections, following the
+ * exact same reuse-the-existing-page pattern as Payment Plans/Quotations/
+ * Communication above — nothing rebuilt, only re-nested.
  */
 function offersSubSections(locale) {
   return [
     { key: 'sub:offers', label: t(locale, 'nav_deal_pipeline'), resource: 'opportunity', render: renderOpportunities },
     { key: 'sub:payment-plan', label: t(locale, 'nav_payment_plans'), resource: 'quotation', render: renderQuotations },
+    { key: 'sub:reservations', label: t(locale, 'nav_reservations'), resource: 'unit', render: renderReservations },
+    { key: 'sub:contracts', label: t(locale, 'nav_contracts'), resource: 'contract', render: renderContracts },
+    { key: 'sub:customers', label: t(locale, 'nav_customers'), resource: 'portal_access', render: renderCustomers },
     { key: 'sub:communications', label: t(locale, 'nav_communication'), resource: 'message', render: renderCommunication },
   ];
 }

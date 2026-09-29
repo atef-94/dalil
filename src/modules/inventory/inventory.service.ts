@@ -40,6 +40,10 @@ export interface CreateUnitInput {
   pricePerMeterOverride?: number;
   floorPlanImageUrl?: string;
   masterPlanPosition?: MasterPlanPosition;
+  maintenanceFeePercentOverride?: number;
+  parkingIncluded?: boolean;
+  parkingSpaces?: number;
+  parkingPrice?: number;
   sourceImportId?: string;
   sourceSheet?: string;
   sourceRow?: number;
@@ -76,6 +80,10 @@ export type UpdateUnitDetailsInput = Partial<
     | 'pricePerMeterOverride'
     | 'floorPlanImageUrl'
     | 'masterPlanPosition'
+    | 'maintenanceFeePercentOverride'
+    | 'parkingIncluded'
+    | 'parkingSpaces'
+    | 'parkingPrice'
     | 'sourceImportId'
     | 'sourceSheet'
     | 'sourceRow'
@@ -403,6 +411,11 @@ export class InventoryService {
     if (!(input.listPrice > 0)) throw new ValidationError('listPrice must be positive');
     if (input.bedrooms !== undefined && !(input.bedrooms >= 0)) throw new ValidationError('bedrooms must be >= 0');
     if (input.gardenAreaSqm !== undefined && !(input.gardenAreaSqm >= 0)) throw new ValidationError('gardenAreaSqm must be >= 0');
+    if (input.maintenanceFeePercentOverride !== undefined && !(input.maintenanceFeePercentOverride >= 0 && input.maintenanceFeePercentOverride <= 100)) {
+      throw new ValidationError('maintenanceFeePercentOverride must be between 0 and 100');
+    }
+    if (input.parkingSpaces !== undefined && !(input.parkingSpaces >= 0)) throw new ValidationError('parkingSpaces must be >= 0');
+    if (input.parkingPrice !== undefined && !(input.parkingPrice >= 0)) throw new ValidationError('parkingPrice must be >= 0');
     const masterPlanPosition = this.sanitizeMasterPlanPosition(input.masterPlanPosition);
 
     // Scoped per-project, not company-wide: two different projects (e.g. two
@@ -437,6 +450,10 @@ export class InventoryService {
       pricePerMeterOverride: input.pricePerMeterOverride,
       floorPlanImageUrl: input.floorPlanImageUrl?.trim() || undefined,
       masterPlanPosition,
+      maintenanceFeePercentOverride: input.maintenanceFeePercentOverride,
+      parkingIncluded: input.parkingIncluded,
+      parkingSpaces: input.parkingSpaces,
+      parkingPrice: input.parkingPrice,
       sourceImportId: input.sourceImportId,
       sourceSheet: input.sourceSheet,
       sourceRow: input.sourceRow,
@@ -527,6 +544,11 @@ export class InventoryService {
     if (updates.listPrice !== undefined && !(updates.listPrice > 0)) throw new ValidationError('listPrice must be positive');
     if (updates.bedrooms !== undefined && !(updates.bedrooms >= 0)) throw new ValidationError('bedrooms must be >= 0');
     if (updates.gardenAreaSqm !== undefined && !(updates.gardenAreaSqm >= 0)) throw new ValidationError('gardenAreaSqm must be >= 0');
+    if (updates.maintenanceFeePercentOverride !== undefined && !(updates.maintenanceFeePercentOverride >= 0 && updates.maintenanceFeePercentOverride <= 100)) {
+      throw new ValidationError('maintenanceFeePercentOverride must be between 0 and 100');
+    }
+    if (updates.parkingSpaces !== undefined && !(updates.parkingSpaces >= 0)) throw new ValidationError('parkingSpaces must be >= 0');
+    if (updates.parkingPrice !== undefined && !(updates.parkingPrice >= 0)) throw new ValidationError('parkingPrice must be >= 0');
     const masterPlanPosition = updates.masterPlanPosition !== undefined ? this.sanitizeMasterPlanPosition(updates.masterPlanPosition) : unit.masterPlanPosition;
     return this.units.save({
       ...unit,
@@ -545,6 +567,10 @@ export class InventoryService {
       masterPlanPosition,
       delivery: updates.delivery ?? unit.delivery,
       pricePerMeterOverride: updates.pricePerMeterOverride ?? unit.pricePerMeterOverride,
+      maintenanceFeePercentOverride: updates.maintenanceFeePercentOverride ?? unit.maintenanceFeePercentOverride,
+      parkingIncluded: updates.parkingIncluded ?? unit.parkingIncluded,
+      parkingSpaces: updates.parkingSpaces ?? unit.parkingSpaces,
+      parkingPrice: updates.parkingPrice ?? unit.parkingPrice,
       sourceImportId: updates.sourceImportId ?? unit.sourceImportId,
       sourceSheet: updates.sourceSheet ?? unit.sourceSheet,
       sourceRow: updates.sourceRow ?? unit.sourceRow,
