@@ -13,6 +13,11 @@ async function main(): Promise<void> {
   const secretStoreKey = process.env.SECRET_STORE_KEY ?? tokenSecret;
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const trustProxy = process.env.TRUST_PROXY === 'true';
+  // The demo company (ceo@demo.local etc.) ships with a hardcoded,
+  // publicly-documented password (see infra/seed.ts) — fine for local/dev,
+  // but an operator running a public production instance may want it gone.
+  // Defaults to on (unchanged behavior) so this is opt-out, not opt-in.
+  const seedDemo = process.env.SEED_DEMO_DATA !== 'false';
 
   const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -26,6 +31,7 @@ async function main(): Promise<void> {
     allowedOrigins,
     staticDir: join(__dirname, '..', 'public'),
     db,
+    seed: seedDemo,
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS ? Number(process.env.RATE_LIMIT_WINDOW_MS) : undefined,
     rateLimitMax: process.env.RATE_LIMIT_MAX ? Number(process.env.RATE_LIMIT_MAX) : undefined,
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
