@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { buildApplication } from './app.js';
 import { openDatabase } from './infra/sqlite-repository.js';
+import { runBackup } from './infra/backup.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -99,6 +100,19 @@ async function main(): Promise<void> {
   }, 60_000);
   memorySweepInterval.unref();
 
+  // Same-volume SQLite backup (node:sqlite's online backup API — safe under
+  // WAL, not a raw file copy) on boot and every 24h after. Protects against
+  // corruption or a bad write, not against losing the volume itself; see
+  // infra/backup.ts for what this does and doesn't cover.
+  const doBackup = () => {
+    void runBackup({ dbPath, db })
+      .then((path) => process.stdout.write(`backup created: ${path}\n`))
+      .catch((err) => process.stderr.write(`backup failed: ${err instanceof Error ? err.message : String(err)}\n`));
+  };
+  doBackup();
+  const backupInterval = setInterval(doBackup, 24 * 60 * 60 * 1000);
+  backupInterval.unref();
+
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
@@ -110,6 +124,7 @@ async function main(): Promise<void> {
     clearInterval(aiWorkflowSweepInterval);
     clearInterval(reservationSweepInterval);
     clearInterval(memorySweepInterval);
+    clearInterval(backupInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');
       process.exit(1);
