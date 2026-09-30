@@ -2380,6 +2380,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     let leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
     const stageId = ctx.query.get('stageId');
     if (stageId) leads = leads.filter((l) => l.stageId === stageId);
+    // Additive list-view filters for the redesigned CRM client-card list
+    // (Priority / Source / Assigned Sales User) — plain equality filters
+    // over fields already on Lead, so omitting them leaves every existing
+    // caller's behavior unchanged.
+    const priority = ctx.query.get('priority');
+    if (priority) leads = leads.filter((l) => l.priority === priority);
+    const source = ctx.query.get('source');
+    if (source) leads = leads.filter((l) => l.source === source);
+    const ownerEmployeeUserId = ctx.query.get('ownerEmployeeUserId');
+    if (ownerEmployeeUserId) leads = leads.filter((l) => l.ownerEmployeeUserId === ownerEmployeeUserId);
     const filtered = searchFilter(leads, ['fullName', 'phone', 'email'], ctx.query.get('q'));
     return { status: 200, body: paginate(filtered, ctx.query) };
   });

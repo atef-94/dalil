@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState, selectInput } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState, selectInput, icon, popover, field } from '../ui.js';
 import { api } from '../api.js';
 import { can, getLocale, session } from '../state.js';
 import { t } from '../i18n.js';
@@ -143,6 +143,7 @@ export async function renderCrm(container) {
   let activeTab = 'dashboard';
   let offset = 0;
   let q = '';
+  let leadFilters = { priority: '', source: '', ownerEmployeeUserId: '' };
 
   const toolbarSlot = el('div', { class: 'page-actions stacked' });
   container.appendChild(el('div', { class: 'page-header' }, [
@@ -274,6 +275,7 @@ export async function renderCrm(container) {
       activeTab = key;
       offset = 0;
       q = '';
+      leadFilters = { priority: '', source: '', ownerEmployeeUserId: '' };
       renderBody();
     }));
   }
@@ -285,6 +287,7 @@ export async function renderCrm(container) {
     activeTab = 'dashboard';
     offset = 0;
     q = '';
+    leadFilters = { priority: '', source: '', ownerEmployeeUserId: '' };
     renderTabsBar();
     renderBody();
   }
@@ -348,7 +351,7 @@ export async function renderCrm(container) {
         // Each pipeline card IS the way into that stage's lead list now —
         // the horizontal stage-tab row this used to require was removed
         // because it only duplicated these same cards.
-        onClick: () => { activeTab = s.stageId; offset = 0; q = ''; renderBody(); },
+        onClick: () => { activeTab = s.stageId; offset = 0; q = ''; leadFilters = { priority: '', source: '', ownerEmployeeUserId: '' }; renderBody(); },
       }))),
     ]));
     bodySlot.appendChild(el('div', { class: 'card' }, [
@@ -376,9 +379,195 @@ export async function renderCrm(container) {
 
   // ---- Per-stage lead list ----
 
+  function activeLeadFilterCount() {
+    return Object.values(leadFilters).filter(Boolean).length;
+  }
+
+  /** The Filters popover: Priority / Source / Assigned Sales User — plain
+   * equality filters over fields already on Lead (see the additive
+   * priority/source/ownerEmployeeUserId query params on GET
+   * /api/crm/leads). The Assigned Sales User option only appears when the
+   * employee list loaded (same view:employee degradation as the Add Lead
+   * modal's picker). Stage/status filtering is already the per-stage tab
+   * navigation itself, so it isn't duplicated here; name/phone/email
+   * search stays the separate existing search box. */
+  function buildLeadFiltersPanel(close, onApply) {
+    const prioritySelect = selectInput([{ value: '', label: t(locale, 'crm_card_filter_all') }, ...priorityOptions(locale).filter((o) => o.value)]);
+    prioritySelect.value = leadFilters.priority;
+    const sourceSelect = selectInput(leadSourceOptions(locale));
+    sourceSelect.value = leadFilters.source;
+    const ownerSelect = selectInput([
+      { value: '', label: t(locale, 'crm_card_filter_all') },
+      ...employees.filter((e) => e.ownerUserId).map((e) => ({ value: e.ownerUserId, label: e.fullName })),
+    ]);
+    ownerSelect.value = leadFilters.ownerEmployeeUserId;
+
+    const applyBtn = el('button', { class: 'primary' }, t(locale, 'crm_card_apply_filters'));
+    applyBtn.addEventListener('click', () => {
+      leadFilters = { priority: prioritySelect.value, source: sourceSelect.value, ownerEmployeeUserId: ownerSelect.value };
+      close();
+      onApply();
+    });
+    const clearBtn = el('button', {}, t(locale, 'crm_card_clear_filters'));
+    clearBtn.addEventListener('click', () => {
+      leadFilters = { priority: '', source: '', ownerEmployeeUserId: '' };
+      close();
+      onApply();
+    });
+
+    return [el('div', { class: 'lead-filters-panel' }, [
+      field(t(locale, 'crm_col_priority'), prioritySelect),
+      field(t(locale, 'crm_lead_field_source'), sourceSelect),
+      employees.length > 0 ? field(t(locale, 'crm_lead_field_assigned_sales_user'), ownerSelect) : null,
+      el('div', { style: 'display:flex;gap:8px;justify-content:flex-end;margin-top:4px' }, [clearBtn, applyBtn]),
+    ])];
+  }
+
+  // Down-payment %/term derived straight from a Quotation's own persisted
+  // scheduleSnapshot/inputs (the same fields quotation.service.ts itself
+  // reads for its "downPayment" figure) — never from a template that could
+  // since have been edited/archived, and never fabricated when the data
+  // needed isn't there.
+  function summarizePaymentPlan(q) {
+    const totalPrice = q.inputs?.totalPrice;
+    const downLine = q.scheduleSnapshot?.find((l) => l.kind === 'down_payment' || l.label === 'Down Payment');
+    const lastLine = q.scheduleSnapshot?.[q.scheduleSnapshot.length - 1];
+    const start = q.inputs?.startDate ? Date.parse(q.inputs.startDate) : NaN;
+    const end = lastLine ? Date.parse(lastLine.dueDate) : NaN;
+    const percent = totalPrice && downLine ? Math.round((downLine.amount / totalPrice) * 100) : null;
+    const months = Number.isFinite(start) && Number.isFinite(end) && end > start ? Math.round((end - start) / (1000 * 60 * 60 * 24 * 30.44)) : null;
+    if (percent === null || months === null) return null;
+    return months >= 12
+      ? `${percent}% — ${Math.round(months / 12)} ${t(locale, 'crm_card_years_suffix')}`
+      : `${percent}% — ${months} ${t(locale, 'crm_card_months_suffix')}`;
+  }
+
+  // Reuses the exact same GET /api/quotations?leadId= endpoint the Lead
+  // detail's Offers section already calls — nothing new on the backend.
+  // Only called for the leads on the currently-visible page (bounded by
+  // pagination, not per-card-on-every-render), and a missing
+  // view:quotation grant degrades to no chips rather than an error.
+  async function fetchPaymentPlanChips(leadId) {
+    try {
+      const page = await api.get('/api/quotations', { leadId, limit: 5 });
+      return page.items.map(summarizePaymentPlan).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  function formatCardDate(iso) {
+    return new Date(iso).toLocaleDateString(locale === 'ar' ? 'ar-EG' : 'en-US', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  /** One client card — see the CRM Client List UI Redesign spec: Identity /
+   * Status-Priority / Source-Location / Target-Budget / Payment Plans,
+   * then a quick-actions row, then Created/Next Follow-up. Every action
+   * reuses the exact existing handler (openLeadDetail/openMoveStageModal/
+   * askAi) — this only changes how a lead is laid out, not what clicking
+   * an action does. */
+  function leadCard(lead, reload) {
+    const stage = stages.find((s) => s.id === lead.stageId);
+    const owner = employees.find((e) => e.ownerUserId === lead.ownerEmployeeUserId);
+    const phoneDigits = lead.phone.replace(/[^0-9+]/g, '');
+    const waDigits = phoneDigits.replace(/^\+/, '');
+
+    // A. Identity
+    const callLink = el('a', { class: 'icon-btn', href: `tel:${phoneDigits}` }, [icon('phone', 'sm'), t(locale, 'crm_card_call')]);
+    const waLink = el('a', { class: 'icon-btn whatsapp-btn', href: `https://wa.me/${waDigits}`, target: '_blank', rel: 'noopener' }, [icon('whatsapp', 'sm'), t(locale, 'crm_channel_whatsapp')]);
+    const identity = el('div', {}, [
+      el('div', { class: 'lead-card-section-label' }, t(locale, 'crm_card_name_phone_label')),
+      el('div', { class: 'lead-card-name' }, lead.fullName),
+      el('div', { class: 'lead-card-phone' }, lead.phone),
+      el('div', { class: 'lead-card-contact-row' }, [callLink, waLink]),
+      owner ? el('div', { class: 'muted-line', style: 'font-size:11.5px;margin-top:6px' }, `${t(locale, 'crm_card_assigned_prefix')} ${owner.fullName}`) : null,
+    ]);
+
+    // B. Status / Priority
+    const statusBlock = el('div', {}, [
+      el('div', { class: 'lead-card-section-label' }, t(locale, 'crm_card_status_priority_label')),
+      el('div', { class: 'lead-card-badges' }, [
+        statusBadge(stage?.name || lead.stageId),
+        lead.priority ? badge(priorityLabel(locale, lead.priority), lead.priority === 'urgent' || lead.priority === 'high' ? 'red' : '') : null,
+      ]),
+    ]);
+
+    // C. Source / Location
+    const sourceBlock = el('div', {}, [
+      el('div', { class: 'lead-card-section-label' }, t(locale, 'crm_card_source_location_label')),
+      el('div', { class: 'lead-card-kv' }, [
+        el('div', {}, lead.source ? leadSourceLabel(locale, lead.source) : el('span', { class: 'muted-line' }, '—')),
+        el('div', { class: 'muted-line' }, lead.preferredLocation ? `${t(locale, 'crm_card_location_prefix')} ${lead.preferredLocation}` : t(locale, 'crm_card_no_location')),
+      ]),
+    ]);
+
+    // D. Target / Budget
+    const targetLabel = lead.propertyTypeWanted || lead.interestedInLabel || (lead.interestedInType ? leadInterestLabel(locale, lead.interestedInType) : '');
+    const budgetLabel = (lead.budgetMin || lead.budgetMax)
+      ? [lead.budgetMin, lead.budgetMax].filter((v) => v != null).map((v) => Number(v).toLocaleString()).join(' – ') + ' EGP'
+      : '';
+    const targetBlock = el('div', {}, [
+      el('div', { class: 'lead-card-section-label' }, t(locale, 'crm_card_target_budget_label')),
+      el('div', { class: 'lead-card-kv' }, [
+        el('div', {}, targetLabel ? `${t(locale, 'crm_card_target_prefix')} ${targetLabel}` : t(locale, 'crm_card_no_target')),
+        el('div', { class: 'muted-line' }, budgetLabel ? `${t(locale, 'crm_card_budget_prefix')} ${budgetLabel}` : t(locale, 'crm_card_no_budget')),
+      ]),
+    ]);
+
+    // E. Payment Plans — loaded async (see fetchPaymentPlanChips) so the
+    // card renders immediately and the chip row fills in a beat later.
+    const chipsSlot = el('div', { class: 'lead-card-chips' }, [el('span', { class: 'lead-card-chip empty' }, '…')]);
+    const plansBlock = el('div', {}, [
+      el('div', { class: 'lead-card-section-label' }, t(locale, 'crm_card_payment_plans')),
+      chipsSlot,
+    ]);
+    if (can('quotation', 'view')) {
+      fetchPaymentPlanChips(lead.id).then((chips) => {
+        clear(chipsSlot);
+        if (chips.length === 0) {
+          chipsSlot.appendChild(el('span', { class: 'lead-card-chip empty' }, t(locale, 'crm_card_no_payment_plans')));
+        } else {
+          chips.forEach((c) => chipsSlot.appendChild(el('span', { class: 'lead-card-chip' }, c)));
+        }
+      });
+    } else {
+      clear(chipsSlot);
+      chipsSlot.appendChild(el('span', { class: 'lead-card-chip empty' }, t(locale, 'crm_card_no_payment_plans')));
+    }
+
+    const grid = el('div', { class: 'lead-card-grid' }, [identity, statusBlock, sourceBlock, targetBlock, plansBlock]);
+
+    // Quick actions — same handlers the old row actions used.
+    const detailBtn = el('button', {}, [icon('folder', 'sm'), ' ', t(locale, 'crm_action_open_file')]);
+    detailBtn.addEventListener('click', () => openLeadDetail(lead, reload));
+    const moveBtn = el('button', {}, [icon('history', 'sm'), ' ', t(locale, 'crm_action_move_stage')]);
+    moveBtn.addEventListener('click', () => openMoveStageModal(lead, reload));
+    const aiBtn = el('button', { class: 'primary' }, [icon('ai', 'sm'), ' ', t(locale, 'crm_action_ask_ai')]);
+    aiBtn.addEventListener('click', () => askAi(lead, reload));
+    const actionsRow = el('div', { class: 'lead-card-actions' }, [aiBtn, detailBtn, moveBtn]);
+
+    // Dates — Created always exists; Next Follow-up only for a lead with a
+    // real pending first-contact SLA deadline that isn't already Won/Lost.
+    const dateItems = [
+      el('span', { class: 'lead-card-date-item' }, [icon('calendar'), `${t(locale, 'crm_lead_created_at_prefix')} ${formatCardDate(lead.createdAt)}`]),
+    ];
+    if (lead.firstContactSlaDueAt && !stage?.isWon && !stage?.isLost) {
+      const overdue = Date.parse(lead.firstContactSlaDueAt) < Date.now();
+      dateItems.push(el('span', { class: `lead-card-date-item${overdue ? ' overdue' : ''}` }, [icon('calendar'), `${t(locale, 'crm_card_next_followup')}: ${formatCardDate(lead.firstContactSlaDueAt)}`]));
+    }
+    const datesRow = el('div', { class: 'lead-card-dates' }, dateItems);
+
+    const footer = el('div', { class: 'lead-card-footer' }, [actionsRow, datesRow]);
+    if (lead.tags?.length) {
+      return el('div', { class: 'lead-card' }, [grid, el('div', { style: 'margin-top:10px' }, lead.tags.map((tag) => badge(tag))), footer]);
+    }
+    return el('div', { class: 'lead-card' }, [grid, footer]);
+  }
+
   async function renderStageList(stageId) {
     const stage = stages.find((s) => s.id === stageId);
     const search = searchInput(t(locale, 'crm_search_leads_placeholder'), (value) => { q = value; offset = 0; loadList(); });
+    const filterBarSlot = el('div');
     const listSlot = el('div');
     clear(bodySlot);
     const backArrow = locale === 'ar' ? '→' : '←';
@@ -386,54 +575,39 @@ export async function renderCrm(container) {
     backLink.addEventListener('click', goToDashboard);
     bodySlot.appendChild(backLink);
     bodySlot.appendChild(el('h2', { style: 'margin:0 0 12px' }, stage?.name ?? ''));
-    bodySlot.appendChild(el('div', { class: 'form-row', style: 'max-width:320px;margin-bottom:10px' }, [search]));
+    bodySlot.appendChild(filterBarSlot);
     bodySlot.appendChild(listSlot);
+
+    function renderFilterBar() {
+      clear(filterBarSlot);
+      const filterTrigger = el('button', {}, [
+        icon('filter', 'sm'), ' ', t(locale, 'crm_card_filters_btn'),
+        activeLeadFilterCount() > 0 ? el('span', { class: 'lead-filter-badge-count', style: 'margin-inline-start:6px' }, String(activeLeadFilterCount())) : null,
+      ]);
+      const filterPopover = popover(filterTrigger, (close) => buildLeadFiltersPanel(close, () => { offset = 0; renderFilterBar(); loadList(); }));
+      filterBarSlot.appendChild(el('div', { class: 'lead-filters-bar' }, [search, filterPopover]));
+    }
 
     async function loadList() {
       clear(listSlot);
       listSlot.appendChild(loadingState());
       try {
-        const page = await api.get('/api/crm/leads', { stageId, limit: 20, offset, q });
+        const page = await api.get('/api/crm/leads', { stageId, limit: 20, offset, q, ...leadFilters });
         clear(listSlot);
-        listSlot.append(
-          table(
-            [
-              { label: t(locale, 'crm_col_name'), key: 'fullName' },
-              { label: t(locale, 'crm_col_phone'), key: 'phone' },
-              { label: t(locale, 'crm_col_priority'), render: (l) => (l.priority ? badge(priorityLabel(locale, l.priority), l.priority === 'urgent' || l.priority === 'high' ? 'red' : '') : '—') },
-              { label: t(locale, 'crm_col_owner'), render: (l) => (l.ownerEmployeeUserId ? l.ownerEmployeeUserId.slice(0, 8) + '…' : '—') },
-              { label: '', render: (l) => rowActions(l, loadList) },
-            ],
-            page.items,
-            { empty: stage?.isDefault ? t(locale, 'crm_no_fresh_leads') : `${t(locale, 'crm_no_leads_in_stage')} "${stage?.name}"` },
-          ),
-          paginationControls(page, (next) => { offset = next; loadList(); }),
-        );
+        if (page.items.length === 0) {
+          listSlot.appendChild(emptyState({ icon: 'leads', title: stage?.isDefault ? t(locale, 'crm_no_fresh_leads') : `${t(locale, 'crm_no_leads_in_stage')} "${stage?.name}"` }));
+        } else {
+          listSlot.appendChild(el('div', { class: 'lead-card-list' }, page.items.map((l) => leadCard(l, loadList))));
+        }
+        listSlot.appendChild(paginationControls(page, (next) => { offset = next; loadList(); }));
       } catch (err) {
         clear(listSlot);
         listSlot.appendChild(errorBanner(err.message));
       }
     }
 
+    renderFilterBar();
     await loadList();
-  }
-
-  function rowActions(lead, reload) {
-    const actions = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' });
-
-    const detailBtn = el('button', {}, t(locale, 'crm_action_open'));
-    detailBtn.addEventListener('click', () => openLeadDetail(lead, reload));
-    actions.appendChild(detailBtn);
-
-    const moveBtn = el('button', {}, t(locale, 'crm_action_move_stage'));
-    moveBtn.addEventListener('click', () => openMoveStageModal(lead, reload));
-    actions.appendChild(moveBtn);
-
-    const aiBtn = el('button', {}, t(locale, 'crm_action_ask_ai'));
-    aiBtn.addEventListener('click', () => askAi(lead, reload));
-    actions.appendChild(aiBtn);
-
-    return actions;
   }
 
   // ---- Tasks tab (reuses the existing TaskService/API — no new backend) ----

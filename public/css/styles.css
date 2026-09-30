@@ -627,6 +627,75 @@ tbody tr.clickable { cursor: pointer; }
 .project-card-map-panel { padding: 12px; }
 .project-card-map-panel a { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; }
 
+/* ---- CRM: Lead client cards (redesigned list — replaces a plain table row
+   per lead with a denser, section-structured horizontal card) ---- */
+.lead-card-list { display: flex; flex-direction: column; gap: 12px; }
+.lead-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xs); padding: 14px 16px; transition: box-shadow 0.12s ease;
+}
+.lead-card:hover { box-shadow: var(--shadow-sm); }
+.lead-card-grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.3fr) minmax(110px, 0.8fr) minmax(150px, 1.2fr) minmax(150px, 1.2fr) minmax(170px, 1.4fr);
+  gap: 16px;
+  align-items: start;
+}
+.lead-card-section-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-tertiary); margin-bottom: 6px;
+}
+.lead-card-name { font-size: 14.5px; font-weight: 700; margin-bottom: 2px; }
+.lead-card-phone { font-size: 12.5px; color: var(--text-muted); margin-bottom: 8px; direction: ltr; text-align: start; }
+.lead-card-contact-row { display: flex; gap: 6px; }
+.lead-card-contact-row a.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font-size: 12px; font-weight: 600; text-decoration: none;
+}
+.lead-card-contact-row a.icon-btn:hover { background: var(--n-100); }
+.lead-card-contact-row a.whatsapp-btn { color: var(--success-text); border-color: var(--success-bg); background: var(--success-bg); }
+.lead-card-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.lead-card-kv { font-size: 12.5px; line-height: 1.6; }
+.lead-card-kv strong { font-weight: 600; }
+.lead-card-kv .muted-line { color: var(--text-muted); }
+.lead-card-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.lead-card-chip {
+  font-size: 11px; font-weight: 650; padding: 3px 8px; border-radius: 999px;
+  background: var(--accent-teal-bg); color: var(--accent-teal); white-space: nowrap;
+}
+.lead-card-chip.empty { background: var(--n-100); color: var(--text-tertiary); font-weight: 500; }
+.lead-card-footer {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+}
+.lead-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.lead-card-actions button {
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em;
+  padding: 7px 12px; display: inline-flex; align-items: center; gap: 6px;
+}
+.lead-card-dates { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-muted); }
+.lead-card-dates .lead-card-date-item { display: flex; align-items: center; gap: 5px; }
+.lead-card-dates .icon { width: 13px; height: 13px; }
+.lead-card-dates .overdue { color: var(--danger-text); font-weight: 650; }
+
+.lead-filters-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.lead-filters-panel { display: flex; flex-direction: column; gap: 10px; width: 220px; }
+.lead-filters-panel label { margin: 0 0 3px; }
+.lead-filter-badge-count {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
+  padding: 0 4px; border-radius: 999px; background: var(--brand-500); color: #fff; font-size: 10px; font-weight: 700;
+}
+
+@media (max-width: 880px) {
+  .lead-card-grid { grid-template-columns: 1fr; gap: 10px; }
+  .lead-card-phone { text-align: start; }
+  .lead-card-footer { flex-direction: column; align-items: stretch; }
+  .lead-card-actions { justify-content: stretch; }
+  .lead-card-actions button { flex: 1; justify-content: center; }
+  .lead-card-dates { gap: 10px; }
+}
+
 .compare-tray {
   position: fixed; bottom: 0; inset-inline: 0; z-index: 92; background: var(--surface); border-top: 1px solid var(--border);
   box-shadow: var(--shadow-lg); padding: 10px 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
