@@ -1,4 +1,4 @@
-import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState, selectInput, icon, popover, field } from '../ui.js';
+import { el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, formModal, loadingState, searchInput, contentModal, tabs, statCard, emptyState, selectInput, icon, popover, field, collapsible } from '../ui.js';
 import { api } from '../api.js';
 import { can, getLocale, session } from '../state.js';
 import { t } from '../i18n.js';
@@ -917,8 +917,7 @@ export async function renderCrm(container) {
       }
     }
 
-    const card = el('div', { class: 'card' }, [
-      el('h4', { style: 'margin-top:0' }, t(locale, 'crm_timeline_card_title')),
+    const card = el('div', {}, [
       filtersRow,
       listSlot,
       paginationSlot,
@@ -961,43 +960,79 @@ export async function renderCrm(container) {
       const deliveryStatus = await api.get(`/api/integrations/communication/delivery/by-resource/${lead.id}`).catch(() => null);
 
       const stage = stages.find((s) => s.id === lead.stageId);
+      const owner = employees.find((e) => e.ownerUserId === lead.ownerEmployeeUserId);
       const DELIVERY_COLORS = { delivered: 'green', read: 'green', sent: 'blue', queued: 'amber', failed: 'red', rejected: 'red', unknown: '' };
-      const header = el('div', { style: 'display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:14px' }, [
+
+      // ---- Status badges (stage/priority/delivery/score) — kept visible,
+      // just compact, above the identity/contact block. ----
+      const badgesRow = el('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px' }, [
         statusBadge(stage?.name || lead.stageId),
         lead.priority ? badge(priorityLabel(locale, lead.priority), lead.priority === 'urgent' || lead.priority === 'high' ? 'red' : '') : null,
         deliveryStatus && deliveryStatus.status !== 'unknown' ? badge(`${t(locale, 'crm_delivery_status_prefix')} ${deliveryStatus.status}`, DELIVERY_COLORS[deliveryStatus.status] || '') : null,
         score ? el('span', { class: 'muted' }, `${t(locale, 'crm_lead_score_prefix')} ${score.score}/100`) : null,
-        el('span', { class: 'muted' }, lead.phone),
-        lead.email ? el('span', { class: 'muted' }, lead.email) : null,
-        el('span', { class: 'muted' }, `${t(locale, 'crm_lead_created_at_prefix')} ${new Date(lead.createdAt).toLocaleString(locale === 'ar' ? 'ar-EG' : 'en-US')}`),
       ]);
-      body.appendChild(header);
+      body.appendChild(badgesRow);
 
-      const actionsRow = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px' });
+      // ---- Phone + direct Call/WhatsApp — same tel:/wa.me pattern as the
+      // lead-card list, using the lead's own (normalized) phone number. ----
+      body.appendChild(el('div', { class: 'muted', style: 'margin-bottom:10px;direction:ltr;text-align:start' }, lead.phone));
+      const phoneDigits = lead.phone.replace(/[^0-9+]/g, '');
+      const waDigits = phoneDigits.replace(/^\+/, '');
+      const callLink = el('a', { class: 'icon-btn', href: `tel:${phoneDigits}` }, [icon('phone', 'sm'), t(locale, 'crm_detail_call_btn')]);
+      const waLink = el('a', { class: 'icon-btn whatsapp-btn', href: `https://wa.me/${waDigits}`, target: '_blank', rel: 'noopener' }, [icon('whatsapp', 'sm'), t(locale, 'crm_detail_whatsapp_btn')]);
+      body.appendChild(el('div', { class: 'lead-card-contact-row', style: 'margin-bottom:18px' }, [callLink, waLink]));
+
+      // ---- Interested In / Assigned to / Time / Date — real data only:
+      // interestedInLabel falls back to the interestedInType's translated
+      // label, owner is resolved from the already-loaded employees list
+      // (same lookup the lead-card list uses), never fabricated. ----
+      const interestedValue = lead.interestedInLabel || (lead.interestedInType ? leadInterestLabel(locale, lead.interestedInType) : '') || t(locale, 'crm_detail_no_value');
+      const ownerValue = owner?.fullName || t(locale, 'crm_detail_no_value');
+      const createdDate = new Date(lead.createdAt);
+      const localeTag = locale === 'ar' ? 'ar-EG' : 'en-US';
+      const timeValue = createdDate.toLocaleTimeString(localeTag, { hour: '2-digit', minute: '2-digit' });
+      const dateValue = createdDate.toLocaleDateString(localeTag, { day: '2-digit', month: 'long', year: 'numeric' });
+      function infoPair(label, value) {
+        return el('div', {}, [
+          el('div', { class: 'lead-card-section-label' }, label),
+          el('div', { style: 'font-weight:600' }, value),
+        ]);
+      }
+      body.appendChild(el('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:14px 20px;margin-bottom:18px' }, [
+        infoPair(t(locale, 'crm_detail_interested_label'), interestedValue),
+        infoPair(t(locale, 'crm_detail_owner_label'), ownerValue),
+        infoPair(t(locale, 'crm_detail_time_label'), timeValue),
+        infoPair(t(locale, 'crm_detail_date_label'), dateValue),
+      ]));
+
+      // ---- Quick actions: the 4 primary actions up front, the rest
+      // (tags/priority, portal access, AI) as a secondary row — nothing
+      // removed, just reorganized so the most-used actions read first. ----
+      const primaryActionsRow = el('div', { class: 'lead-card-actions', style: 'margin-bottom:8px' });
+      const assignBtn = el('button', {}, t(locale, 'crm_action_assign_owner'));
+      assignBtn.addEventListener('click', () => reassignOwner(lead, refreshDetail));
       const moveBtn = el('button', {}, t(locale, 'crm_action_move_stage'));
       moveBtn.addEventListener('click', async () => { await openMoveStageModal(lead, null); await refreshDetail(); reload?.(); });
-      actionsRow.appendChild(moveBtn);
+      const interestBtn = el('button', {}, t(locale, 'crm_action_edit_interest'));
+      interestBtn.addEventListener('click', () => editDetails(lead, refreshDetail));
+      const noteBtn = el('button', {}, t(locale, 'crm_action_add_note'));
+      noteBtn.addEventListener('click', () => quickAddNote(lead, refreshDetail));
+      primaryActionsRow.append(assignBtn, moveBtn, interestBtn, noteBtn);
+      body.appendChild(primaryActionsRow);
 
-      const reassignBtn = el('button', {}, t(locale, 'crm_action_reassign_owner'));
-      reassignBtn.addEventListener('click', () => reassignOwner(lead, refreshDetail));
-      actionsRow.appendChild(reassignBtn);
-
-      const tagsBtn = el('button', {}, t(locale, 'crm_action_edit_tags'));
+      const secondaryActionsRow = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px' });
+      const tagsBtn = el('button', { class: 'ghost' }, t(locale, 'crm_action_edit_tags'));
       tagsBtn.addEventListener('click', () => editTagsAndPriority(lead, refreshDetail));
-      actionsRow.appendChild(tagsBtn);
+      secondaryActionsRow.appendChild(tagsBtn);
 
-      const reqBtn = el('button', {}, t(locale, 'crm_action_requirements'));
-      reqBtn.addEventListener('click', () => editDetails(lead, refreshDetail));
-      actionsRow.appendChild(reqBtn);
-
-      const portalBtn = el('button', {}, t(locale, 'crm_action_grant_portal'));
+      const portalBtn = el('button', { class: 'ghost' }, t(locale, 'crm_action_grant_portal'));
       portalBtn.addEventListener('click', () => grantPortalAccess(lead));
-      actionsRow.appendChild(portalBtn);
+      secondaryActionsRow.appendChild(portalBtn);
 
-      const aiBtn = el('button', {}, t(locale, 'crm_action_ask_ai'));
+      const aiBtn = el('button', { class: 'ghost' }, t(locale, 'crm_action_ask_ai'));
       aiBtn.addEventListener('click', async () => { await askAi(lead, null); await refreshDetail(); reload?.(); });
-      actionsRow.appendChild(aiBtn);
-      body.appendChild(actionsRow);
+      secondaryActionsRow.appendChild(aiBtn);
+      body.appendChild(secondaryActionsRow);
 
       if (lead.tags?.length) {
         body.appendChild(el('div', { style: 'margin-bottom:14px' }, lead.tags.map((tag) => badge(tag))));
@@ -1007,7 +1042,10 @@ export async function renderCrm(container) {
       // Offer PDF the sales team can print or send over WhatsApp. Reuses
       // the Quotation/Offer engine (quotation.service.ts) — the same
       // deep-snapshot payment schedule, PDF, and WhatsApp document send
-      // every other Offer surface uses; nothing here is a second path. ----
+      // every other Offer surface uses; nothing here is a second path.
+      // Built here but appended after the accordions below (see
+      // offerCard), matching the new layout's card order. ----
+      let offerCard = null;
       if (can('quotation', 'create')) {
         const unitCodeInput = el('input', { type: 'text', placeholder: t(locale, 'crm_offer_unit_code_placeholder') });
         const lookupBtn = el('button', {}, t(locale, 'crm_offer_lookup_btn'));
@@ -1142,7 +1180,7 @@ export async function renderCrm(container) {
         // pipeline (Opportunities); this is a different thing (a unit +
         // payment-plan + PDF quote for this specific lead), so it needs a
         // different label to not read as the same feature.
-        body.appendChild(el('div', { class: 'card' }, [
+        offerCard = el('div', { class: 'card' }, [
           el('h4', { style: 'margin-top:0' }, t(locale, 'crm_offer_card_title')),
           el('div', { class: 'form-row' }, [
             el('div', {}, [el('label', {}, t(locale, 'units_manage_unit_code_field')), unitCodeInput]),
@@ -1153,7 +1191,7 @@ export async function renderCrm(container) {
           offerUnitInfo,
           el('div', { class: 'form-actions' }, [createOfferBtn]),
           offersListSlot,
-        ]));
+        ]);
         await loadOffers();
       }
 
@@ -1190,14 +1228,13 @@ export async function renderCrm(container) {
           logBtn.disabled = false;
         }
       });
-      body.appendChild(el('div', { class: 'card' }, [
-        el('h4', { style: 'margin-top:0' }, t(locale, 'crm_activity_log_btn')),
+      body.appendChild(collapsible(t(locale, 'crm_activity_log_btn'), el('div', {}, [
         el('div', { class: 'form-row' }, [
           el('div', { style: 'max-width:160px' }, [el('label', {}, t(locale, 'crm_activity_channel_field')), channelSelect]),
           el('div', { style: 'flex:2' }, [el('label', {}, t(locale, 'crm_activity_details_field')), activityInput]),
         ]),
         el('div', { class: 'form-actions' }, [logBtn]),
-      ]));
+      ]), { defaultOpen: false }));
 
       // ---- Schedule a follow-up (a Task tied to this lead) ----
       const followUpInput = el('input', { type: 'text', placeholder: t(locale, 'crm_followup_title_placeholder') });
@@ -1225,21 +1262,24 @@ export async function renderCrm(container) {
           reportError(err);
         }
       });
-      body.appendChild(el('div', { class: 'card' }, [
-        el('h4', { style: 'margin-top:0' }, t(locale, 'crm_followup_card_title')),
+      body.appendChild(collapsible(t(locale, 'crm_followup_card_title'), el('div', {}, [
         el('div', { class: 'form-row' }, [
           el('div', {}, [el('label', {}, t(locale, 'crm_label_title')), followUpInput]),
           el('div', {}, [el('label', {}, t(locale, 'crm_followup_when_field')), followUpDate]),
         ]),
         el('div', { class: 'form-actions' }, [scheduleBtn]),
-      ]));
+      ]), { defaultOpen: false }));
 
       // ---- Timeline / History: the complete, permanent record of this
       // lead's journey (stage/owner/data changes, comments/calls/WhatsApp/
       // email, follow-ups, offers, reservations, contracts, AI actions) —
       // server-filtered/paginated so nothing older is ever silently
       // dropped just because it's not on the first page. ----
-      body.appendChild(await buildTimelineSection(lead.id));
+      body.appendChild(collapsible(t(locale, 'crm_timeline_card_title'), await buildTimelineSection(lead.id), { defaultOpen: false }));
+
+      // Offer & Payment card is appended last, matching the mockup's
+      // bottom-of-page placement, after the collapsible activity sections.
+      if (offerCard) body.appendChild(offerCard);
     }
 
     await refreshDetail();
@@ -1255,6 +1295,28 @@ export async function renderCrm(container) {
     try {
       await api.patch(`/api/crm/leads/${lead.id}/owner`, { ownerEmployeeUserId: result.ownerEmployeeUserId.trim() });
       toast(t(locale, 'crm_reassign_toast'), 'success');
+      await reload?.();
+    } catch (err) {
+      reportError(err);
+    }
+  }
+
+  async function quickAddNote(lead, reload) {
+    const result = await formModal({
+      title: t(locale, 'crm_quick_note_modal_title'),
+      fields: [{ key: 'body', label: t(locale, 'crm_quick_note_field'), type: 'textarea', value: '' }],
+      submitLabel: t(locale, 'crm_save_btn'),
+    });
+    if (!result || !result.body.trim()) return;
+    try {
+      await api.post('/api/communication/messages', {
+        subject: 'Note',
+        body: result.body.trim(),
+        channel: 'note',
+        relatedResource: 'lead',
+        relatedResourceId: lead.id,
+      });
+      toast(t(locale, 'crm_activity_logged_toast'), 'success');
       await reload?.();
     } catch (err) {
       reportError(err);

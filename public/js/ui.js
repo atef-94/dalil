@@ -162,6 +162,31 @@ export function tabs(items, activeKey, onSelect) {
   return wrap;
 }
 
+/** A collapsible section — a title row with a chevron that toggles a
+ * content area's visibility. `contentNode` is built once by the caller
+ * (its own state/listeners persist across collapse/expand, unlike a
+ * popover which rebuilds fresh each open). `defaultOpen` controls the
+ * initial state; nothing here forces the content to be re-fetched or
+ * re-rendered on toggle — that stays entirely in the caller's hands. */
+export function collapsible(title, contentNode, { defaultOpen = false } = {}) {
+  let open = defaultOpen;
+  const chevron = icon('chevronDown', 'collapsible-chevron');
+  const headerRow = el('div', { class: 'collapsible-header', role: 'button', tabindex: '0' }, [
+    el('span', { class: 'collapsible-title' }, title),
+    chevron,
+  ]);
+  const wrap = el('div', { class: 'collapsible' }, [headerRow, contentNode]);
+  function render() {
+    wrap.classList.toggle('open', open);
+    contentNode.style.display = open ? '' : 'none';
+  }
+  function toggle() { open = !open; render(); }
+  headerRow.addEventListener('click', toggle);
+  headerRow.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  render();
+  return wrap;
+}
+
 /** A horizontally-scrollable strip (developer logos, banner cards, filter
  * chips) — just a styled flex row with its own scrollbar; children are
  * pre-built nodes so callers stay in control of what's inside each item. */
