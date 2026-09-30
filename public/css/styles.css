@@ -699,6 +699,27 @@ tbody tr.clickable { cursor: pointer; }
 .lead-card-dates .icon { width: 13px; height: 13px; }
 .lead-card-dates .overdue { color: var(--danger-text); font-weight: 650; }
 
+/* ---- Lead Detail modal header — scoped to this panel only, does NOT
+   touch .lead-card-actions (shared with the list-card view above). ---- */
+.lead-detail-byline {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  font-size: 12px; color: var(--text-muted); margin-bottom: 14px;
+}
+.lead-detail-byline .sep { opacity: .5; }
+.lead-detail-reqs {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px;
+  margin-bottom: 18px; padding: 14px; background: var(--n-50);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.lead-detail-reqs .req-label { font-size: 11px; color: var(--text-tertiary); margin-bottom: 2px; }
+.lead-detail-reqs .req-value { font-weight: 650; font-size: 13.5px; }
+.lead-detail-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.lead-detail-actions button {
+  font-size: 11px; font-weight: 650; padding: 5px 9px; border-radius: 8px;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.end-of-page-timeline { margin-top: 24px; padding-top: 18px; border-top: 2px solid var(--border); }
+
 .lead-filters-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
 .lead-filters-panel { display: flex; flex-direction: column; gap: 10px; width: 220px; }
 .lead-filters-panel label { margin: 0 0 3px; }

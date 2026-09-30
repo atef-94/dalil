@@ -830,27 +830,14 @@ export async function renderCrm(container) {
    * list page already uses.
    */
   async function buildTimelineSection(leadId) {
+    // Event-type/date-range/search filtering stays a real backend capability
+    // (GET .../timeline still accepts type/q/from/to below) — only the
+    // filter CONTROLS are no longer rendered, per the approved redesign.
     const state = { type: '', q: '', from: '', to: '', offset: 0, limit: 20 };
     const listSlot = el('div', {});
     const paginationSlot = el('div', { style: 'margin-top:10px' });
 
     const typeLabels = timelineTypeLabels(locale);
-    const typeSelect = selectInput([{ value: '', label: t(locale, 'crm_timeline_all_types') }, ...Object.entries(typeLabels).map(([value, label]) => ({ value, label }))]);
-    typeSelect.addEventListener('change', () => { state.type = typeSelect.value; state.offset = 0; load(); });
-
-    const fromInput = el('input', { type: 'date' });
-    fromInput.addEventListener('change', () => { state.from = fromInput.value ? new Date(fromInput.value).toISOString() : ''; state.offset = 0; load(); });
-    const toInput = el('input', { type: 'date' });
-    toInput.addEventListener('change', () => { state.to = toInput.value ? new Date(`${toInput.value}T23:59:59`).toISOString() : ''; state.offset = 0; load(); });
-
-    const search = searchInput(t(locale, 'crm_timeline_search_placeholder'), (q) => { state.q = q; state.offset = 0; load(); });
-
-    const filtersRow = el('div', { class: 'form-row', style: 'align-items:flex-end;flex-wrap:wrap' }, [
-      el('div', {}, [el('label', {}, t(locale, 'crm_timeline_event_type_field')), typeSelect]),
-      el('div', {}, [el('label', {}, t(locale, 'crm_timeline_from_field')), fromInput]),
-      el('div', {}, [el('label', {}, t(locale, 'crm_timeline_to_field')), toInput]),
-      el('div', { style: 'flex:1;min-width:200px' }, [el('label', {}, t(locale, 'crm_timeline_search_field')), search]),
-    ]);
 
     function renderEntry(e) {
       const isAi = e.actorType === 'ai_agent';
@@ -918,7 +905,6 @@ export async function renderCrm(container) {
     }
 
     const card = el('div', {}, [
-      filtersRow,
       listSlot,
       paginationSlot,
     ]);
@@ -982,33 +968,44 @@ export async function renderCrm(container) {
       const waLink = el('a', { class: 'icon-btn whatsapp-btn', href: `https://wa.me/${waDigits}`, target: '_blank', rel: 'noopener' }, [icon('whatsapp', 'sm'), t(locale, 'crm_detail_whatsapp_btn')]);
       body.appendChild(el('div', { class: 'lead-card-contact-row', style: 'margin-bottom:18px' }, [callLink, waLink]));
 
-      // ---- Interested In / Assigned to / Time / Date — real data only:
-      // interestedInLabel falls back to the interestedInType's translated
-      // label, owner is resolved from the already-loaded employees list
-      // (same lookup the lead-card list uses), never fabricated. ----
+      // ---- Byline: owner + created date/time, now a small secondary line
+      // (not the header's primary face — see the requirements grid below,
+      // which real data shows the sales team actually needs first). ----
       const interestedValue = lead.interestedInLabel || (lead.interestedInType ? leadInterestLabel(locale, lead.interestedInType) : '') || t(locale, 'crm_detail_no_value');
       const ownerValue = owner?.fullName || t(locale, 'crm_detail_no_value');
       const createdDate = new Date(lead.createdAt);
       const localeTag = locale === 'ar' ? 'ar-EG' : 'en-US';
       const timeValue = createdDate.toLocaleTimeString(localeTag, { hour: '2-digit', minute: '2-digit' });
       const dateValue = createdDate.toLocaleDateString(localeTag, { day: '2-digit', month: 'long', year: 'numeric' });
-      function infoPair(label, value) {
+      body.appendChild(el('div', { class: 'lead-detail-byline' }, [
+        el('span', {}, `${t(locale, 'crm_detail_owner_label')}: ${ownerValue}`),
+        el('span', { class: 'sep' }, '•'),
+        el('span', {}, `${dateValue}، ${timeValue}`),
+      ]));
+
+      // ---- Requirements: the real client-requirement fields (same data
+      // as the "Edit interest" form below), now the primary face of the
+      // header — no fabricated fields, only what's actually on the Lead. ----
+      const budgetLabel = (lead.budgetMin || lead.budgetMax)
+        ? [lead.budgetMin, lead.budgetMax].filter((v) => v != null).map((v) => Number(v).toLocaleString()).join(' – ')
+        : '';
+      function reqPair(label, value) {
         return el('div', {}, [
-          el('div', { class: 'lead-card-section-label' }, label),
-          el('div', { style: 'font-weight:600' }, value),
+          el('div', { class: 'req-label' }, label),
+          el('div', { class: 'req-value' }, value || t(locale, 'crm_detail_no_value')),
         ]);
       }
-      body.appendChild(el('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:14px 20px;margin-bottom:18px' }, [
-        infoPair(t(locale, 'crm_detail_interested_label'), interestedValue),
-        infoPair(t(locale, 'crm_detail_owner_label'), ownerValue),
-        infoPair(t(locale, 'crm_detail_time_label'), timeValue),
-        infoPair(t(locale, 'crm_detail_date_label'), dateValue),
+      body.appendChild(el('div', { class: 'lead-detail-reqs' }, [
+        reqPair(t(locale, 'crm_req_property_type_field'), lead.propertyTypeWanted),
+        reqPair(t(locale, 'crm_req_budget_range_field'), budgetLabel),
+        reqPair(t(locale, 'crm_req_location_field'), lead.preferredLocation),
+        reqPair(t(locale, 'crm_detail_interested_label'), interestedValue),
       ]));
 
       // ---- Quick actions: the 4 primary actions up front, the rest
       // (tags/priority, portal access, AI) as a secondary row — nothing
       // removed, just reorganized so the most-used actions read first. ----
-      const primaryActionsRow = el('div', { class: 'lead-card-actions', style: 'margin-bottom:8px' });
+      const primaryActionsRow = el('div', { class: 'lead-detail-actions' });
       const assignBtn = el('button', {}, t(locale, 'crm_action_assign_owner'));
       assignBtn.addEventListener('click', () => reassignOwner(lead, refreshDetail));
       const moveBtn = el('button', {}, t(locale, 'crm_action_move_stage'));
@@ -1270,16 +1267,18 @@ export async function renderCrm(container) {
         el('div', { class: 'form-actions' }, [scheduleBtn]),
       ]), { defaultOpen: false }));
 
-      // ---- Timeline / History: the complete, permanent record of this
+      // Offer & Payment card, then Timeline/History last of all — matching
+      // the approved redesign: the complete, permanent record of this
       // lead's journey (stage/owner/data changes, comments/calls/WhatsApp/
-      // email, follow-ups, offers, reservations, contracts, AI actions) —
+      // email, follow-ups, offers, reservations, contracts, AI actions),
       // server-filtered/paginated so nothing older is ever silently
-      // dropped just because it's not on the first page. ----
-      body.appendChild(collapsible(t(locale, 'crm_timeline_card_title'), await buildTimelineSection(lead.id), { defaultOpen: false }));
-
-      // Offer & Payment card is appended last, matching the mockup's
-      // bottom-of-page placement, after the collapsible activity sections.
+      // dropped just because it's not on the first page, now placed at the
+      // true end of the page instead of nested among the accordions above. ----
       if (offerCard) body.appendChild(offerCard);
+      body.appendChild(el('div', { class: 'end-of-page-timeline' }, [
+        el('h4', { style: 'margin-top:0' }, t(locale, 'crm_timeline_card_title')),
+        await buildTimelineSection(lead.id),
+      ]));
     }
 
     await refreshDetail();
