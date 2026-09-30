@@ -142,8 +142,14 @@ try {
   // ---- 6. Mobile layout stacks the card into one column ----
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(300);
+  // On a mainstream mobile width the grid packs two sections per row
+  // (identity stays full-width) instead of one long single-column stack —
+  // same data, roughly half the scroll height. Only genuinely tiny
+  // screens (<340px) fall back further to one column.
   const gridCols = await card.locator('.lead-card-grid').evaluate((n) => getComputedStyle(n).gridTemplateColumns.split(' ').length);
-  step('on a mobile viewport the card grid collapses to a single column', gridCols === 1, `columns=${gridCols}`);
+  step('on a mobile viewport the card grid packs two sections per row (not one long vertical stack)', gridCols === 2, `columns=${gridCols}`);
+  const identitySpansFull = await card.locator('.lead-card-grid > *:first-child').evaluate((n) => getComputedStyle(n).gridColumn);
+  step('the Identity section still spans the full width on mobile', /1\s*\/\s*-1|span 2/.test(identitySpansFull), identitySpansFull);
   await page.screenshot({ path: '/tmp/claude-0/lead-cards-mobile.png' });
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.waitForTimeout(300);

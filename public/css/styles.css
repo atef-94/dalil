@@ -688,12 +688,25 @@ tbody tr.clickable { cursor: pointer; }
 }
 
 @media (max-width: 880px) {
-  .lead-card-grid { grid-template-columns: 1fr; gap: 10px; }
+  /* Two sections per row instead of one long vertical stack — same data,
+     roughly half the scroll height, and related short fields (e.g.
+     Status/Priority next to Source/Location) read side by side instead
+     of far apart. Identity (name/phone/Call/WhatsApp) stays full-width
+     since it's the one section with more than a couple of lines. */
+  .lead-card-grid { grid-template-columns: 1fr 1fr; gap: 12px 14px; }
+  .lead-card-grid > *:first-child { grid-column: 1 / -1; }
   .lead-card-phone { text-align: start; }
   .lead-card-footer { flex-direction: column; align-items: stretch; }
   .lead-card-actions { justify-content: stretch; }
   .lead-card-actions button { flex: 1; justify-content: center; }
   .lead-card-dates { gap: 10px; }
+}
+
+@media (max-width: 340px) {
+  /* Only genuinely tiny/legacy screens fall back to one column — every
+     mainstream phone width (360px and up) keeps the 2-column layout. */
+  .lead-card-grid { grid-template-columns: 1fr; }
+  .lead-card-grid > *:first-child { grid-column: auto; }
 }
 
 .compare-tray {
