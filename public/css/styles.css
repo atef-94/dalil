@@ -513,16 +513,20 @@ tbody tr.clickable { cursor: pointer; }
 .ai-panel-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-weight: 650; font-size: 13.5px; color: var(--brand-700); }
 .confidence-bar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
 
-/* ---- Persistent AI assistant dock (floating, every page) ---- */
+/* ---- Persistent AI assistant dock (floating, every page) ----
+   Above .modal-overlay (z-index 100): the dock is meant to stay usable
+   while a modal is open (e.g. asking about a lead from inside its own
+   detail modal), and below .toast-container (150) so a toast is never
+   hidden behind it. */
 .ai-dock-toggle {
-  position: fixed; bottom: 20px; inset-inline-end: 20px; z-index: 90;
+  position: fixed; bottom: 20px; inset-inline-end: 20px; z-index: 110;
   width: 52px; height: 52px; border-radius: 50%; border: none;
   background: var(--primary); color: #fff; box-shadow: var(--shadow-lg);
   display: flex; align-items: center; justify-content: center; cursor: pointer;
 }
 .ai-dock-toggle .icon { width: 22px; height: 22px; }
 .ai-dock {
-  position: fixed; bottom: 84px; inset-inline-end: 20px; z-index: 91;
+  position: fixed; bottom: 84px; inset-inline-end: 20px; z-index: 111;
   width: 360px; max-width: calc(100vw - 32px); max-height: min(560px, 72vh);
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg); display: flex; flex-direction: column; overflow: hidden;

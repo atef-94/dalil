@@ -106,22 +106,39 @@ async function summarizeContext(messagesEl) {
     return;
   }
   try {
-    const [timeline, score] = await Promise.all([
-      api.get(`/api/crm/leads/${context.leadId}/timeline`),
+    // GET .../timeline returns a Page ({items, total, ...}, newest entry
+    // first — see app.ts's `entries.reverse()` before pagination), not a
+    // {lead, entries} shape, so the lead itself needs its own fetch.
+    const [lead, timeline, score] = await Promise.all([
+      api.get(`/api/crm/leads/${context.leadId}`),
+      api.get(`/api/crm/leads/${context.leadId}/timeline`, { limit: 50 }),
       api.get(`/api/crm/leads/${context.leadId}/score`).catch(() => null),
     ]);
-    const lead = timeline.lead;
     const lines = [
       `${lead.fullName} — ${lead.phone}${lead.email ? `, ${lead.email}` : ''}`,
       score ? `${t(locale, 'ai_panel_priority_score_prefix')} ${score.score}/100 (${score.factors.map((f) => f.label).join(', ') || t(locale, 'ai_panel_no_positive_signals')})` : null,
-      `${timeline.entries.length} ${timeline.entries.length === 1 ? t(locale, 'ai_panel_activity_count_singular') : t(locale, 'ai_panel_activity_count_plural')}`,
+      `${timeline.total} ${timeline.total === 1 ? t(locale, 'ai_panel_activity_count_singular') : t(locale, 'ai_panel_activity_count_plural')}`,
     ].filter(Boolean);
-    const last = timeline.entries[timeline.entries.length - 1];
+    const last = timeline.items[0];
     if (last) lines.push(`${t(locale, 'ai_panel_most_recent_prefix')} ${last.summary} (${new Date(last.at).toLocaleString()})`);
     addMessage(messagesEl, lines.join('\n'));
   } catch (err) {
     addMessage(messagesEl, err.message, { error: true });
   }
+}
+
+// Arabic "move to a stage" phrasing has no fixed word order the way English
+// "move to X" does (انقل/حوّل/رحّل all combine freely with مرحلة/إلى/لـ), so
+// this pulls the stage name out from whichever connector the sentence used
+// rather than matching one exact sentence shape.
+const ARABIC_MOVE_VERBS = /(انقل|نقل|حوّل|حول|رحّل|رحل)/;
+function extractArabicMoveTarget(text) {
+  if (!ARABIC_MOVE_VERBS.test(text)) return null;
+  const afterStageWord = text.match(/مرحلة\s*[:\-]?\s*(.+)$/);
+  if (afterStageWord && afterStageWord[1].trim()) return afterStageWord[1].trim();
+  const afterTo = text.match(/(?:إلى|الى)\s*[:\-]?\s*(.+)$/);
+  if (afterTo && afterTo[1].trim()) return afterTo[1].trim();
+  return null;
 }
 
 async function handleCommand(messagesEl, raw) {
@@ -135,18 +152,39 @@ async function handleCommand(messagesEl, raw) {
     await moveContextToStage(messagesEl, moveMatch[1]);
     return;
   }
-  if (lower.includes('hot lead') || (lower.includes('today') && lower.includes('lead'))) {
+  const arabicMoveTarget = extractArabicMoveTarget(text);
+  if (arabicMoveTarget) {
+    await moveContextToStage(messagesEl, arabicMoveTarget);
+    return;
+  }
+
+  const mentionsClients = /عميل|عملاء|ليد/.test(text);
+  const wantsHotLeads =
+    lower.includes('hot lead') ||
+    (lower.includes('today') && lower.includes('lead')) ||
+    (/أكثر|اكثر/.test(text) && /اهتمام|مهتم/.test(text)) ||
+    (mentionsClients && /ساخن/.test(text)) ||
+    (text.includes('اليوم') && mentionsClients && (/أكثر|اكثر|مهتم|اهتمام|ساخن/.test(text)));
+  if (wantsHotLeads) {
     await showTodaysHotLeads(messagesEl);
     return;
   }
-  if (lower.includes('summar')) {
+
+  const wantsSummary = lower.includes('summar') || /لخّص|لخص|تلخيص/.test(text);
+  if (wantsSummary) {
     await summarizeContext(messagesEl);
     return;
   }
-  if (lower.includes('next action') || lower.includes('suggest')) {
+
+  const wantsNextAction =
+    lower.includes('next action') ||
+    lower.includes('suggest') ||
+    /اقترح|اقتراح|الإجراء التالي|الاجراء التالي|الخطوة التالية/.test(text);
+  if (wantsNextAction) {
     await suggestNextActionForContext(messagesEl);
     return;
   }
+
   addMessage(
     messagesEl,
     t(getLocale(), 'ai_panel_fallback_help'),
@@ -154,6 +192,15 @@ async function handleCommand(messagesEl, raw) {
 }
 
 export function mountAiAssistant() {
+  // showApp() (app.js) calls this on every render — initial login, every
+  // locale switch, every re-auth — but it appends straight to
+  // document.body, outside the #root subtree that showApp() clears first.
+  // Without this cleanup a stale toggle/panel from the previous mount
+  // would stay in the DOM: harmless-looking, but its "open lead" context
+  // never updates again once a newer mount takes over module-level
+  // refreshContextUi, so clicking it silently shows dead state.
+  document.querySelectorAll('.ai-dock-toggle, .ai-dock').forEach((n) => n.remove());
+
   if (!can('ai_action', 'view') && !can('ai_action', 'create')) return; // no AI grant at all — nothing to mount
 
   const toggle = el('button', { class: 'ai-dock-toggle', 'aria-label': t(getLocale(), 'ai_panel_title') }, icon('ai'));
