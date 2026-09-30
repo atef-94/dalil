@@ -1,4 +1,4 @@
-import { el, clear, icon, errorBanner, emptyState, deniedState } from './ui.js';
+import { el, clear, icon, errorBanner, emptyState, deniedState, toast } from './ui.js';
 import { isAuthenticated, clearToken, api } from './api.js';
 import { loadSession, session, getLocale, setLocale, can } from './state.js';
 import { registerRoute, startRouter, navigate, currentPath } from './router.js';
@@ -274,5 +274,13 @@ async function bootstrap() {
   }
   await showApp();
 }
+
+// A 401 from any API call (token expired, revoked, etc.) fires this once —
+// drop back to the login screen with a clear message instead of leaving
+// the already-rendered page up while every further action silently fails.
+window.addEventListener('session-expired', () => {
+  toast(t(getLocale(), 'common_session_expired'), 'error');
+  showAuth();
+});
 
 bootstrap();

@@ -54,6 +54,7 @@ export const STRINGS = {
     submit_login: 'Log in',
     submit_signup: 'Create workspace',
     // ---- Shared UI chrome (ui.js) — used across virtually every page ----
+    common_session_expired: 'Your session expired — please sign in again.',
     common_no_records: 'No records yet.',
     common_nothing_here: 'Nothing here yet',
     common_access_restricted: 'Access restricted',
@@ -1682,6 +1683,7 @@ export const STRINGS = {
     tab_signup: 'إنشاء حساب',
     submit_login: 'تسجيل الدخول',
     submit_signup: 'إنشاء مساحة العمل',
+    common_session_expired: 'انتهت جلستك — من فضلك سجّل الدخول مرة أخرى.',
     common_no_records: 'لا توجد سجلات بعد.',
     common_nothing_here: 'لا يوجد شيء هنا بعد',
     common_access_restricted: 'الوصول مقيّد',
