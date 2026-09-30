@@ -781,16 +781,43 @@ export interface CrmStage {
   updatedAt: string;
 }
 
+/** Fixed acquisition-channel list for the Lead form's "Source" dropdown —
+ * distinct from sourceId (a link to a real Marketing Campaign, a separate,
+ * richer attribution concept used by the funnel/campaign-performance
+ * views). This is the simple "where did this lead come from" tag a sales
+ * rep picks at a glance. */
+export type LeadSourceChannel = 'facebook' | 'google' | 'referral' | 'whatsapp' | 'instagram' | 'tiktok' | 'other';
+
+/** What the lead is interested in. No fixed catalog is forced for
+ * product/service (none exists in this real-estate-focused domain) — see
+ * interestedInLabel, following the same free-text-where-no-catalog-exists
+ * convention as propertyTypeWanted below. */
+export type LeadInterestType = 'project' | 'unit' | 'product' | 'service' | 'other';
+
 export interface Lead {
   id: string;
   companyId: string;
   fullName: string;
   phone: string;
+  /** @deprecated no longer captured by the Lead form (removed per the
+   * simplified-form redesign) — left in place so historical rows with an
+   * email keep it. Still used for portal-access email defaults. */
   email?: string;
-  /** National ID / civil ID — the strongest identity signal for duplicate
-   * detection, since a phone or email can be swapped out but this can't. */
+  /** National ID / civil ID.
+   * @deprecated no longer captured by the Lead form or used for duplicate
+   * detection (phone is now the sole dedup signal) — left in place so
+   * historical/imported rows keep their value. */
   nationalId?: string;
   sourceId?: string;
+  /** The simple acquisition channel picked on the Lead form — see
+   * LeadSourceChannel. */
+  source?: LeadSourceChannel;
+  interestedInType?: LeadInterestType;
+  /** Free-text detail for interestedInType — a project name, unit code,
+   * or a description of the product/service/other interest. */
+  interestedInLabel?: string;
+  budgetMin?: number;
+  budgetMax?: number;
   /** The lead's real classification — see CrmStage. Always set (defaults
    * to the company's isDefault stage on creation). */
   stageId: string;

@@ -30,6 +30,8 @@ import type {
   Employee,
   Lead,
   LeadDistributionPool,
+  LeadInterestType,
+  LeadSourceChannel,
   LeaveRequest,
   LegalDocument,
   MaintenanceTicket,
@@ -920,7 +922,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
       ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
     }));
     const searched = searchFilter(filtered, ['fullName', 'email', 'title'], ctx.query.get('q'));
-    return { status: 200, body: paginate(searched, ctx.query) };
+    const page = paginate(searched, ctx.query);
+    // Enrich each row with its linked user id — the Lead form's "Assigned
+    // Sales User" picker needs it to populate ownerEmployeeUserId, which is
+    // actually a User id (see employeeScopeKeys above), not an Employee id.
+    const items = await Promise.all(page.items.map(async (e) => ({
+      ...e,
+      ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
+    })));
+    return { status: 200, body: { ...page, items } };
   });
 
   httpServer.post('/api/organization/employees/:employeeId/reassign-manager', async (ctx) => {
@@ -2076,11 +2086,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email?: string;
       nationalId?: string;
       sourceId?: string;
+      source?: Lead['source'];
       stageId?: string;
       tags?: string[];
       priority?: Lead['priority'];
       ownerEmployeeUserId?: string;
       requiredSkill?: string;
+      interestedInType?: Lead['interestedInType'];
+      interestedInLabel?: string;
+      budgetMin?: number;
+      budgetMax?: number;
+      preferredLocation?: string;
     }>(ctx.body);
     // An explicit ownerEmployeeUserId always wins. Otherwise, if this
     // company has configured a Lead Distribution pool, hand the lead to
@@ -2104,16 +2120,35 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email: body.email,
       nationalId: body.nationalId,
       sourceId: body.sourceId,
+      source: body.source,
       stageId: body.stageId,
       tags: body.tags,
       priority: body.priority,
       requiredSkill: body.requiredSkill,
       ownerEmployeeUserId: ownerEmployeeUserId ?? actor.userId,
       firstContactSlaDueAt,
+      interestedInType: body.interestedInType,
+      interestedInLabel: body.interestedInLabel,
+      budgetMin: body.budgetMin,
+      budgetMax: body.budgetMax,
+      preferredLocation: body.preferredLocation,
     });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
+  });
+
+  // Pre-submit duplicate check the Lead form calls before creating a new
+  // lead, so a rep sees (and can open) the existing lead instead of just
+  // getting a rejected create request — see CrmService.checkDuplicateByPhone.
+  httpServer.get('/api/crm/leads/check-duplicate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const phone = ctx.query.get('phone') ?? '';
+    const duplicate = await crm.checkDuplicateByPhone(actor.companyId, phone);
+    return { status: 200, body: { duplicate: duplicate ?? null } };
   });
 
   // ---- CRM Stages ----
@@ -2442,6 +2477,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{
+      fullName?: string;
+      phone?: string;
+      source?: LeadSourceChannel;
+      interestedInType?: LeadInterestType;
+      interestedInLabel?: string;
+      budgetMin?: number;
+      budgetMax?: number;
       propertyTypeWanted?: string;
       purchaseGoal?: string;
       preferredLocation?: string;

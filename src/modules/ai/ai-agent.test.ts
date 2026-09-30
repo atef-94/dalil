@@ -8,6 +8,7 @@ import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
 import { CrmStageService } from '../crm/crm-stage.service.js';
+import { normalizePhone } from '../../infra/phone.js';
 import { MarketingService } from '../marketing/marketing.service.js';
 import { OperationsService } from '../operations/operations.service.js';
 import { HrService } from '../hr/hr.service.js';
@@ -964,7 +965,7 @@ test('sales agent reaches out via a connected WhatsApp integration instead of on
 
   assert.equal(decision.chosenActionType, 'integration_call');
   assert.equal(decision.params?.provider, 'whatsapp');
-  assert.equal(decision.params?.to, '0100');
+  assert.equal(decision.params?.to, normalizePhone('0100'));
   assert.equal(decision.status, 'proceeded');
   assert.equal(h.integrationFetchCalls.length, 1);
   assert.match(h.integrationFetchCalls[0]!.url, /graph\.facebook\.com/);

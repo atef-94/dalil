@@ -104,11 +104,42 @@ function priorityOptions(locale) {
   ];
 }
 
+const LEAD_SOURCE_LABEL_KEYS = {
+  facebook: 'crm_lead_source_facebook',
+  google: 'crm_lead_source_google',
+  referral: 'crm_lead_source_referral',
+  whatsapp: 'crm_lead_source_whatsapp',
+  instagram: 'crm_lead_source_instagram',
+  tiktok: 'crm_lead_source_tiktok',
+  other: 'crm_lead_source_other',
+};
+function leadSourceLabel(locale, source) {
+  return LEAD_SOURCE_LABEL_KEYS[source] ? t(locale, LEAD_SOURCE_LABEL_KEYS[source]) : source;
+}
+function leadSourceOptions(locale) {
+  return [{ value: '', label: '—' }, ...Object.keys(LEAD_SOURCE_LABEL_KEYS).map((value) => ({ value, label: leadSourceLabel(locale, value) }))];
+}
+
+const LEAD_INTEREST_LABEL_KEYS = {
+  project: 'crm_lead_interest_project',
+  unit: 'crm_lead_interest_unit',
+  product: 'crm_lead_interest_product',
+  service: 'crm_lead_interest_service',
+  other: 'crm_lead_interest_other',
+};
+function leadInterestLabel(locale, type) {
+  return LEAD_INTEREST_LABEL_KEYS[type] ? t(locale, LEAD_INTEREST_LABEL_KEYS[type]) : type;
+}
+function leadInterestOptions(locale) {
+  return [{ value: '', label: '—' }, ...Object.keys(LEAD_INTEREST_LABEL_KEYS).map((value) => ({ value, label: leadInterestLabel(locale, value) }))];
+}
+
 export async function renderCrm(container) {
   clear(container);
   const locale = getLocale();
 
   let stages = [];        // active stages, ordered
+  let employees = [];     // for the Add-Lead "Assigned Sales User" picker — empty for roles without view:employee
   let activeTab = 'dashboard';
   let offset = 0;
   let q = '';
@@ -135,6 +166,19 @@ export async function renderCrm(container) {
   }
 
   // ---- Stage tabs + toolbar ----
+
+  // Sales Agents don't have view:employee — the list route 403s for them,
+  // so the picker just degrades to "no picker" and lead creation falls
+  // back to today's automatic-owner-assignment behavior.
+  async function loadEmployees() {
+    if (!can('employee', 'view')) { employees = []; return; }
+    try {
+      const page = await api.get('/api/organization/employees', { limit: 200 });
+      employees = page.items;
+    } catch {
+      employees = [];
+    }
+  }
 
   async function loadStages() {
     stages = await api.get('/api/crm/stages');
@@ -440,21 +484,60 @@ export async function renderCrm(container) {
 
   // ---- Add Lead ----
 
+  // Pre-submit duplicate warning: lets the rep review/open the existing
+  // lead instead of just hitting a rejected create request. Resolves
+  // 'view' | 'create' | 'cancel'.
+  function confirmDuplicateWarning(duplicate) {
+    return new Promise((resolve) => {
+      const body = el('div', {}, [
+        el('p', {}, `${t(locale, 'crm_lead_duplicate_warning_body')} "${duplicate.fullName}" (${duplicate.phone}).`),
+      ]);
+      const cancelBtn = el('button', {}, t(locale, 'common_cancel'));
+      const viewBtn = el('button', {}, t(locale, 'crm_lead_duplicate_view_existing'));
+      const createBtn = el('button', { class: 'primary' }, t(locale, 'crm_lead_duplicate_create_anyway'));
+      body.appendChild(el('div', { class: 'form-actions', style: 'justify-content:flex-end' }, [cancelBtn, viewBtn, createBtn]));
+      const { close } = contentModal(t(locale, 'crm_lead_duplicate_warning_title'), body);
+      cancelBtn.addEventListener('click', () => { close(); resolve('cancel'); });
+      viewBtn.addEventListener('click', () => { close(); resolve('view'); });
+      createBtn.addEventListener('click', () => { close(); resolve('create'); });
+    });
+  }
+
   async function openAddLeadModal() {
     const defaultStage = stages.find((s) => s.id === activeTab) || stages.find((s) => s.isDefault);
+    const fields = [
+      { key: 'fullName', label: t(locale, 'crm_lead_field_full_name') },
+      { key: 'phone', label: t(locale, 'crm_lead_field_mobile') },
+      { key: 'source', label: t(locale, 'crm_lead_field_source'), type: 'select', options: leadSourceOptions(locale) },
+    ];
+    // Sales Agents can't see the employee list (no view:employee) — the
+    // picker just doesn't appear for them, and creation falls back to the
+    // existing automatic-owner-assignment behavior (Lead Distribution pool
+    // or "creator owns it").
+    if (employees.length > 0) {
+      fields.push({
+        key: 'ownerEmployeeUserId',
+        label: t(locale, 'crm_lead_field_assigned_sales_user'),
+        type: 'select',
+        options: [
+          { value: '', label: t(locale, 'crm_lead_assigned_sales_user_auto') },
+          ...employees.filter((e) => e.ownerUserId).map((e) => ({ value: e.ownerUserId, label: e.fullName })),
+        ],
+      });
+    }
+    fields.push(
+      { key: 'interestedInType', label: t(locale, 'crm_lead_field_interested_in_type'), type: 'select', options: leadInterestOptions(locale) },
+      { key: 'interestedInLabel', label: t(locale, 'crm_lead_field_interested_in_label') },
+      { key: 'budgetMin', label: t(locale, 'crm_lead_field_budget_min'), type: 'number' },
+      { key: 'budgetMax', label: t(locale, 'crm_lead_field_budget_max'), type: 'number' },
+      { key: 'preferredLocation', label: t(locale, 'crm_lead_field_location') },
+      { key: 'stageId', label: t(locale, 'crm_lead_field_status'), type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: defaultStage?.id },
+      { key: 'notes', label: t(locale, 'crm_lead_field_notes_optional'), type: 'textarea' },
+    );
+
     const result = await formModal({
       title: t(locale, 'crm_lead_modal_title'),
-      fields: [
-        { key: 'fullName', label: t(locale, 'crm_lead_field_full_name') },
-        { key: 'phone', label: t(locale, 'crm_lead_field_mobile') },
-        { key: 'email', label: t(locale, 'crm_lead_field_email_optional') },
-        { key: 'nationalId', label: t(locale, 'crm_lead_field_national_id') },
-        { key: 'sourceId', label: t(locale, 'crm_lead_field_source') },
-        { key: 'stageId', label: t(locale, 'crm_lead_field_initial_stage'), type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: defaultStage?.id },
-        { key: 'priority', label: t(locale, 'crm_col_priority'), type: 'select', options: priorityOptions(locale) },
-        { key: 'tags', label: t(locale, 'crm_lead_field_tags_optional') },
-        { key: 'notes', label: t(locale, 'crm_lead_field_notes_optional'), type: 'textarea' },
-      ],
+      fields,
       submitLabel: t(locale, 'crm_lead_submit_add'),
     });
     if (!result) return;
@@ -462,27 +545,46 @@ export async function renderCrm(container) {
       reportError(new Error(t(locale, 'crm_lead_validation_required')));
       return;
     }
-    try {
-      const lead = await api.post('/api/crm/leads', {
-        fullName: result.fullName.trim(),
-        phone: result.phone.trim(),
-        email: result.email.trim() || undefined,
-        nationalId: result.nationalId.trim() || undefined,
-        sourceId: result.sourceId.trim() || undefined,
-        stageId: result.stageId || undefined,
-        priority: result.priority || undefined,
-        tags: result.tags.trim() ? result.tags.split(',').map((t) => t.trim()).filter(Boolean) : undefined,
-      });
-      if (result.notes.trim()) {
-        await api.post('/api/communication/messages', {
-          subject: 'Note', body: result.notes.trim(), channel: 'note', relatedResource: 'lead', relatedResourceId: lead.id,
-        }).catch(() => {}); // the lead itself is already saved — a failed note shouldn't look like a failed lead creation
+
+    async function createLead() {
+      try {
+        const lead = await api.post('/api/crm/leads', {
+          fullName: result.fullName.trim(),
+          phone: result.phone.trim(),
+          source: result.source || undefined,
+          ownerEmployeeUserId: result.ownerEmployeeUserId || undefined,
+          stageId: result.stageId || undefined,
+          interestedInType: result.interestedInType || undefined,
+          interestedInLabel: result.interestedInLabel.trim() || undefined,
+          budgetMin: result.budgetMin ? Number(result.budgetMin) : undefined,
+          budgetMax: result.budgetMax ? Number(result.budgetMax) : undefined,
+          preferredLocation: result.preferredLocation.trim() || undefined,
+        });
+        if (result.notes.trim()) {
+          await api.post('/api/communication/messages', {
+            subject: 'Note', body: result.notes.trim(), channel: 'note', relatedResource: 'lead', relatedResourceId: lead.id,
+          }).catch(() => {}); // the lead itself is already saved — a failed note shouldn't look like a failed lead creation
+        }
+        toast(`${t(locale, 'crm_lead_added_toast_prefix')} "${stages.find((s) => s.id === lead.stageId)?.name || t(locale, 'crm_lead_added_fallback_stage')}".`, 'success');
+        await refreshAll();
+      } catch (err) {
+        reportError(err);
       }
-      toast(`${t(locale, 'crm_lead_added_toast_prefix')} "${stages.find((s) => s.id === lead.stageId)?.name || t(locale, 'crm_lead_added_fallback_stage')}".`, 'success');
-      await refreshAll();
-    } catch (err) {
-      reportError(err);
     }
+
+    try {
+      const { duplicate } = await api.get('/api/crm/leads/check-duplicate', { phone: result.phone.trim() });
+      if (duplicate) {
+        const choice = await confirmDuplicateWarning(duplicate);
+        if (choice === 'view') { openLeadDetail(duplicate, refreshAll); return; }
+        if (choice !== 'create') return; // cancelled — leave it to the rep to re-open Add Lead if they want to retry
+      }
+    } catch {
+      // The duplicate pre-check is just a UX nicety — if it fails, fall
+      // through to create; CrmService.createLead enforces the same
+      // phone-uniqueness rule server-side regardless.
+    }
+    await createLead();
   }
 
   // ---- Move stage ----
@@ -693,6 +795,7 @@ export async function renderCrm(container) {
         score ? el('span', { class: 'muted' }, `${t(locale, 'crm_lead_score_prefix')} ${score.score}/100`) : null,
         el('span', { class: 'muted' }, lead.phone),
         lead.email ? el('span', { class: 'muted' }, lead.email) : null,
+        el('span', { class: 'muted' }, `${t(locale, 'crm_lead_created_at_prefix')} ${new Date(lead.createdAt).toLocaleString(locale === 'ar' ? 'ar-EG' : 'en-US')}`),
       ]);
       body.appendChild(header);
 
@@ -1010,6 +1113,13 @@ export async function renderCrm(container) {
     const result = await formModal({
       title: `${t(locale, 'crm_requirements_modal_title_prefix')} ${lead.fullName}`,
       fields: [
+        { key: 'fullName', label: t(locale, 'crm_lead_field_full_name'), value: lead.fullName },
+        { key: 'phone', label: t(locale, 'crm_lead_field_mobile'), value: lead.phone },
+        { key: 'source', label: t(locale, 'crm_lead_field_source'), type: 'select', options: leadSourceOptions(locale), value: lead.source },
+        { key: 'interestedInType', label: t(locale, 'crm_lead_field_interested_in_type'), type: 'select', options: leadInterestOptions(locale), value: lead.interestedInType },
+        { key: 'interestedInLabel', label: t(locale, 'crm_lead_field_interested_in_label'), value: lead.interestedInLabel },
+        { key: 'budgetMin', label: t(locale, 'crm_lead_field_budget_min'), type: 'number', value: lead.budgetMin },
+        { key: 'budgetMax', label: t(locale, 'crm_lead_field_budget_max'), type: 'number', value: lead.budgetMax },
         { key: 'propertyTypeWanted', label: t(locale, 'crm_req_property_type_field'), placeholder: t(locale, 'crm_req_property_type_placeholder'), value: lead.propertyTypeWanted },
         { key: 'purchaseGoal', label: t(locale, 'crm_req_purchase_goal_field'), placeholder: t(locale, 'crm_req_purchase_goal_placeholder'), value: lead.purchaseGoal },
         { key: 'preferredLocation', label: t(locale, 'crm_req_location_field'), placeholder: t(locale, 'crm_req_location_placeholder'), value: lead.preferredLocation },
@@ -1024,9 +1134,20 @@ export async function renderCrm(container) {
       submitLabel: t(locale, 'crm_requirements_submit'),
     });
     if (!result) return;
+    if (!result.fullName.trim() || !result.phone.trim()) {
+      reportError(new Error(t(locale, 'crm_lead_validation_required')));
+      return;
+    }
     const numeric = (v) => (v.trim() === '' ? undefined : Number(v));
     try {
       await api.patch(`/api/crm/leads/${lead.id}/details`, {
+        fullName: result.fullName.trim(),
+        phone: result.phone.trim(),
+        source: result.source || undefined,
+        interestedInType: result.interestedInType || undefined,
+        interestedInLabel: result.interestedInLabel.trim() || undefined,
+        budgetMin: numeric(result.budgetMin),
+        budgetMax: numeric(result.budgetMax),
         propertyTypeWanted: result.propertyTypeWanted.trim() || undefined,
         purchaseGoal: result.purchaseGoal.trim() || undefined,
         preferredLocation: result.preferredLocation.trim() || undefined,
@@ -1112,6 +1233,7 @@ export async function renderCrm(container) {
   }
 
   try {
+    await loadEmployees();
     await refreshAll();
   } catch (err) {
     clear(bodySlot);

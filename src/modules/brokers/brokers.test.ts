@@ -227,7 +227,11 @@ test('approving a broker lead with a duplicate phone is rejected, not merged', a
   assert.equal(leads.length, 1); // still just the original, not merged or duplicated
 });
 
-test('approving a broker lead with a duplicate national ID (different phone/email) is rejected, not merged', async () => {
+// The Lead Form Redesign dropped National ID from duplicate detection
+// system-wide (only normalized phone/email are checked now) — broker lead
+// approval reuses CrmService.createLead's dedup, so a shared nationalId
+// alone no longer blocks it either.
+test('approving a broker lead with only a matching national ID (different phone/email) is allowed, not treated as a duplicate', async () => {
   const { svc, crm } = await freshService();
   const company = await svc.registerBrokerCompany({ companyId: 'c1', name: 'Acme Brokers' });
   await svc.approveBrokerCompany(company.id, 'c1');
@@ -237,15 +241,15 @@ test('approving a broker lead with a duplicate national ID (different phone/emai
     companyId: 'c1',
     brokerCompanyId: company.id,
     submittedByUserId: 'broker-user-1',
-    fullName: 'Same client, fake details',
+    fullName: 'Different client, same national ID',
     phone: '0999',
     email: 'fake@x.com',
     nationalId: 'NID-1',
   });
-  await assert.rejects(() => svc.approveBrokerLead(brokerLead.id, 'c1', 'internal-user-1'));
+  await svc.approveBrokerLead(brokerLead.id, 'c1', 'internal-user-1');
 
   const leads = await crm.listForScope({ kind: 'company', companyId: 'c1' }, async () => ({}));
-  assert.equal(leads.length, 1);
+  assert.equal(leads.length, 2);
 });
 
 test('commission rate resolution: a broker-specific rule takes precedence over the company default', async () => {
