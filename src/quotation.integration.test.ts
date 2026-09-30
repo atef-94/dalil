@@ -187,7 +187,7 @@ test('sending an Offer via WhatsApp generates a real PDF, sends it as a document
       // Shows up on the lead's own timeline, not hidden under 'quotation'.
       const timeline = await call(base, 'GET', `/api/crm/leads/${leadId}/timeline`, undefined, headers);
       assert.equal(timeline.status, 200);
-      const entries = (timeline.body as { entries: { type: string; summary: string }[] }).entries;
+      const entries = (timeline.body as { items: { type: string; summary: string }[] }).items;
       assert.ok(entries.some((e) => e.type === 'message' && /Offer/.test(e.summary)));
     });
   } finally {

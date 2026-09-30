@@ -27,6 +27,15 @@ export interface CreateImportSessionInput {
    * with the last non-blank value seen above it in the same column, which
    * is exactly what a merged cell visually means. */
   fillDownBlankCells?: boolean;
+  /** Restricts fillDownBlankCells to only the raw columns that map onto one
+   * of these target field keys (e.g. ['projectName', 'developerName',
+   * 'phaseName', 'destination'] for a project catalog) — a numeric or
+   * status field must never inherit the row above it (a blank Price/BUA/
+   * Garden/Bedrooms cell means "not supplied", not "same as last row"), so
+   * Inventory Import always passes this. Omitted (the default) fills down
+   * every column, unchanged — the original behavior Lead/Payment Import
+   * still rely on, where every column really is hierarchical/repeated. */
+  hierarchicalFieldKeys?: string[];
   /** A real broker/developer portfolio export commonly puts one project per
    * worksheet tab (e.g. sheets named "Stayn", "Connect4", "Jiran", ...)
    * instead of one flat table with a Project column — parseXlsx alone only
@@ -43,12 +52,16 @@ export interface CreateImportSessionInput {
 
 /** A blank cell in a merged-cell export means "same as the value above" —
  * replaces it with the nearest non-blank value seen so far in that column.
- * A column that is genuinely blank throughout stays blank. */
-function fillDownBlanks(headers: string[], rows: Record<string, string>[]): Record<string, string>[] {
+ * A column that is genuinely blank throughout stays blank. `allowedHeaders`,
+ * when given, restricts this to only those columns (see
+ * hierarchicalFieldKeys on CreateImportSessionInput) — every other column
+ * is left exactly as read. */
+function fillDownBlanks(headers: string[], rows: Record<string, string>[], allowedHeaders?: Set<string>): Record<string, string>[] {
   const lastSeen: Record<string, string> = {};
   return rows.map((row) => {
     const filled: Record<string, string> = { ...row };
     for (const header of headers) {
+      if (allowedHeaders && !allowedHeaders.has(header)) continue;
       const value = filled[header];
       if (value !== undefined && value.trim() !== '') {
         lastSeen[header] = value;
@@ -86,6 +99,7 @@ export class ImportSessionService {
     let headers: string[];
     let rows: Record<string, string>[];
     let reliable = true;
+    let formulaErrors: string[] = [];
 
     if (fileType === 'csv') {
       rows = parseCsvRecords(input.fileBuffer.toString('utf8'));
@@ -113,6 +127,9 @@ export class ImportSessionService {
       const headerSet = new Set<string>([projectColumn]);
       rows = [];
       for (const sheet of sheets) {
+        if (sheet.formulaErrors.length > 0) {
+          formulaErrors.push(...sheet.formulaErrors.map((e) => `sheet "${sheet.sheetName}", ${e}`));
+        }
         const sheetMapping = suggestMapping(sheet.headers, input.fields);
         const renameHeader = new Map<string, string>();
         for (const header of sheet.headers) {
@@ -140,6 +157,7 @@ export class ImportSessionService {
       const parsed = await parseXlsx(input.fileBuffer, input.fields);
       headers = parsed.headers;
       rows = parsed.rows;
+      formulaErrors = parsed.formulaErrors;
     } else {
       const parsed = await parsePdfTable(input.fileBuffer);
       headers = parsed.headers;
@@ -156,7 +174,16 @@ export class ImportSessionService {
       );
     }
     if (input.fillDownBlankCells) {
-      rows = fillDownBlanks(headers, rows);
+      let allowedHeaders: Set<string> | undefined;
+      if (input.hierarchicalFieldKeys?.length) {
+        const mapping = suggestMapping(headers, input.fields);
+        allowedHeaders = new Set(
+          Object.entries(mapping)
+            .filter(([, fieldKey]) => fieldKey && input.hierarchicalFieldKeys!.includes(fieldKey))
+            .map(([header]) => header),
+        );
+      }
+      rows = fillDownBlanks(headers, rows, allowedHeaders);
     }
 
     const now = Date.now();
@@ -172,6 +199,7 @@ export class ImportSessionService {
       suggestedMapping: suggestMapping(headers, input.fields),
       rawRows: rows,
       reliable,
+      formulaErrors: formulaErrors.length > 0 ? formulaErrors : undefined,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + SESSION_TTL_MS).toISOString(),
     };

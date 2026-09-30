@@ -8,6 +8,7 @@ import { TaskService } from '../tasks/task.service.js';
 import { CommunicationService } from '../communication/communication.service.js';
 import { CrmService } from '../crm/crm.service.js';
 import { CrmStageService } from '../crm/crm-stage.service.js';
+import { normalizePhone } from '../../infra/phone.js';
 import { MarketingService } from '../marketing/marketing.service.js';
 import { OperationsService } from '../operations/operations.service.js';
 import { HrService } from '../hr/hr.service.js';
@@ -126,10 +127,10 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
-  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, new InMemoryRepository<Project>(), paymentPlans);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
   const legal = new LegalService(legalDocuments, contracts);
-  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm);
+  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm, contracts, reservations);
   const analytics = new AnalyticsService(leads, opportunities, contracts, scheduleLines, units, commissions, auditLogRepo, campaigns, crmStages);
 
   const automation = new AutomationService(
@@ -964,7 +965,7 @@ test('sales agent reaches out via a connected WhatsApp integration instead of on
 
   assert.equal(decision.chosenActionType, 'integration_call');
   assert.equal(decision.params?.provider, 'whatsapp');
-  assert.equal(decision.params?.to, '0100');
+  assert.equal(decision.params?.to, normalizePhone('0100'));
   assert.equal(decision.status, 'proceeded');
   assert.equal(h.integrationFetchCalls.length, 1);
   assert.match(h.integrationFetchCalls[0]!.url, /graph\.facebook\.com/);

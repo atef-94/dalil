@@ -10,11 +10,11 @@ export function renderLogin(container, { onSuccess }, initialMode = 'login') {
 
   const errorSlot = el('div');
 
-  const companyId = el('input', { type: 'text', placeholder: 'Company ID', value: getSavedCompanyId() });
-  const email = el('input', { type: 'email', placeholder: 'you@company.com' });
+  const companyId = el('input', { type: 'text', placeholder: t(locale, 'field_company_id'), value: getSavedCompanyId() });
+  const email = el('input', { type: 'email', placeholder: t(locale, 'login_email_placeholder') });
   const password = el('input', { type: 'password', placeholder: '••••••••' });
-  const companyName = el('input', { type: 'text', placeholder: 'Acme Real Estate' });
-  const fullName = el('input', { type: 'text', placeholder: 'Your full name' });
+  const companyName = el('input', { type: 'text', placeholder: t(locale, 'signup_company_name_placeholder') });
+  const fullName = el('input', { type: 'text', placeholder: t(locale, 'field_full_name') });
 
   const companyIdLabel = el('label', {}, t(locale, 'field_company_id'));
   const emailLabel1 = el('label', {}, t(locale, 'field_email'));
@@ -28,8 +28,8 @@ export function renderLogin(container, { onSuccess }, initialMode = 'login') {
     password,
   ]);
 
-  const signupEmail = el('input', { type: 'email', placeholder: 'you@company.com' });
-  const signupPassword = el('input', { type: 'password', placeholder: 'At least 8 characters' });
+  const signupEmail = el('input', { type: 'email', placeholder: t(locale, 'login_email_placeholder') });
+  const signupPassword = el('input', { type: 'password', placeholder: t(locale, 'crm_portal_password_placeholder') });
   const orgNameLabel = el('label', {}, t(locale, 'field_org_name'));
   const fullNameLabel = el('label', {}, t(locale, 'field_full_name'));
   const emailLabel2 = el('label', {}, t(locale, 'field_email'));

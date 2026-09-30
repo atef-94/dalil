@@ -5,6 +5,11 @@ import { suggestMapping, type ImportFieldDef } from './field-mapping.js';
 export interface ParsedSheet {
   headers: string[];
   rows: Record<string, string>[];
+  /** One entry per formula-error cell found (e.g. "#REF!", "#DIV/0!") in a
+   * data row — these are always read as blank in the row itself (never
+   * treated as legitimate data), and reported here instead so the importer
+   * can flag the affected row rather than silently losing the problem. */
+  formulaErrors: string[];
 }
 
 /** Counts how many of a candidate row's cells would map onto a real target
@@ -50,6 +55,18 @@ function detectHeaderRowIndex(candidateRows: string[][], fields?: ImportFieldDef
   return bestIndex;
 }
 
+/** A formula-error cell's exceljs value shape is `{error: '#REF!'}` (or
+ * nested inside `{formula, result: {error: '#REF!'}}`) — detected
+ * separately from cellToString so a caller can report it as a real problem
+ * instead of it silently disappearing into an empty string. */
+function cellFormulaError(value: unknown): string | undefined {
+  if (value === null || value === undefined || typeof value !== 'object') return undefined;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.error === 'string') return obj.error;
+  if (obj.result !== undefined) return cellFormulaError(obj.result);
+  return undefined;
+}
+
 function cellToString(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -78,6 +95,7 @@ function cellToString(value: unknown): string {
  * export shape) are built from. */
 function parseWorksheet(sheet: ExcelJS.Worksheet, fields?: ImportFieldDef[]): ParsedSheet {
   const allRows: string[][] = [];
+  const allRowErrors: (string | undefined)[][] = [];
   sheet.eachRow({ includeEmpty: false }, (row) => {
     const values = row.values as unknown[]; // exceljs pads index 0; real cells start at 1
     // A row whose trailing/middle cells were never touched (no value, no
@@ -90,25 +108,37 @@ function parseWorksheet(sheet: ExcelJS.Worksheet, fields?: ImportFieldDef[]): Pa
     // the row explicitly by index instead, so every position — hole or not
     // — becomes a real string via cellToString(undefined) === ''.
     const cells: string[] = [];
-    for (let i = 1; i < values.length; i++) cells.push(cellToString(values[i]));
+    const errors: (string | undefined)[] = [];
+    for (let i = 1; i < values.length; i++) {
+      cells.push(cellToString(values[i]));
+      errors.push(cellFormulaError(values[i]));
+    }
     allRows.push(cells);
+    allRowErrors.push(errors);
   });
-  if (allRows.length === 0) return { headers: [], rows: [] };
+  if (allRows.length === 0) return { headers: [], rows: [], formulaErrors: [] };
 
   const headerRowIndex = detectHeaderRowIndex(allRows, fields);
   const headers = (allRows[headerRowIndex] ?? []).map((c) => c.trim());
   const rows: Record<string, string>[] = [];
-  for (const cells of allRows.slice(headerRowIndex + 1)) {
+  const formulaErrors: string[] = [];
+  let dataRowNumber = 0;
+  for (let i = headerRowIndex + 1; i < allRows.length; i++) {
+    const cells = allRows[i]!;
     if (cells.every((c) => c.trim() === '')) continue; // skip fully blank rows
+    dataRowNumber += 1;
     const record: Record<string, string> = {};
+    const rowErrors = allRowErrors[i]!;
     headers.forEach((h, idx) => {
       if (!h) return;
       record[h] = (cells[idx] ?? '').trim();
+      const err = rowErrors[idx];
+      if (err) formulaErrors.push(`row ${dataRowNumber}, column "${h}": formula error (${err})`);
     });
     rows.push(record);
   }
 
-  return { headers: headers.filter(Boolean), rows };
+  return { headers: headers.filter(Boolean), rows, formulaErrors };
 }
 
 async function loadWorkbook(buffer: Buffer): Promise<ExcelJS.Workbook> {
@@ -144,7 +174,7 @@ async function loadWorkbook(buffer: Buffer): Promise<ExcelJS.Workbook> {
 export async function parseXlsx(buffer: Buffer, fields?: ImportFieldDef[]): Promise<ParsedSheet> {
   const workbook = await loadWorkbook(buffer);
   const sheet = workbook.worksheets.find((s) => s.rowCount > 0);
-  if (!sheet) return { headers: [], rows: [] };
+  if (!sheet) return { headers: [], rows: [], formulaErrors: [] };
   return parseWorksheet(sheet, fields);
 }
 

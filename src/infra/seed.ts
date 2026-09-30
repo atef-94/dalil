@@ -385,6 +385,25 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
 }
 
 /**
+ * Called instead of seedDemoData() when demo seeding is turned off
+ * (SEED_DEMO_DATA=false) on a deployment that already has a persisted
+ * "company-demo" from before the flag was flipped. Turning the flag off
+ * only stops *future* seeding/reconciliation — it does nothing about a
+ * demo login that was already created with the hardcoded, publicly
+ * documented password. This locks that login out by overwriting each demo
+ * user's passwordHash with a random value nobody (including this code)
+ * retains, without deleting the company or its data. Idempotent and a
+ * no-op if company-demo was never created.
+ */
+export async function lockDemoData(repos: Pick<SeedRepos, 'users'>): Promise<void> {
+  const companyId = 'company-demo';
+  const demoUsers = await repos.users.findAll((u) => u.companyId === companyId);
+  for (const user of demoUsers) {
+    await repos.users.save({ ...user, passwordHash: hashPassword(randomUUID()) });
+  }
+}
+
+/**
  * The demo company's role grants are otherwise only ever set up once (see
  * the fresh-creation path above) — a deployment that already had a
  * persisted "company-demo" before crm_stage/task/message grants existed

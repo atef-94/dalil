@@ -248,3 +248,141 @@ test('generateForContract does not leak an already-generated schedule to a diffe
   // would otherwise short-circuit on contractId alone.
   await assert.rejects(() => paymentPlans.generateForContract('shared-contract-id', 'other-company', template.id, 500_000));
 });
+
+// ---- Contract-signing atomicity regression (audit-fix: a Contract must
+// never be persisted with status 'signed' unless its payment schedule is
+// already known to generate successfully — see signContract's own comment
+// for the pre-flight-validate-before-write mechanism this locks in). ----
+
+async function setupReservationForAtomicityTest() {
+  const app = await freshApp();
+  const { crm, sales, inventory, paymentPlans } = app.services;
+  const companyId = app.seedResult!.companyId;
+  const agentUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Sales Agent')!.userId;
+
+  const lead = await crm.createLead({ companyId, fullName: 'Atomicity Test Client', phone: '0555-0099', ownerEmployeeUserId: agentUserId });
+  const opportunity = await sales.createOpportunity({ companyId, leadId: lead.id, ownerEmployeeUserId: agentUserId });
+  const unit = await inventory.createUnit({ companyId, projectId: 'proj-1', code: 'ATOMIC-1', unitType: 'apartment', areaSqm: 120, listPrice: 800_000 });
+  const reservation = await sales.reserveUnitForOpportunity(opportunity.id, unit.id, companyId);
+  const template = await paymentPlans.createTemplate({
+    companyId,
+    name: 'Atomicity Test Plan',
+    downPaymentType: 'percentage',
+    downPaymentValue: 10,
+    frequency: 'monthly',
+    termMonths: 12,
+    fees: [],
+  });
+  return { app, companyId, agentUserId, unit, reservation, template };
+}
+
+test('signContract rejects a non-positive totalPrice and leaves no Contract, unit, or reservation state changed', async () => {
+  const { app, companyId, agentUserId, unit, reservation, template } = await setupReservationForAtomicityTest();
+  const { sales, inventory } = app.services;
+
+  await assert.rejects(() =>
+    sales.signContract({
+      companyId,
+      reservationId: reservation.id,
+      creditedEmployeeUserId: agentUserId,
+      paymentPlanTemplateId: template.id,
+      totalPrice: -500,
+    }),
+  );
+
+  // No orphaned Contract: nothing to find for this reservation.
+  const contracts = await sales.listContracts(companyId);
+  assert.equal(contracts.filter((c) => c.reservationId === reservation.id).length, 0);
+
+  // The unit and reservation must be untouched — still exactly where they
+  // were before the failed sign attempt, not left in a broken in-between
+  // state.
+  const refreshedUnit = await inventory.getUnit(unit.id);
+  assert.equal(refreshedUnit!.status, 'reserved');
+  const refreshedReservation = await inventory.getReservation(reservation.id);
+  assert.equal(refreshedReservation!.status, 'active');
+});
+
+test('signContract rejects an out-of-range discountPercent and leaves no Contract, unit, or reservation state changed', async () => {
+  const { app, companyId, agentUserId, unit, reservation, template } = await setupReservationForAtomicityTest();
+  const { sales, inventory } = app.services;
+
+  await assert.rejects(() =>
+    sales.signContract({
+      companyId,
+      reservationId: reservation.id,
+      creditedEmployeeUserId: agentUserId,
+      paymentPlanTemplateId: template.id,
+      totalPrice: 800_000,
+      discountPercent: 150,
+    }),
+  );
+
+  const contracts = await sales.listContracts(companyId);
+  assert.equal(contracts.filter((c) => c.reservationId === reservation.id).length, 0);
+  const refreshedUnit = await inventory.getUnit(unit.id);
+  assert.equal(refreshedUnit!.status, 'reserved');
+  const refreshedReservation = await inventory.getReservation(reservation.id);
+  assert.equal(refreshedReservation!.status, 'active');
+});
+
+test('signContract still succeeds normally for a valid price/discount after the atomicity fix (no regression)', async () => {
+  const { app, companyId, agentUserId, reservation, template } = await setupReservationForAtomicityTest();
+  const { sales, paymentPlans } = app.services;
+
+  const contract = await sales.signContract({
+    companyId,
+    reservationId: reservation.id,
+    creditedEmployeeUserId: agentUserId,
+    paymentPlanTemplateId: template.id,
+    totalPrice: 800_000,
+    discountPercent: 5,
+  });
+
+  assert.equal(contract.status, 'signed');
+  const schedule = await paymentPlans.getScheduleForContract(contract.id, companyId);
+  assert.ok(schedule.length > 1);
+});
+
+test('signContract with an invalid totalPrice via real HTTP: API rejects it and no Contract is created', async () => {
+  const app = await freshApp();
+  const server = app.httpServer.listen(0);
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'Content-Type': 'application/json', 'x-demo-user': ceoUserId };
+    const call = async (method: string, path: string, body?: unknown) => {
+      const res = await fetch(`${base}${path}`, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+      const text = await res.text();
+      let parsed: unknown;
+      try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = text; }
+      return { status: res.status, body: parsed };
+    };
+
+    const suffix = `${Date.now()}`;
+    const project = await call('POST', '/api/inventory/projects', { name: `AtomicProj-${suffix}` });
+    const unit = await call('POST', '/api/inventory/units', { projectId: (project.body as { id: string }).id, code: `ATOMIC-HTTP-${suffix}`, listPrice: 900_000, unitType: 'apartment', areaSqm: 130 });
+    const template = await call('POST', '/api/payment-plan-templates', { name: `AtomicPlan-${suffix}`, downPaymentType: 'percentage', downPaymentValue: 10, frequency: 'monthly', termMonths: 12, fees: [] });
+    const lead = await call('POST', '/api/crm/leads', { fullName: 'HTTP Atomicity Client', phone: `0555-${suffix}` });
+    const opportunity = await call('POST', '/api/sales/opportunities', { leadId: (lead.body as { id: string }).id });
+    const reserve = await call('POST', `/api/sales/opportunities/${(opportunity.body as { id: string }).id}/reserve-unit`, { unitId: (unit.body as { id: string }).id });
+    const reservationId = (reserve.body as { id: string }).id;
+
+    const signAttempt = await call('POST', '/api/sales/contracts', {
+      reservationId,
+      paymentPlanTemplateId: (template.body as { id: string }).id,
+      totalPrice: 0,
+    });
+    assert.ok(signAttempt.status >= 400, `expected a 4xx rejection, got ${signAttempt.status}`);
+
+    const contractsAfter = await call('GET', '/api/sales/contracts');
+    const items = (contractsAfter.body as { items: Array<{ reservationId: string }> }).items;
+    assert.equal(items.filter((c) => c.reservationId === reservationId).length, 0);
+  } finally {
+    await app.httpServer.close();
+  }
+});

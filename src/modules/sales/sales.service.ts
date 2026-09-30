@@ -119,6 +119,17 @@ export class SalesService {
    * rejected. This closes a real race where N concurrent calls could each
    * pass the "does a contract exist" check before any of them had written
    * their Contract row.
+   *
+   * Atomicity: totalPrice/discountPercent/the resulting payment schedule
+   * are all validated via a no-side-effect pre-flight (paymentPlans.
+   * validateScheduleForContract) BEFORE the Contract row is ever written —
+   * this repository layer has no cross-entity DB transaction, so the only
+   * way to guarantee a signed Contract never exists without a valid
+   * schedule is to fail before the first write happens. As a second layer
+   * of protection against a failure in the (now-guaranteed-to-succeed,
+   * but still fallible on e.g. a storage error) steps after the save, the
+   * Contract row itself is rolled back (deleted) if anything after it
+   * throws, so a signed Contract can never be left orphaned mid-sequence.
    */
   async signContract(input: SignContractInput): Promise<Contract> {
     return this.signMutex.runExclusive(input.reservationId, async () => {
@@ -132,6 +143,16 @@ export class SalesService {
       if (reservation.status !== 'active') {
         throw new SalesError(`reservation is not active (current status: ${reservation.status})`);
       }
+
+      // Pre-flight: throws before anything is written if totalPrice,
+      // discountPercent, or the resulting schedule don't validate.
+      await this.paymentPlans.validateScheduleForContract(
+        input.paymentPlanTemplateId,
+        input.companyId,
+        input.totalPrice,
+        input.discountPercent,
+        input.escalationPercentPerYear,
+      );
 
       const contract: Contract = {
         id: randomUUID(),
@@ -149,23 +170,31 @@ export class SalesService {
       };
       await this.contracts.save(contract);
 
-      await this.paymentPlans.generateForContract(
-        contract.id,
-        input.companyId,
-        input.paymentPlanTemplateId,
-        input.totalPrice,
-        input.discountPercent,
-        input.escalationPercentPerYear,
-      );
+      try {
+        await this.paymentPlans.generateForContract(
+          contract.id,
+          input.companyId,
+          input.paymentPlanTemplateId,
+          input.totalPrice,
+          input.discountPercent,
+          input.escalationPercentPerYear,
+        );
 
-      await this.inventory.markContracted(reservation.unitId);
-      await this.inventory.markReservationConverted(reservation.id);
+        await this.inventory.markContracted(reservation.unitId);
+        await this.inventory.markReservationConverted(reservation.id);
 
-      if (reservation.opportunityId) {
-        const opportunity = await this.opportunities.findById(reservation.opportunityId);
-        if (opportunity) {
-          await this.opportunities.save({ ...opportunity, stage: 'won' });
+        if (reservation.opportunityId) {
+          const opportunity = await this.opportunities.findById(reservation.opportunityId);
+          if (opportunity) {
+            await this.opportunities.save({ ...opportunity, stage: 'won' });
+          }
         }
+      } catch (err) {
+        // Roll back the Contract row rather than leave a signed contract
+        // with no schedule / unit still open / reservation still active —
+        // the invariant this whole method exists to protect.
+        await this.contracts.deleteById(contract.id);
+        throw err;
       }
 
       return contract;

@@ -1,7 +1,12 @@
 import { randomBytes, scryptSync, timingSafeEqual, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
 
 const SCRYPT_KEYLEN = 64;
-const TOKEN_TTL_SECONDS = 15 * 60; // 15-minute token TTL
+// A flat, non-refreshable TTL (no refresh-token flow exists) — long enough
+// to cover a normal work session without forcing a re-login mid-task. The
+// previous 15-minute value silently broke every screen after a short idle
+// gap: the frontend clears the token on any 401 but had no re-auth prompt,
+// so a mid-session expiry looked like random features "not working".
+const TOKEN_TTL_SECONDS = 12 * 60 * 60; // 12-hour token TTL
 
 // ---- Password hashing (scrypt, Node's built-in KDF) ----
 

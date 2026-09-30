@@ -70,6 +70,18 @@ const ICONS = {
   warning: '<path d="M12 3l9 16H3z"/><line x1="12" y1="10" x2="12" y2="14"/>',
   lock: '<rect x="6" y="11" width="12" height="9" rx="1.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   inbox: '<path d="M4 12h4l2 3h4l2-3h4"/><path d="M4 12l1.5-7h13L20 12"/><rect x="4" y="12" width="16" height="7" rx="1.5"/>',
+  heart: '<path d="M12 20s-7-4.4-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 5c-2.5 4.6-9.5 9-9.5 9z"/>',
+  heartFilled: '<path d="M12 20s-7-4.4-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 5c-2.5 4.6-9.5 9-9.5 9z" fill="currentColor" stroke="none"/>',
+  share: '<circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><line x1="8.3" y1="10.7" x2="15.7" y2="6.3"/><line x1="8.3" y1="13.3" x2="15.7" y2="17.7"/>',
+  compare: '<path d="M8 3v18M16 3v18"/><path d="M4 8h4M16 8h4M4 16h4M16 16h4"/>',
+  pin: '<path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.4"/>',
+  mapView: '<path d="M9 4l6 2 5-2v15l-5 2-6-2-5 2V6z"/><line x1="9" y1="4" x2="9" y2="19"/><line x1="15" y1="6" x2="15" y2="21"/>',
+  grid: '<rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/>',
+  chevronDown: '<polyline points="6 9 12 15 18 9"/>',
+  phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2C9.5 21 3 14.5 3 6a2 2 0 0 1 2-2z"/>',
+  whatsapp: '<path d="M12 3a9 9 0 0 0-7.8 13.5L3 21l4.6-1.2A9 9 0 1 0 12 3z"/><path d="M8.5 8.3c.2-.5.4-.5.6-.5h.5c.2 0 .4 0 .6.5.2.5.7 1.7.7 1.9s0 .3-.2.5l-.5.6c-.1.2-.3.3-.1.6.2.4.9 1.3 1.9 2.1 1.3 1 1.7 1.1 2 1.2.2 0 .4 0 .5-.2l.6-.8c.2-.3.4-.2.6-.1l1.6.8c.2.1.4.2.4.4 0 .8-.3 1.6-1.4 2-1 .4-2.2.4-3.6-.2-2.9-1.2-4.8-4-5-4.3-.2-.3-1.3-1.8-1.3-3.4s.8-2.4 1.1-2.7z" fill="currentColor" stroke="none"/>',
+  folder: '<path d="M4 6a1.5 1.5 0 0 1 1.5-1.5h4l2 2h7A1.5 1.5 0 0 1 20 8v9.5A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5z"/>',
+  calendar: '<rect x="4" y="5" width="16" height="15" rx="1.5"/><line x1="4" y1="9.5" x2="20" y2="9.5"/><line x1="8" y1="3" x2="8" y2="6.5"/><line x1="16" y1="3" x2="16" y2="6.5"/>',
 };
 
 export function icon(name, cls = '') {
@@ -150,14 +162,87 @@ export function tabs(items, activeKey, onSelect) {
   return wrap;
 }
 
+/** A collapsible section — a title row with a chevron that toggles a
+ * content area's visibility. `contentNode` is built once by the caller
+ * (its own state/listeners persist across collapse/expand, unlike a
+ * popover which rebuilds fresh each open). `defaultOpen` controls the
+ * initial state; nothing here forces the content to be re-fetched or
+ * re-rendered on toggle — that stays entirely in the caller's hands. */
+export function collapsible(title, contentNode, { defaultOpen = false } = {}) {
+  let open = defaultOpen;
+  const chevron = icon('chevronDown', 'collapsible-chevron');
+  const headerRow = el('div', { class: 'collapsible-header', role: 'button', tabindex: '0' }, [
+    el('span', { class: 'collapsible-title' }, title),
+    chevron,
+  ]);
+  const wrap = el('div', { class: 'collapsible' }, [headerRow, contentNode]);
+  function render() {
+    wrap.classList.toggle('open', open);
+    contentNode.style.display = open ? '' : 'none';
+  }
+  function toggle() { open = !open; render(); }
+  headerRow.addEventListener('click', toggle);
+  headerRow.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  render();
+  return wrap;
+}
+
+/** A horizontally-scrollable strip (developer logos, banner cards, filter
+ * chips) — just a styled flex row with its own scrollbar; children are
+ * pre-built nodes so callers stay in control of what's inside each item. */
+export function scrollRow(items, { className = '' } = {}) {
+  return el('div', { class: `scroll-row ${className}`.trim() }, items);
+}
+
+/** A small toggle button for a binary icon state (favorite heart, etc).
+ * `active` controls which icon/style shows; the caller owns state and is
+ * responsible for re-rendering after onClick resolves. */
+export function iconToggleButton(iconName, iconNameActive, { active = false, onClick, ariaLabel } = {}) {
+  const btn = el('button', { class: `icon-btn toggle-btn${active ? ' active' : ''}`, type: 'button', 'aria-label': ariaLabel, 'aria-pressed': String(active) }, icon(active ? iconNameActive : iconName));
+  if (onClick) btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(e); });
+  return btn;
+}
+
+/** An anchored popover: `trigger` toggles a floating panel built fresh
+ * each open by `buildContent(close)`. Closes on outside click/Escape/a
+ * second trigger click. Used for filter chips (sort/price/rooms/type). */
+export function popover(trigger, buildContent) {
+  const wrap = el('div', { class: 'popover-wrap' }, [trigger]);
+  let panel = null;
+  function close() {
+    if (!panel) return;
+    panel.remove();
+    panel = null;
+    document.removeEventListener('mousedown', onOutside);
+    document.removeEventListener('keydown', onKeydown);
+  }
+  function onOutside(e) {
+    if (panel && !wrap.contains(e.target)) close();
+  }
+  function onKeydown(e) {
+    if (e.key === 'Escape') close();
+  }
+  function open() {
+    if (panel) { close(); return; }
+    panel = el('div', { class: 'popover-panel' }, buildContent(close));
+    wrap.appendChild(panel);
+    document.addEventListener('mousedown', onOutside);
+    document.addEventListener('keydown', onKeydown);
+  }
+  trigger.addEventListener('click', (e) => { e.stopPropagation(); open(); });
+  return wrap;
+}
+
 /** A KPI stat card with an optional icon and trend indicator. Pass
  * `onClick` to make the whole card an interactive entry point (e.g. a
  * pipeline stage card that drills into that stage's list) — omit it for a
- * plain, non-interactive stat. */
-export function statCard({ label, value, iconName, trend, onClick }) {
+ * plain, non-interactive stat. `tone` ('purple'|'teal'|'green'|'amber'|
+ * 'pink', default brand blue) only changes the icon chip's color, purely
+ * cosmetic — every value/label/click behavior is unchanged. */
+export function statCard({ label, value, iconName, trend, onClick, tone }) {
   const top = el('div', { class: 'stat-top' }, [
     el('div', { class: 'value' }, String(value)),
-    iconName ? el('div', { class: 'icon-wrap' }, icon(iconName)) : null,
+    iconName ? el('div', { class: `icon-wrap${tone ? ` tone-${tone}` : ''}` }, icon(iconName)) : null,
   ]);
   const children = [top, el('div', { class: 'label' }, label)];
   if (trend) children.push(el('div', { class: `trend ${trend.direction || ''}` }, trend.text));
@@ -192,8 +277,33 @@ const STATUS_COLORS = {
   pending: 'amber', upcoming: 'amber', held: 'amber', reserved: 'amber', pending_approval: 'amber', new: 'blue', open: 'blue',
   overdue: 'red', lost: 'red', rejected: 'red', cancelled: 'red', suspended: 'red', terminated: 'red', rejected_duplicate: 'red', rejected_other: 'red', failed: 'red',
 };
+// Maps every raw backend enum value that flows through statusBadge() (unit/
+// lead/contract/approval/workflow/ticket status, priority, commission tier,
+// message channel, etc.) to its i18n key, so the badge shows a translated
+// label instead of the raw English/snake_case value while the value itself
+// (passed to/received from the API) never changes.
+const STATUS_LABEL_KEYS = {
+  active: 'status_active', approved: 'status_approved', paid: 'status_paid', won: 'status_won', signed: 'status_signed',
+  converted: 'status_converted', verified: 'status_verified', pending: 'status_pending', upcoming: 'status_upcoming',
+  held: 'status_held', reserved: 'status_reserved', pending_approval: 'status_pending_approval', new: 'status_new',
+  open: 'status_open', overdue: 'status_overdue', lost: 'status_lost', rejected: 'status_rejected', cancelled: 'status_cancelled',
+  suspended: 'status_suspended', terminated: 'status_terminated', rejected_duplicate: 'status_rejected_duplicate',
+  rejected_other: 'status_rejected_other', failed: 'status_failed', draft: 'status_draft', generated: 'status_generated',
+  sent: 'status_sent', accepted: 'status_accepted', expired: 'status_expired', available: 'status_available',
+  contracted: 'status_contracted', qualified: 'status_qualified', opportunity: 'status_opportunity', contacted: 'status_contacted',
+  fulfilled: 'status_fulfilled', planned: 'status_planned', completed: 'status_completed', read: 'status_read',
+  done: 'status_done', uploaded: 'status_uploaded', mapped: 'status_mapped', confirmed: 'status_confirmed',
+  archived: 'status_archived', running: 'status_running', waiting_approval: 'status_waiting_approval',
+  extracted: 'status_extracted', blocked: 'status_blocked', reviewed: 'status_reviewed', imported: 'status_imported',
+  declined: 'status_declined', due: 'status_due',
+  low: 'crm_priority_low', medium: 'crm_priority_medium', high: 'crm_priority_high', urgent: 'crm_priority_urgent',
+  base: 'status_tier_base', override: 'status_tier_override',
+  internal: 'crm_channel_internal', email: 'crm_channel_email', whatsapp: 'crm_channel_whatsapp',
+  sms: 'crm_channel_sms', call: 'crm_channel_call', note: 'crm_channel_note',
+};
 export function statusBadge(status) {
-  return badge(status, STATUS_COLORS[status] || '');
+  const key = STATUS_LABEL_KEYS[status];
+  return badge(key ? tt(key) : status, STATUS_COLORS[status] || '');
 }
 
 export function table(columns, rows, { empty = tt('common_no_records'), emptyIcon = 'inbox' } = {}) {
@@ -291,7 +401,7 @@ export function confirmModal(message, { confirmLabel = tt('common_confirm'), can
     const body = el('div', {}, [
       el('p', { style: 'margin:0 0 18px' }, message),
     ]);
-    const { close } = openModalShell('Please confirm', body);
+    const { close } = openModalShell(tt('common_please_confirm'), body);
     const cancelBtn = el('button', {}, cancelLabel);
     const confirmBtn = el('button', { class: danger ? 'danger' : 'primary' }, confirmLabel);
     cancelBtn.addEventListener('click', () => { close(); resolve(false); });

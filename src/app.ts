@@ -30,6 +30,8 @@ import type {
   Employee,
   Lead,
   LeadDistributionPool,
+  LeadInterestType,
+  LeadSourceChannel,
   LeaveRequest,
   LegalDocument,
   MaintenanceTicket,
@@ -47,6 +49,8 @@ import type {
   Facility,
   Consultant,
   SalesPhoneNumber,
+  ProjectUnitSpec,
+  ProjectFavorite,
   ActionApproval,
   ApprovableActionType,
   DiscountApprovalPolicy,
@@ -88,7 +92,7 @@ import { runImport, SkipRow } from './infra/csv-import.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
-import { seedDemoData } from './infra/seed.js';
+import { seedDemoData, lockDemoData } from './infra/seed.js';
 import { EventBus, type DomainEvent } from './infra/event-bus.js';
 
 import { RbacEvaluator } from './modules/permissions/rbac.evaluator.js';
@@ -132,9 +136,18 @@ import { ScenarioSimulationService } from './modules/forecasting/scenario-simula
 import { ImportSessionService } from './modules/imports/import-session.service.js';
 import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
 import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
-import { InventoryImportService, INVENTORY_IMPORT_FIELDS, type InventoryImportOptions } from './modules/inventory/inventory-import.service.js';
+import {
+  InventoryImportService,
+  INVENTORY_IMPORT_FIELDS,
+  CATALOG_IMPORT_FIELDS,
+  AVAILABILITY_IMPORT_FIELDS,
+  CATALOG_ANCHOR_KEYS,
+  AVAILABILITY_ANCHOR_KEYS,
+  type InventoryImportOptions,
+} from './modules/inventory/inventory-import.service.js';
+import { classifySheet } from './infra/field-mapping.js';
 import { DocumentIntelligenceService } from './modules/documents/document-intelligence.service.js';
-import { QuotationService } from './modules/quotations/quotation.service.js';
+import { QuotationService, type ManualUnitInput, type InlineTermsInput } from './modules/quotations/quotation.service.js';
 import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
 import { buildOfferPdf, fetchOfferImages } from './modules/quotations/offer-pdf.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
@@ -261,6 +274,8 @@ function buildRepos(db?: DatabaseSync) {
     facilities: repo<Facility>('facilities'),
     consultants: repo<Consultant>('consultants'),
     salesPhoneNumbers: repo<SalesPhoneNumber>('sales_phone_numbers'),
+    projectUnitSpecs: repo<ProjectUnitSpec>('project_unit_specs'),
+    projectFavorites: repo<ProjectFavorite>('project_favorites'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
@@ -399,7 +414,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const importSessions = new ImportSessionService(repos.importSessions);
   const leadImport = new LeadImportService(repos.leads, repos.users, crm);
   const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
-  const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
+  const leadTimeline = new LeadTimelineService(
+    repos.leads,
+    repos.auditEntries,
+    repos.messages,
+    repos.tasks,
+    repos.opportunities,
+    repos.contracts,
+    repos.users,
+    repos.employees,
+    repos.reservations,
+  );
   const inventory = new InventoryService(
     repos.units,
     repos.unitHolds,
@@ -411,16 +436,18 @@ export async function buildApplication(options: AppOptions): Promise<Application
     repos.facilities,
     repos.consultants,
     repos.salesPhoneNumbers,
+    repos.projectUnitSpecs,
+    repos.projectFavorites,
   );
   const inventoryImport = new InventoryImportService(inventory);
   const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
-  const quotations = new QuotationService(repos.quotations, repos.units, paymentPlans);
+  const quotations = new QuotationService(repos.quotations, repos.units, repos.projects, paymentPlans);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
   const paymentImport = new PaymentImportService(repos.leads, inventory, sales, paymentPlans, finance);
-  const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
+  const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm, repos.contracts, repos.reservations);
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
   const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
@@ -556,6 +583,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
       crmStages: repos.crmStages,
       leads: repos.leads,
     });
+  } else {
+    // Demo seeding was just turned off on a deployment that may already
+    // have a persisted demo login from before — lock it out rather than
+    // leaving the old, publicly-documented password live. See lockDemoData.
+    await lockDemoData({ users: repos.users });
   }
 
   const globalRateLimiter = new SlidingWindowRateLimiter(options.rateLimitWindowMs ?? 60_000, options.rateLimitMax ?? 300);
@@ -811,6 +843,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: { token, userId: user.id, userType: user.userType, companyId: user.companyId } };
   });
 
+  // Auth tokens are stateless, short-lived (15-minute TTL) HMAC-signed
+  // strings with no server-side session store, so there is no session row
+  // to delete here — nothing was silently faking revocation before this
+  // route existed, there simply was no server round-trip on logout at all
+  // (the frontend only cleared its local token). This route gives logout a
+  // real server-side effect within that architecture: it requires a still-
+  // valid token, audit-logs the end of the session, and returns success;
+  // the frontend calls it before discarding its local token.
+  httpServer.post('/api/auth/logout', async (ctx) => {
+    const actor = await actorOf(ctx);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'logout', resource: 'session', resourceId: actor.userId, metadata: {} });
+    return { status: 200, body: { success: true } };
+  });
+
   // Self-service tenant signup: creates the company, the founding employee,
   // the user account, and an unrestricted "Owner" role for that user in one
   // step — the real-users onboarding path (as opposed to the four fixed
@@ -876,7 +922,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
       ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
     }));
     const searched = searchFilter(filtered, ['fullName', 'email', 'title'], ctx.query.get('q'));
-    return { status: 200, body: paginate(searched, ctx.query) };
+    const page = paginate(searched, ctx.query);
+    // Enrich each row with its linked user id — the Lead form's "Assigned
+    // Sales User" picker needs it to populate ownerEmployeeUserId, which is
+    // actually a User id (see employeeScopeKeys above), not an Employee id.
+    const items = await Promise.all(page.items.map(async (e) => ({
+      ...e,
+      ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
+    })));
+    return { status: 200, body: { ...page, items } };
   });
 
   httpServer.post('/api/organization/employees/:employeeId/reassign-manager', async (ctx) => {
@@ -1192,7 +1246,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'payment_plan_template');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:payment_plan_template permission' } };
-    const templates = await paymentPlans.listTemplates(actor.companyId);
+    const templates = await paymentPlans.listReusableTemplates(actor.companyId);
     return { status: 200, body: paginate(templates, ctx.query) };
   });
 
@@ -1202,8 +1256,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:payment_plan_template permission');
     }
     const body = parseJsonBody<{ templateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number }>(ctx.body);
-    const lines = await paymentPlans.previewSchedule(body.templateId, actor.companyId, body.totalPrice, body.discountPercent, body.escalationPercentPerYear);
-    return { status: 200, body: lines };
+    const result = await paymentPlans.previewSchedule(body.templateId, actor.companyId, body.totalPrice, body.discountPercent, body.escalationPercentPerYear);
+    return { status: 200, body: result };
   });
 
   httpServer.post('/api/contracts/:contractId/payment-schedule/generate', async (ctx) => {
@@ -1238,8 +1292,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // Reuses PaymentPlansService.previewSchedule under the hood (see
   // quotation.service.ts) — never a second calculation engine.
   interface QuotationRequestBody {
-    unitId: string;
-    paymentPlanTemplateId: string;
+    unitId?: string;
+    manualUnit?: ManualUnitInput;
+    manualProjectId?: string;
+    paymentPlanTemplateId?: string;
+    inlineTerms?: InlineTermsInput;
     discountPercent?: number;
     escalationPercentPerYear?: number;
     totalPriceOverride?: number;
@@ -1340,7 +1397,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const html = buildQuotationPrintHtml(quotation, calculation, calculation.unit);
+    const html = buildQuotationPrintHtml(quotation, calculation);
     return { status: 200, body: { html } };
   });
 
@@ -1371,8 +1428,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const project = await inventory.getProject(quotation.projectId);
-    if (!project) throw new NotFoundError('project not found for this quotation');
+    // A manually-entered unit (spec section 2B) may have no linked Project
+    // at all — the PDF still generates, just without the project-image/
+    // master-plan sections, never a hard failure (spec section 29.9: don't
+    // fabricate, degrade the optional sections gracefully instead).
+    const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
     const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
     return {
@@ -1393,12 +1453,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!body.to?.trim()) throw new ValidationError('"to" (the recipient WhatsApp number) is required');
 
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const project = await inventory.getProject(quotation.projectId);
-    if (!project) throw new NotFoundError('project not found for this quotation');
+    const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
     const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
 
-    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project.name}, Unit ${calculation.unit.code}`;
+    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project?.name ?? calculation.unitSnapshot.code}, Unit ${calculation.unitSnapshot.code}`;
     const result = await integrations.send(
       actor.companyId,
       'whatsapp',
@@ -1447,8 +1506,12 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const q = ctx.query.get('q') ?? undefined;
     const minPriceFromRaw = ctx.query.get('minPriceFrom');
     const maxPriceToRaw = ctx.query.get('maxPriceTo');
+    const bedroomsRaw = ctx.query.get('bedrooms');
+    const sortRaw = ctx.query.get('sort');
+    const sort = sortRaw === 'price_asc' || sortRaw === 'price_desc' || sortRaw === 'newest' ? sortRaw : undefined;
+    const onlyFavorites = ctx.query.get('favorites') === 'true';
     const projects =
-      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw
+      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw || bedroomsRaw || sort
         ? await inventory.searchProjects(actor.companyId, {
             destination,
             developerId,
@@ -1456,10 +1519,29 @@ export async function buildApplication(options: AppOptions): Promise<Application
             q,
             minPriceFrom: minPriceFromRaw ? Number(minPriceFromRaw) : undefined,
             maxPriceTo: maxPriceToRaw ? Number(maxPriceToRaw) : undefined,
+            bedrooms: bedroomsRaw ? Number(bedroomsRaw) : undefined,
+            sort,
             limit: 200,
           })
         : await inventory.listProjects(actor.companyId);
-    return { status: 200, body: paginate(projects, ctx.query) };
+    const favoriteIds = new Set(await inventory.listFavoriteProjectIds(actor.companyId, actor.userId));
+    const filtered = onlyFavorites ? projects.filter((p) => favoriteIds.has(p.id)) : projects;
+    const page = paginate(filtered, ctx.query);
+    return { status: 200, body: { ...page, items: page.items.map((p) => ({ ...p, isFavorite: favoriteIds.has(p.id) })) } };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/favorite', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    await inventory.addProjectFavorite(actor.companyId, actor.userId, ctx.params.projectId!);
+    return { status: 204 };
+  });
+
+  httpServer.delete('/api/inventory/projects/:projectId/favorite', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    await inventory.removeProjectFavorite(actor.companyId, actor.userId, ctx.params.projectId!);
+    return { status: 204 };
   });
 
   httpServer.get('/api/inventory/projects/:projectId', async (ctx) => {
@@ -1586,6 +1668,29 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: await inventory.deactivateSalesPhoneNumber(ctx.params.phoneId!, actor.companyId) };
   });
 
+  // Project Unit Specs — a project's marketed product ranges (Unit Type +
+  // Bedrooms -> BUA/price ranges), distinct from a physical Unit. Gated on
+  // 'project', same as every other project-master-data entity above.
+  httpServer.post('/api/inventory/projects/:projectId/unit-specs', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<Omit<Parameters<typeof inventory.createProjectUnitSpec>[0], 'companyId' | 'projectId'>>(ctx.body);
+    return { status: 201, body: await inventory.createProjectUnitSpec({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/unit-specs', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listProjectUnitSpecs(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.patch('/api/inventory/unit-specs/:specId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'project'))) throw new ForbiddenError('missing edit:project permission');
+    const body = parseJsonBody<Parameters<typeof inventory.updateProjectUnitSpec>[2]>(ctx.body);
+    return { status: 200, body: await inventory.updateProjectUnitSpec(ctx.params.specId!, actor.companyId, body) };
+  });
+
   httpServer.post('/api/inventory/units', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
@@ -1657,8 +1762,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
         contentType: file.contentType,
         fields: INVENTORY_IMPORT_FIELDS,
         fillDownBlankCells: body?.fields?.fillDownBlankCells === 'true',
+        // Only Developer/Project/Phase/Destination ever inherit a blank
+        // cell from the row above — Price/BUA/Garden/Bedrooms/Status never
+        // do, matching every real spreadsheet's actual merged-cell shape
+        // (a title column merged down a block of rows; a price column
+        // never is).
+        hierarchicalFieldKeys: ['projectName', 'developerName', 'phaseName', 'destination'],
         sheetNameAsColumn: body?.fields?.sheetNameAsProject === 'true' ? 'Project' : undefined,
       });
+      // Informational only — classifies the detected columns as a project-
+      // catalog table, a live-availability table, a summary/fact-sheet, or
+      // unrecognized, so the frontend can suggest the right import mode
+      // instead of the user having to guess. Never changes what gets
+      // imported; the user's own mode choice at the preview step does.
+      const detectedSheetKind = classifySheet(session.detectedColumns, CATALOG_IMPORT_FIELDS, AVAILABILITY_IMPORT_FIELDS, CATALOG_ANCHOR_KEYS, AVAILABILITY_ANCHOR_KEYS);
       return {
         status: 200,
         body: {
@@ -1670,6 +1787,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: INVENTORY_IMPORT_FIELDS,
+          detectedSheetKind,
+          formulaErrors: session.formulaErrors,
         },
       };
     },
@@ -1681,10 +1800,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
       throw new ForbiddenError('missing create:unit permission');
     }
-    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions }>(ctx.body);
+    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions & { mode?: 'availability' | 'catalog' } }>(ctx.body);
     const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping, body.options as Record<string, unknown> | undefined);
     const mappedRows = importSessions.mapRows(session);
-    const preview = await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
+    // 'catalog' mode never writes a physical Unit — a Project Catalog
+    // workbook describes a product range (see inventory-import.service.ts's
+    // own top-of-file comment), not individually coded units.
+    const preview =
+      body.options?.mode === 'catalog'
+        ? await inventoryImport.buildProjectUnitSpecPreview(actor.companyId, mappedRows, body.options)
+        : await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
     return { status: 200, body: preview };
   });
 
@@ -1698,21 +1823,40 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ValidationError('this import session has not been mapped yet — call the preview step first');
     }
     const mappedRows = importSessions.mapRows(session);
-    const result = await inventoryImport.importRows(
-      actor.companyId,
-      mappedRows,
-      async (unit, action) => {
-        await auditLog.record({
-          companyId: actor.companyId,
-          actorUserId: actor.userId,
-          action: action === 'create' ? 'create' : 'edit',
-          resource: 'unit',
-          resourceId: unit.id,
-          metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
-        });
-      },
-      session.importOptions as InventoryImportOptions | undefined,
-    );
+    const options = session.importOptions as (InventoryImportOptions & { mode?: 'availability' | 'catalog' }) | undefined;
+    const result =
+      options?.mode === 'catalog'
+        ? await inventoryImport.importProjectUnitSpecRows(actor.companyId, mappedRows, options, { sourceImportId: session.id })
+        : await inventoryImport.importRows(
+            actor.companyId,
+            mappedRows,
+            async (unit, action) => {
+              await auditLog.record({
+                companyId: actor.companyId,
+                actorUserId: actor.userId,
+                action: action === 'create' ? 'create' : 'edit',
+                resource: 'unit',
+                resourceId: unit.id,
+                metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+              });
+            },
+            options,
+            { sourceImportId: session.id },
+          );
+    if (options?.mode === 'catalog') {
+      for (const r of (result as Awaited<ReturnType<typeof inventoryImport.importProjectUnitSpecRows>>).results) {
+        if (r.specId) {
+          await auditLog.record({
+            companyId: actor.companyId,
+            actorUserId: actor.userId,
+            action: r.status === 'created' ? 'create' : 'edit',
+            resource: 'project',
+            resourceId: r.specId,
+            metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName, entity: 'project_unit_spec' },
+          });
+        }
+      }
+    }
     await importSessions.markConfirmed(session.id, actor.companyId);
     return { status: 200, body: result };
   });
@@ -1942,11 +2086,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email?: string;
       nationalId?: string;
       sourceId?: string;
+      source?: Lead['source'];
       stageId?: string;
       tags?: string[];
       priority?: Lead['priority'];
       ownerEmployeeUserId?: string;
       requiredSkill?: string;
+      interestedInType?: Lead['interestedInType'];
+      interestedInLabel?: string;
+      budgetMin?: number;
+      budgetMax?: number;
+      preferredLocation?: string;
     }>(ctx.body);
     // An explicit ownerEmployeeUserId always wins. Otherwise, if this
     // company has configured a Lead Distribution pool, hand the lead to
@@ -1970,16 +2120,35 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email: body.email,
       nationalId: body.nationalId,
       sourceId: body.sourceId,
+      source: body.source,
       stageId: body.stageId,
       tags: body.tags,
       priority: body.priority,
       requiredSkill: body.requiredSkill,
       ownerEmployeeUserId: ownerEmployeeUserId ?? actor.userId,
       firstContactSlaDueAt,
+      interestedInType: body.interestedInType,
+      interestedInLabel: body.interestedInLabel,
+      budgetMin: body.budgetMin,
+      budgetMax: body.budgetMax,
+      preferredLocation: body.preferredLocation,
     });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
+  });
+
+  // Pre-submit duplicate check the Lead form calls before creating a new
+  // lead, so a rep sees (and can open) the existing lead instead of just
+  // getting a rejected create request — see CrmService.checkDuplicateByPhone.
+  httpServer.get('/api/crm/leads/check-duplicate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const phone = ctx.query.get('phone') ?? '';
+    const duplicate = await crm.checkDuplicateByPhone(actor.companyId, phone);
+    return { status: 200, body: { duplicate: duplicate ?? null } };
   });
 
   // ---- CRM Stages ----
@@ -2160,6 +2329,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: LEAD_IMPORT_FIELDS,
+          formulaErrors: session.formulaErrors,
         },
       };
     },
@@ -2210,6 +2380,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     let leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
     const stageId = ctx.query.get('stageId');
     if (stageId) leads = leads.filter((l) => l.stageId === stageId);
+    // Additive list-view filters for the redesigned CRM client-card list
+    // (Priority / Source / Assigned Sales User) — plain equality filters
+    // over fields already on Lead, so omitting them leaves every existing
+    // caller's behavior unchanged.
+    const priority = ctx.query.get('priority');
+    if (priority) leads = leads.filter((l) => l.priority === priority);
+    const source = ctx.query.get('source');
+    if (source) leads = leads.filter((l) => l.source === source);
+    const ownerEmployeeUserId = ctx.query.get('ownerEmployeeUserId');
+    if (ownerEmployeeUserId) leads = leads.filter((l) => l.ownerEmployeeUserId === ownerEmployeeUserId);
     const filtered = searchFilter(leads, ['fullName', 'phone', 'email'], ctx.query.get('q'));
     return { status: 200, body: paginate(filtered, ctx.query) };
   });
@@ -2243,7 +2423,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       managerEmployeeId: ownerKeys.managerEmployeeId,
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
-    const body = parseJsonBody<{ stageId: string; lostReason?: string }>(ctx.body);
+    const body = parseJsonBody<{ stageId: string; lostReason?: string; note?: string }>(ctx.body);
     const fromStageId = lead.stageId;
     const updated = await crm.moveToStage(ctx.params.leadId!, actor.companyId, body.stageId, body.lostReason);
     const stage = await crmStages.getStage(updated.stageId, actor.companyId);
@@ -2263,7 +2443,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
       // `typeof meta.toStatus === 'string'` detection — intentionally left
       // unmodified, see the CRM restructuring plan — still renders a
       // readable "Status changed to ..." timeline entry for stage moves.
-      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason },
+      // `note` is an optional reason/comment tied to this one transition
+      // (shown alongside "Previous Stage / New Stage" in the Lead
+      // Timeline) — distinct from a standalone Comment/Note, which still
+      // goes through the Message architecture untouched.
+      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason, note: body.note?.trim() || undefined },
     });
     // Both events fire together during the transition period: 'status_changed'
     // keeps any pre-existing workflow/AiPolicy row triggered on the legacy
@@ -2303,6 +2487,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{
+      fullName?: string;
+      phone?: string;
+      source?: LeadSourceChannel;
+      interestedInType?: LeadInterestType;
+      interestedInLabel?: string;
+      budgetMin?: number;
+      budgetMax?: number;
       propertyTypeWanted?: string;
       purchaseGoal?: string;
       preferredLocation?: string;
@@ -2315,6 +2506,28 @@ export async function buildApplication(options: AppOptions): Promise<Application
       preferredTransferMethod?: string;
     }>(ctx.body);
     const updated = await crm.updateCustomFields(ctx.params.leadId!, actor.companyId, body);
+    // "Important Lead Data Changes" in the Lead Timeline: only the fields
+    // that actually changed value, each with its previous/new value — not
+    // a blanket "lead edited" entry, and never overwriting a prior change
+    // (this is one more append-only AuditLog row, same as every other
+    // audited mutation).
+    const leadBefore = lead as unknown as Record<string, unknown>;
+    const leadAfter = updated as unknown as Record<string, unknown>;
+    const changedFields = (Object.keys(body) as (keyof typeof body)[]).filter((key) => body[key] !== undefined && leadBefore[key] !== leadAfter[key]);
+    if (changedFields.length > 0) {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'lead',
+        resourceId: updated.id,
+        metadata: {
+          fieldsChanged: changedFields,
+          previousValues: Object.fromEntries(changedFields.map((k) => [k, leadBefore[k]])),
+          newValues: Object.fromEntries(changedFields.map((k) => [k, leadAfter[k]])),
+        },
+      });
+    }
     return { status: 200, body: updated };
   });
 
@@ -2332,8 +2545,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ ownerEmployeeUserId: string }>(ctx.body);
+    const previousOwnerUserId = lead.ownerEmployeeUserId;
     const updated = await crm.assignOwner(ctx.params.leadId!, actor.companyId, body.ownerEmployeeUserId);
-    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'assign', resource: 'lead', resourceId: updated.id, metadata: { newOwnerUserId: updated.ownerEmployeeUserId } });
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'assign',
+      resource: 'lead',
+      resourceId: updated.id,
+      metadata: { previousOwnerUserId, newOwnerUserId: updated.ownerEmployeeUserId },
+    });
     return { status: 200, body: updated };
   });
 
@@ -2352,12 +2573,32 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ tags?: string[]; priority?: Lead['priority'] }>(ctx.body);
     const updated = await crm.updateTagsAndPriority(ctx.params.leadId!, actor.companyId, body);
+    const previousTags = (lead.tags ?? []).join(',');
+    const newTags = (updated.tags ?? []).join(',');
+    if (previousTags !== newTags || lead.priority !== updated.priority) {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'lead',
+        resourceId: updated.id,
+        metadata: {
+          fieldsChanged: [previousTags !== newTags ? 'tags' : undefined, lead.priority !== updated.priority ? 'priority' : undefined].filter(Boolean),
+          previousValues: { tags: lead.tags, priority: lead.priority },
+          newValues: { tags: updated.tags, priority: updated.priority },
+        },
+      });
+    }
     return { status: 200, body: updated };
   });
 
   // Unified Lead Timeline: everything ACTIVE actually recorded about this
-  // lead (status/owner history, messages, tasks, opportunity, contract),
-  // in one chronological view.
+  // lead (stage/owner/field-change history, comments/calls/WhatsApp/email,
+  // follow-ups, offers, reservations, contracts), newest first, with
+  // optional type/actor/date-range filters, free-text search, and
+  // pagination — all applied server-side over the full, real history (the
+  // service never truncates it, so filtering/search/paging here can never
+  // miss an older entry the way client-side-only filtering would).
   httpServer.get('/api/crm/leads/:leadId/timeline', async (ctx) => {
     const actor = await actorOf(ctx);
     const lead = await crm.getLead(ctx.params.leadId!);
@@ -2372,7 +2613,22 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing view:lead permission for this lead');
     const timeline = await leadTimeline.getTimeline(ctx.params.leadId!, actor.companyId);
-    return { status: 200, body: timeline };
+    let entries = [...timeline.entries].reverse(); // newest first
+
+    const type = ctx.query.get('type');
+    if (type) {
+      const types = new Set(type.split(',').map((t) => t.trim()).filter(Boolean));
+      entries = entries.filter((e) => types.has(e.type));
+    }
+    const userId = ctx.query.get('userId');
+    if (userId) entries = entries.filter((e) => e.actorUserId === userId);
+    const from = ctx.query.get('from');
+    if (from) entries = entries.filter((e) => Date.parse(e.at) >= Date.parse(from));
+    const to = ctx.query.get('to');
+    if (to) entries = entries.filter((e) => Date.parse(e.at) <= Date.parse(to));
+    entries = searchFilter(entries, ['summary', 'actorName'], ctx.query.get('q'));
+
+    return { status: 200, body: paginate(entries, ctx.query) };
   });
 
   // ---- Sales ----
@@ -2534,7 +2790,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       repos.leads.findAll((l) => l.companyId === actor.companyId),
       inventory.listProjects(actor.companyId),
       inventory.listUnits(actor.companyId),
-      paymentPlans.listTemplates(actor.companyId),
+      paymentPlans.listReusableTemplates(actor.companyId),
       sales.listOpportunities(actor.companyId),
     ]);
     const result = await runImport(
@@ -2852,6 +3108,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: PAYMENT_IMPORT_FIELDS,
+          formulaErrors: session.formulaErrors,
         },
       };
     },
@@ -3121,8 +3378,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'broker_company'))) {
       throw new ForbiddenError('missing edit:broker_company permission');
     }
-    const body = parseJsonBody<{ contractId: string; contractAmount: number }>(ctx.body);
-    const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId, body.contractAmount);
+    const body = parseJsonBody<{ contractId: string }>(ctx.body);
+    const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'broker_company', resourceId: commission.id, metadata: { brokerCommission: true, brokerCompanyId: ctx.params.brokerCompanyId, contractId: body.contractId, amount: commission.amount } });
     return { status: 201, body: commission };
   });
@@ -3845,7 +4102,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
       throw new ForbiddenError('missing edit:task permission');
     }
-    const task = await tasks.completeTask(ctx.params.taskId!, actor.companyId);
+    const task = await tasks.completeTask(ctx.params.taskId!, actor.companyId, actor.userId);
     return { status: 200, body: task };
   });
 
@@ -3854,7 +4111,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
       throw new ForbiddenError('missing edit:task permission');
     }
-    const task = await tasks.cancelTask(ctx.params.taskId!, actor.companyId);
+    const task = await tasks.cancelTask(ctx.params.taskId!, actor.companyId, actor.userId);
     return { status: 200, body: task };
   });
 
