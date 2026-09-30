@@ -199,6 +199,11 @@ export class HttpServer {
       const contents = await readFile(filePath);
       const contentType = CONTENT_TYPES[extname(filePath)] ?? 'application/octet-stream';
       res.setHeader('Content-Type', contentType);
+      // Asset filenames carry no content hash/version, so a "cached" response
+      // here is indistinguishable from a stale one after a deploy — always
+      // revalidate rather than let a browser (mobile Safari especially) keep
+      // serving yesterday's JS/CSS indefinitely.
+      res.setHeader('Cache-Control', 'no-cache');
       res.writeHead(200);
       res.end(contents);
       return true;
