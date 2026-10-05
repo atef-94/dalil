@@ -15,11 +15,26 @@ export async function renderCommunication(container) {
     t(locale, 'communication_info_text')));
 
   const toUserIdInput = el('input', { type: 'text', placeholder: t(locale, 'communication_recipient_placeholder') });
+  const externalToInput = el('input', { type: 'text', placeholder: t(locale, 'communication_external_to_placeholder') });
   const CHANNEL_LABEL_KEYS = { internal: 'crm_channel_internal', email: 'crm_channel_email', whatsapp: 'crm_channel_whatsapp', sms: 'crm_channel_sms' };
   const channelSelect = selectInput(['internal', 'email', 'whatsapp', 'sms'].map((c) => ({ value: c, label: t(locale, CHANNEL_LABEL_KEYS[c]) })));
   const subjectInput = el('input', { type: 'text', placeholder: t(locale, 'automation_field_subject') });
   const bodyInput = el('textarea', { rows: 3, placeholder: t(locale, 'communication_body_placeholder') });
   const sendBtn = el('button', { class: 'primary' }, t(locale, 'crm_send_btn'));
+
+  // A real send is only possible for whatsapp/email, and only once a real
+  // recipient contact (not an internal user id) is entered — this field
+  // only appears for those two channels so the form never implies 'sms'/
+  // 'internal' can really send (neither has a provider wired, see below).
+  const externalToField = el('div', {}, [el('label', {}, t(locale, 'communication_external_to_field')), externalToInput]);
+  externalToField.style.display = 'none';
+  function updateExternalToVisibility() {
+    const isReal = channelSelect.value === 'whatsapp' || channelSelect.value === 'email';
+    externalToField.style.display = isReal ? '' : 'none';
+    if (!isReal) externalToInput.value = '';
+  }
+  channelSelect.addEventListener('change', updateExternalToVisibility);
+  updateExternalToVisibility();
 
   sendBtn.addEventListener('click', async () => {
     clear(errorSlot);
@@ -27,10 +42,13 @@ export async function renderCommunication(container) {
       errorSlot.appendChild(errorBanner(t(locale, 'communication_err_required')));
       return;
     }
+    const isRealChannel = channelSelect.value === 'whatsapp' || channelSelect.value === 'email';
+    const externalTo = externalToInput.value.trim();
     sendBtn.disabled = true;
     try {
-      await api.post('/api/communication/messages', {
+      const result = await api.post('/api/communication/messages', {
         toUserId: toUserIdInput.value.trim() || undefined,
+        to: isRealChannel && externalTo ? externalTo : undefined,
         channel: channelSelect.value,
         subject: subjectInput.value.trim(),
         body: bodyInput.value.trim(),
@@ -38,7 +56,12 @@ export async function renderCommunication(container) {
       subjectInput.value = '';
       bodyInput.value = '';
       toUserIdInput.value = '';
-      toast(t(locale, 'communication_sent_toast'), 'success');
+      externalToInput.value = '';
+      if (result?.providerResult) {
+        toast(t(locale, 'communication_sent_real_toast').replace('{channel}', t(locale, CHANNEL_LABEL_KEYS[channelSelect.value])), 'success');
+      } else {
+        toast(t(locale, 'communication_sent_toast'), 'success');
+      }
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -54,6 +77,7 @@ export async function renderCommunication(container) {
       el('div', {}, [el('label', {}, t(locale, 'crm_activity_channel_field')), channelSelect]),
       el('div', {}, [el('label', {}, t(locale, 'automation_field_subject')), subjectInput]),
     ]),
+    el('div', { class: 'form-row' }, [externalToField]),
     el('div', {}, [el('label', {}, t(locale, 'communication_body_field')), bodyInput]),
     el('div', { class: 'form-actions' }, [sendBtn]),
   ]));

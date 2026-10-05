@@ -3820,6 +3820,14 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
 
   // ---- Communication: internal messages ----
+  // Real send, same pattern as the Quotations "send via WhatsApp" route
+  // above (integrations.send() first, then log the Message) — the only
+  // difference is this is optional here: a caller who omits "to" (or picks
+  // a channel with no provider, e.g. 'internal'/'sms') gets the original
+  // log-only behavior unchanged. CommunicationService.sendMessage() itself
+  // still never calls out — the real send is this route's job, same as
+  // Quotations', so the existing "logged only, no external gateway" unit
+  // test for CommunicationService stays true and unbroken.
   httpServer.post('/api/communication/messages', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'message'))) {
@@ -3827,14 +3835,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{
       toUserId?: string;
+      to?: string;
       subject: string;
       body: string;
       channel?: Message['channel'];
       relatedResource?: Message['relatedResource'];
       relatedResourceId?: string;
     }>(ctx.body);
-    const message = await communication.sendMessage({ companyId: actor.companyId, fromUserId: actor.userId, ...body });
-    return { status: 201, body: message };
+
+    let providerResult: Record<string, unknown> | undefined;
+    if ((body.channel === 'whatsapp' || body.channel === 'email') && body.to?.trim()) {
+      providerResult = await integrations.send(
+        actor.companyId,
+        body.channel,
+        'send_message',
+        body.channel === 'email'
+          ? { to: body.to.trim(), subject: body.subject, body: body.body }
+          : { to: body.to.trim(), body: body.body },
+        actor.userId,
+      );
+    }
+
+    const { to: _to, ...rest } = body;
+    const message = await communication.sendMessage({ companyId: actor.companyId, fromUserId: actor.userId, ...rest });
+    return { status: 201, body: providerResult ? { message, providerResult } : message };
   });
 
   httpServer.get('/api/communication/my-messages', async (ctx) => {

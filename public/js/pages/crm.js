@@ -53,10 +53,7 @@ import { renderCustomers } from './customers.js';
  */
 function offersSubSections(locale) {
   return [
-    { key: 'sub:offers', label: t(locale, 'nav_deal_pipeline'), resource: 'opportunity', render: renderOpportunities },
     { key: 'sub:payment-plan', label: t(locale, 'nav_payment_plans'), resource: 'quotation', render: renderQuotations },
-    { key: 'sub:reservations', label: t(locale, 'nav_reservations'), resource: 'unit', render: renderReservations },
-    { key: 'sub:contracts', label: t(locale, 'nav_contracts'), resource: 'contract', render: renderContracts },
     { key: 'sub:customers', label: t(locale, 'nav_customers'), resource: 'portal_access', render: renderCustomers },
     { key: 'sub:communications', label: t(locale, 'nav_communication'), resource: 'message', render: renderCommunication },
   ];
@@ -259,12 +256,55 @@ export async function renderCrm(container) {
     await renderSubBody();
   }
 
-  // Dashboard is the first tab in the horizontal bar (it used to be the
-  // "Customers" module tab's slot) and renders the real-time pipeline
-  // view — the same stat cards renderDashboard always produced. Per-stage
-  // lead lists still aren't separate tabs: a pipeline stat card is the way
-  // into that stage's lead list (see renderDashboard's statCard onClick
-  // below).
+  // Dashboard is the first tab in the horizontal bar and is itself a hub
+  // now, same pattern as Offers: Overview (the real-time stat cards) plus
+  // Deal Pipeline / Reservations / Contracts as internal sub-tabs. Per-stage
+  // lead lists still aren't separate tabs: a pipeline stat card inside
+  // Overview is the way into that stage's lead list (see
+  // renderDashboardOverview's statCard onClick below).
+  // Built inline (not as a module-level helper like offersSubSections)
+  // because renderDashboardOverview is a local closure function, not a
+  // module-level import — a module-level helper can't see it.
+  const dashboardSubTabs = [
+    { key: 'sub:overview', label: t(locale, 'crm_pipeline_realtime'), resource: null, render: renderDashboardOverview },
+    { key: 'sub:deal-pipeline', label: t(locale, 'nav_deal_pipeline'), resource: 'opportunity', render: renderOpportunities },
+    { key: 'sub:reservations', label: t(locale, 'nav_reservations'), resource: 'unit', render: renderReservations },
+    { key: 'sub:contracts', label: t(locale, 'nav_contracts'), resource: 'contract', render: renderContracts },
+  ].filter((s) => !s.resource || can(s.resource, 'view'));
+  let dashboardActiveSubTab = dashboardSubTabs[0]?.key;
+
+  async function renderDashboardHub(target) {
+    clear(target);
+    const subTabsSlot = el('div');
+    const subBodySlot = el('div');
+    target.appendChild(subTabsSlot);
+    target.appendChild(subBodySlot);
+
+    function renderSubTabsBar() {
+      clear(subTabsSlot);
+      const items = dashboardSubTabs.map((s) => ({ key: s.key, label: s.label }));
+      subTabsSlot.appendChild(tabs(items, dashboardActiveSubTab, (key) => {
+        dashboardActiveSubTab = key;
+        renderSubBody();
+      }));
+    }
+
+    async function renderSubBody() {
+      clear(subBodySlot);
+      subBodySlot.appendChild(loadingState());
+      try {
+        const sub = dashboardSubTabs.find((s) => s.key === dashboardActiveSubTab);
+        clear(subBodySlot);
+        await sub.render(subBodySlot);
+      } catch (err) {
+        clear(subBodySlot);
+        subBodySlot.appendChild(errorBanner(err.message));
+      }
+    }
+
+    renderSubTabsBar();
+    await renderSubBody();
+  }
   function renderTabsBar() {
     clear(tabsSlot);
     const items = [
@@ -298,7 +338,8 @@ export async function renderCrm(container) {
     try {
       const moduleTab = moduleTabs.find((m) => m.key === activeTab);
       if (activeTab === 'dashboard') {
-        await renderDashboard();
+        clear(bodySlot);
+        await renderDashboardHub(bodySlot);
       } else if (moduleTab) {
         clear(bodySlot);
         await moduleTab.render(bodySlot);
@@ -311,9 +352,9 @@ export async function renderCrm(container) {
     }
   }
 
-  // ---- CRM Dashboard tab ----
+  // ---- CRM Dashboard tab: Overview sub-tab (stat cards) ----
 
-  async function renderDashboard() {
+  async function renderDashboardOverview(target) {
     const [funnel, conversion, speed, costPerLead] = await Promise.all([
       api.get('/api/analytics/sales-funnel'),
       api.get('/api/analytics/funnel-conversion-rates'),
@@ -340,8 +381,8 @@ export async function renderCrm(container) {
       return due >= startOfToday.getTime() && due < startOfToday.getTime() + 24 * 60 * 60 * 1000;
     }).length;
 
-    clear(bodySlot);
-    bodySlot.appendChild(el('div', { class: 'card' }, [
+    clear(target);
+    target.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_pipeline_realtime')),
       el('div', { class: 'stat-grid' }, funnel.stages.map((s, i) => statCard({
         label: s.stageName,
@@ -354,7 +395,7 @@ export async function renderCrm(container) {
         onClick: () => { activeTab = s.stageId; offset = 0; q = ''; leadFilters = { priority: '', source: '', ownerEmployeeUserId: '' }; renderBody(); },
       }))),
     ]));
-    bodySlot.appendChild(el('div', { class: 'card' }, [
+    target.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_today_followups')),
       el('div', { class: 'stat-grid' }, [
         statCard({ label: t(locale, 'crm_new_today'), value: newToday, iconName: 'plus', tone: 'green' }),
@@ -363,7 +404,7 @@ export async function renderCrm(container) {
         statCard({ label: t(locale, 'crm_total_leads'), value: funnel.totalLeads, iconName: 'leads', tone: 'blue' }),
       ]),
     ]));
-    bodySlot.appendChild(el('div', { class: 'card' }, [
+    target.appendChild(el('div', { class: 'card' }, [
       el('h3', { style: 'margin-top:0' }, t(locale, 'crm_conversion')),
       el('div', { class: 'stat-grid' }, [
         statCard({ label: t(locale, 'crm_overall_win_rate'), value: `${conversion.overallWinRatePercent}%`, iconName: 'analytics', tone: 'green' }),
