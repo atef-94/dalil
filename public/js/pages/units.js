@@ -393,6 +393,14 @@ async function renderCatalogTab(root, locale) {
               ],
               unitsPage.items,
             ));
+            // This panel is a 5-row teaser, not the full list — a project
+            // with more than that needs a way to see the rest, not just a
+            // silently truncated table.
+            if (unitsPage.total > unitsPage.items.length) {
+              const viewAllBtn = el('button', { style: 'width:100%' }, `${t(locale, 'catalog_view_all_units')} (${formatNumber(locale, unitsPage.total)})`);
+              viewAllBtn.addEventListener('click', () => openProjectDetailModal(p, { locale, onSaved: loadGrid }));
+              footerPanel.appendChild(viewAllBtn);
+            }
           } else {
             const specs = await api.get(`/api/inventory/projects/${p.id}/unit-specs`);
             if (!specs.length) {
@@ -464,6 +472,36 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
   locale = locale || getLocale();
   const body = el('div', {}, loadingState());
   contentModal(project.name, body, { wide: true });
+
+  // Real, individually-coded Units (an "availability" import) are paginated
+  // independently of the rest of the modal — reloading the whole modal on
+  // every page click would also re-fetch facilities/phases/launches/specs
+  // for no reason.
+  let unitsOffset = 0;
+  const unitsSectionSlot = el('div');
+  async function loadUnitsSection() {
+    clear(unitsSectionSlot);
+    unitsSectionSlot.appendChild(loadingState());
+    try {
+      const unitsPage = await api.get('/api/inventory/units', { projectId: project.id, status: 'any', limit: 20, offset: unitsOffset });
+      clear(unitsSectionSlot);
+      unitsSectionSlot.appendChild(table(
+        [
+          { label: t(locale, 'units_col_code'), key: 'code' },
+          { label: t(locale, 'units_col_type'), key: 'unitType' },
+          { label: t(locale, 'units_col_area'), render: (u) => `${u.areaSqm} m²` },
+          { label: t(locale, 'units_col_price'), render: (u) => Number(u.listPrice).toLocaleString() },
+          { label: t(locale, 'units_col_status'), render: (u) => statusBadge(u.status) },
+        ],
+        unitsPage.items,
+        { empty: t(locale, 'units_project_no_units') },
+      ));
+      unitsSectionSlot.appendChild(paginationControls(unitsPage, (next) => { unitsOffset = next; loadUnitsSection(); }));
+    } catch (err) {
+      clear(unitsSectionSlot);
+      unitsSectionSlot.appendChild(errorBanner(err.message));
+    }
+  }
 
   async function refresh() {
     clear(body);
@@ -613,10 +651,18 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
       table([{ label: t(locale, 'units_col_name'), key: 'name' }, { label: t(locale, 'units_col_date'), render: (l) => l.launchDate || '—' }], launches, { empty: t(locale, 'units_project_no_launches') }),
     ]));
 
+    // Real, individually-coded Units ("availability" import) — distinct
+    // from the marketed product ranges (Unit Specs) below, which carry no
+    // physical unit identity.
+    body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
+      el('h4', { style: 'margin:0 0 8px' }, t(locale, 'units_project_units_title')),
+      unitsSectionSlot,
+    ]));
+    loadUnitsSection();
+
     // Unit Specs (Catalog) — the project's marketed product ranges (Unit
     // Type + Bedrooms -> BUA/price ranges), populated by a Project
-    // Catalog import or added manually; distinct from real, physically
-    // coded Units below.
+    // Catalog import or added manually; distinct from the real units above.
     body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
       el('h4', { style: 'margin:0 0 8px' }, t(locale, 'units_project_unit_specs_title')),
       table(
