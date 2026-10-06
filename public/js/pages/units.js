@@ -373,19 +373,40 @@ async function renderCatalogTab(root, locale) {
       } else {
         footerPanel.appendChild(loadingState());
         try {
-          const specs = await api.get(`/api/inventory/projects/${p.id}/unit-specs`);
+          // A project's units can live as either real, individually-coded
+          // Units (an "availability" import — the common case) or as
+          // ProjectUnitSpec ranges (a "catalog" import, no physical unit
+          // identity). Showing only unit-specs here left every
+          // availability-imported project looking empty in the Catalog —
+          // real units existed (visible in Manage) but never rendered in
+          // this panel. Prefer real units when the project has any; fall
+          // back to catalog ranges only when it doesn't.
+          const unitsPage = await api.get('/api/inventory/units', { projectId: p.id, status: 'available', limit: 5 });
           clear(footerPanel);
-          if (!specs.length) {
-            footerPanel.appendChild(el('div', { style: 'padding:12px;color:var(--text-muted);font-size:12px' }, t(locale, 'common_no_records')));
-          } else {
+          if (unitsPage.items.length) {
             footerPanel.appendChild(table(
               [
+                { label: t(locale, 'units_col_code'), key: 'code' },
                 { label: t(locale, 'units_col_type'), key: 'unitType' },
-                { label: t(locale, 'units_col_beds'), render: (s) => (s.bedrooms !== undefined && s.bedrooms !== null ? String(s.bedrooms) : '—') },
-                { label: t(locale, 'units_col_price'), render: (s) => ((s.priceFrom || s.priceTo) ? `${formatNumber(locale, s.priceFrom)} – ${formatNumber(locale, s.priceTo)}` : '—') },
+                { label: t(locale, 'units_col_area'), render: (u) => formatNumber(locale, u.areaSqm) },
+                { label: t(locale, 'units_col_price'), render: (u) => formatNumber(locale, u.listPrice) },
               ],
-              specs.slice(0, 5),
+              unitsPage.items,
             ));
+          } else {
+            const specs = await api.get(`/api/inventory/projects/${p.id}/unit-specs`);
+            if (!specs.length) {
+              footerPanel.appendChild(el('div', { style: 'padding:12px;color:var(--text-muted);font-size:12px' }, t(locale, 'common_no_records')));
+            } else {
+              footerPanel.appendChild(table(
+                [
+                  { label: t(locale, 'units_col_type'), key: 'unitType' },
+                  { label: t(locale, 'units_col_beds'), render: (s) => (s.bedrooms !== undefined && s.bedrooms !== null ? String(s.bedrooms) : '—') },
+                  { label: t(locale, 'units_col_price'), render: (s) => ((s.priceFrom || s.priceTo) ? `${formatNumber(locale, s.priceFrom)} – ${formatNumber(locale, s.priceTo)}` : '—') },
+                ],
+                specs.slice(0, 5),
+              ));
+            }
           }
         } catch (err) {
           clear(footerPanel);
