@@ -1122,6 +1122,10 @@ export async function renderCrm(container) {
 
         const offersListSlot = el('div', { style: 'margin-top:10px' });
 
+        // Revoking the blob: URL synchronously right after a[download].click()
+        // races the browser's own (async) read of it — on some browsers
+        // this silently saves a zero-byte/empty file instead of the real
+        // one. Delaying the revoke keeps the real filename intact.
         function downloadBase64(filename, contentType, base64) {
           const byteChars = atob(base64);
           const bytes = new Uint8Array(byteChars.length);
@@ -1132,7 +1136,7 @@ export async function renderCrm(container) {
           a.href = url;
           a.download = filename;
           a.click();
-          URL.revokeObjectURL(url);
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
         }
 
         async function downloadOfferPdf(quotation) {

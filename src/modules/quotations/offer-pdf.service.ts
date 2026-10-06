@@ -74,14 +74,14 @@ function formatDelivery(delivery: Project['delivery'] | Unit['delivery']): strin
 }
 
 function drawHeading(doc: PDFKit.PDFDocument, text: string): void {
-  doc.fontSize(18).fillColor('#111').text(text, { align: 'left' });
-  doc.moveDown(0.5);
+  doc.fontSize(16).fillColor('#111').text(text, { align: 'left' });
+  doc.moveDown(0.3);
   doc
     .moveTo(doc.x, doc.y)
     .lineTo(doc.page.width - PAGE_MARGIN, doc.y)
     .strokeColor('#ddd')
     .stroke();
-  doc.moveDown(0.75);
+  doc.moveDown(0.5);
 }
 
 function drawKeyValueGrid(doc: PDFKit.PDFDocument, rows: Array<[string, string]>): void {
@@ -90,17 +90,25 @@ function drawKeyValueGrid(doc: PDFKit.PDFDocument, rows: Array<[string, string]>
   let x = startX;
   let rowTop = doc.y;
   rows.forEach(([label, value], i) => {
+    // Rows are drawn at explicit x/y, which (unlike flowing text) pdfkit
+    // never auto-paginates — so a tall grid must check for itself, the
+    // same way the schedule table below does, or its later rows simply
+    // render past the bottom of the page.
+    if (i % 2 === 0 && rowTop > doc.page.height - PAGE_MARGIN - 34) {
+      doc.addPage();
+      rowTop = PAGE_MARGIN;
+    }
     doc.fontSize(9).fillColor('#666').text(label, x, rowTop, { width: colWidth - 16 });
     doc.fontSize(12).fillColor('#111').text(value, x, doc.y, { width: colWidth - 16 });
     if (i % 2 === 0) {
       x = startX + colWidth;
     } else {
       x = startX;
-      rowTop = doc.y + 14;
+      rowTop = doc.y + 8;
     }
   });
   doc.x = startX;
-  doc.y = rowTop + 20;
+  doc.y = rowTop + 12;
 }
 
 /** Fits an image into a max box (preserving aspect ratio), draws it at
@@ -163,16 +171,29 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
   }
   doc.y = coverY;
   doc.moveDown(1);
+  const afterCoverY = doc.y;
+  // A footer note pinned to the bottom of the cover page — drawn at an
+  // explicit y near the page bottom, which (like any explicit-position
+  // text) advances doc.y to wherever it lands. Restore doc.y to the real
+  // end of the flowing content right after, so the "is there room for the
+  // next section" checks below measure actual content height, not this
+  // footer's incidental position (which would otherwise make an
+  // almost-empty cover page look full and force a pointless page break).
   doc.fontSize(10).fillColor('#999').text(`Offer Reference: ${quotation.referenceNumber} (v${quotation.version})`, PAGE_MARGIN, doc.page.height - PAGE_MARGIN - 20);
+  doc.y = afterCoverY;
 
-  // ---- Page 2: Unit info ----
+  // ---- Unit info ----
   // Sourced from unitSnapshot (the frozen, point-in-time copy — see
   // QuotationUnitSnapshot's own comment), never re-read live from `unit`,
   // so this page renders the unit exactly as it was when the offer was
   // generated even if the real Unit/Project have since changed. `unit`/
   // `project` are only used above (images) and below (master plan
   // highlight) for data that isn't itself part of the frozen snapshot.
-  doc.addPage();
+  // Only breaks to a new page when there isn't even room for the heading
+  // itself (e.g. a tall cover image ran right to the bottom) — the grid
+  // below has its own per-row overflow check, so this only needs to avoid
+  // orphaning the heading, not pre-guess the whole section's height.
+  if (doc.y > doc.page.height - PAGE_MARGIN - 60) doc.addPage();
   drawHeading(doc, 'Unit Information');
   const deliveryLabel = unit ? (unit.delivery ? formatDelivery(unit.delivery) : formatDelivery(project?.delivery)) : '—';
   const parkingLabel = snap.parkingIncluded === undefined
@@ -196,8 +217,11 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
     ['Parking', parkingLabel],
   ]);
 
-  // ---- Page 3: Payment plan ----
-  doc.addPage();
+  // ---- Payment plan ----
+  // Same approach as Unit Information above — only guards against orphaning
+  // the heading itself; the summary grid and schedule table below each
+  // have their own row-by-row overflow check.
+  if (doc.y > doc.page.height - PAGE_MARGIN - 60) doc.addPage();
   drawHeading(doc, 'Payment Plan');
   const v = calc.validation;
   drawKeyValueGrid(doc, [
@@ -226,7 +250,7 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
     .stroke();
   let rowY = tableTop + 20;
   calc.schedule.forEach((line, index) => {
-    if (rowY > doc.page.height - PAGE_MARGIN - 20) {
+    if (rowY > doc.page.height - PAGE_MARGIN - 16) {
       doc.addPage();
       rowY = PAGE_MARGIN;
     }
@@ -239,7 +263,7 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
     rowY += 18;
   });
 
-  // ---- Page 4: Master plan with unit highlighted ----
+  // ---- Master plan with unit highlighted (own page — needs full-page room) ----
   // Only rendered when both a master-plan image and a real Unit's
   // masterPlanPosition exist — a manually-entered unit has neither, so
   // this section is simply absent rather than showing a misleading or
@@ -260,7 +284,7 @@ export async function buildOfferPdf(quotation: Quotation, calc: QuotationCalcula
     }
   }
 
-  // ---- Page 5: Unit floor plan ----
+  // ---- Unit floor plan (own page — needs full-page room) ----
   if (images.floorPlanImage) {
     doc.addPage();
     drawHeading(doc, `Unit ${snap.code} — Floor Plan`);

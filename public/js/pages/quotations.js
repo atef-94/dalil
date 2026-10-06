@@ -368,6 +368,11 @@ export async function renderQuotations(container) {
     container.appendChild(templatesDetails);
   }
 
+  // Revoking the blob: URL synchronously right after a[download].click()
+  // races the browser's own (async) read of it — on some browsers this
+  // silently saves a zero-byte/empty file instead of the real one.
+  // Delaying the revoke (same fix already proven for the PDF preview's
+  // blob URL below) keeps the real filename and content-type intact.
   function downloadBase64(filename, contentType, base64) {
     const byteChars = atob(base64);
     const bytes = new Uint8Array(byteChars.length);
@@ -378,30 +383,13 @@ export async function renderQuotations(container) {
     a.href = url;
     a.download = filename;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
   async function downloadExcel(quotation) {
     try {
       const result = await api.get(`/api/quotations/${quotation.id}/excel`);
       downloadBase64(result.filename, result.contentType, result.base64);
-    } catch (err) {
-      toast(err.message, 'error');
-    }
-  }
-
-  async function openPrintView(quotation) {
-    try {
-      const result = await api.get(`/api/quotations/${quotation.id}/print`);
-      const win = window.open('', '_blank');
-      if (!win) {
-        toast(t(locale, 'quotations_err_allow_popups'), 'error');
-        return;
-      }
-      win.document.write(result.html);
-      win.document.close();
-      win.focus();
-      win.print();
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -419,15 +407,6 @@ export async function renderQuotations(container) {
     const bytes = new Uint8Array(byteChars.length);
     for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
     return { bytes, filename: result.filename, contentType: result.contentType };
-  }
-
-  async function downloadOfferPdf(quotation) {
-    try {
-      const result = await api.get(`/api/quotations/${quotation.id}/pdf`);
-      downloadBase64(result.filename, result.contentType, result.base64);
-    } catch (err) {
-      toast(err.message, 'error');
-    }
   }
 
   async function previewOfferPdf(quotation) {
@@ -537,15 +516,14 @@ export async function renderQuotations(container) {
           } },
           { label: t(locale, 'automation_col_created'), render: (q) => new Date(q.createdAt).toLocaleString() },
           { label: '', render: (q) => {
+            // One PDF button, not three: it opens the real generated offer
+            // PDF in a new tab, and the browser's own PDF viewer already
+            // covers viewing, printing, and saving from there.
             const previewBtn = el('button', {}, t(locale, 'pp_preview_btn'));
             previewBtn.addEventListener('click', () => previewOfferPdf(q));
             const excelBtn = el('button', {}, t(locale, 'quotations_excel_btn'));
             excelBtn.addEventListener('click', () => downloadExcel(q));
-            const printBtn = el('button', {}, t(locale, 'quotations_print_pdf_btn'));
-            printBtn.addEventListener('click', () => openPrintView(q));
-            const offerPdfBtn = el('button', {}, t(locale, 'quotations_print_pdf_only_btn'));
-            offerPdfBtn.addEventListener('click', () => downloadOfferPdf(q));
-            const actions = [previewBtn, excelBtn, printBtn, offerPdfBtn];
+            const actions = [previewBtn, excelBtn];
             if (can('quotation', 'edit')) {
               const shareBtn = el('button', {}, t(locale, 'quotations_share_btn'));
               shareBtn.addEventListener('click', () => shareQuotation(q));
