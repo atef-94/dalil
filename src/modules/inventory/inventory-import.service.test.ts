@@ -705,6 +705,52 @@ test('"total price before discount" maps to List Price, not left ambiguous again
   assert.equal(mapping['total price before discount'], 'listPrice');
 });
 
+test('importRows recovers the real unit type from Bedrooms when Type holds a bare building/zone code (a real "code/Type/Building/.../Rooms" export)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: "Stay'n" });
+
+  const rows = [
+    { code: 'A1-02', Type: 'A', Building: 'A1', Rooms: '3 BR', Area: '109', 'total price before discount': '5916928', 'availability status': 'Available' },
+    { code: 'B2-01', Type: 'B', Building: 'B2', Rooms: 'Twin Studio', Area: '62', 'total price before discount': '3342334', 'availability status': 'Available' },
+  ];
+  for (const raw of rows) {
+    const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+    assert.equal(mapping.Type, 'unitType');
+    assert.equal(mapping.Rooms, 'bedrooms');
+    const mapped: Record<string, string> = { projectName: project.name };
+    for (const [col, fieldKey] of Object.entries(mapping)) {
+      if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+    }
+    const result = await svc.importRows('c1', [mapped], async () => {});
+    assert.equal(result.succeeded, 1, `row failed: ${JSON.stringify(raw)}`);
+  }
+
+  const units = await inventory.listUnits('c1', project.id);
+  const a1 = units.find((u) => u.code === 'A1-02')!;
+  const b2 = units.find((u) => u.code === 'B2-01')!;
+  assert.equal(a1.unitType, '3 BR');
+  assert.equal(a1.bedrooms, 3);
+  assert.equal(b2.unitType, 'Twin Studio');
+  assert.equal(b2.bedrooms, undefined);
+});
+
+test('importRows leaves an ordinary numeric Bedrooms value and a real descriptive Unit Type alone (the swap heuristic never fires on a normal file)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Portfolio Co' });
+
+  const raw = { Code: 'A-1', 'Unit Type': 'Apartment', Bedrooms: '2', Area: '120', Price: '3000000', Status: 'Available' };
+  const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+  const mapped: Record<string, string> = { projectName: project.name };
+  for (const [col, fieldKey] of Object.entries(mapping)) {
+    if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+  }
+  const result = await svc.importRows('c1', [mapped], async () => {});
+  assert.equal(result.succeeded, 1);
+  const [unit] = await inventory.listUnits('c1', project.id);
+  assert.equal(unit!.unitType, 'Apartment');
+  assert.equal(unit!.bedrooms, 2);
+});
+
 test('CATALOG_IMPORT_FIELDS and AVAILABILITY_IMPORT_FIELDS are both non-empty subsets of the one shared INVENTORY_IMPORT_FIELDS dictionary (one mapping engine, not two)', () => {
   const allKeys = new Set(INVENTORY_IMPORT_FIELDS.map((f) => f.key));
   assert.ok(CATALOG_IMPORT_FIELDS.length > 0);

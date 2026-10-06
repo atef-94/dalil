@@ -468,7 +468,20 @@ export class InventoryImportService {
 
       const projectName = raw.projectName?.trim();
       let unitCode = raw.unitCode?.trim();
-      const unitType = raw.unitType?.trim();
+      let unitType = raw.unitType?.trim();
+      // A real export sometimes names its unit-type column "Type" but fills
+      // it with a bare building/zone code ("A", "G1") rather than a real
+      // descriptive type, with the actual type ("Studio", "2 BR", "Twin
+      // Studio") living in the Bedrooms column instead — confirmed against
+      // a real multi-building file. Recovering it needs no per-file
+      // configuration: this only fires when the mapped Unit Type looks like
+      // a short code AND the Bedrooms column's raw text is itself
+      // descriptive (contains a letter), never for an ordinary numeric
+      // bedroom count or a blank cell.
+      const rawBedroomsText = raw.bedrooms?.trim();
+      if (unitType && /^[A-Za-z]\d{0,2}$/.test(unitType) && rawBedroomsText && /[A-Za-z]/.test(rawBedroomsText)) {
+        unitType = rawBedroomsText;
+      }
       const areaSqm = resolveRangeValue(raw.areaSqm, raw.areaSqmFrom, raw.areaSqmTo, rangeStrategy);
       const listPrice = resolveRangeValue(raw.listPrice, raw.listPriceFrom, raw.listPriceTo, rangeStrategy);
       const unitExtra = this.parseUnitExtra(raw);
@@ -794,7 +807,14 @@ export class InventoryImportService {
       const issues: string[] = [];
 
       const projectName = raw.projectName?.trim();
-      const unitType = raw.unitType?.trim();
+      let unitType = raw.unitType?.trim();
+      // Same correction as the availability-row path: a Unit Type column
+      // holding a bare building/zone code with the real descriptive type
+      // sitting in Bedrooms instead.
+      const rawBedroomsText = raw.bedrooms?.trim();
+      if (unitType && /^[A-Za-z]\d{0,2}$/.test(unitType) && rawBedroomsText && /[A-Za-z]/.test(rawBedroomsText)) {
+        unitType = rawBedroomsText;
+      }
       const bedrooms = parseBedrooms(raw.bedrooms);
       const extra = this.parseProjectUnitSpecExtra(raw);
 
