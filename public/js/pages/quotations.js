@@ -47,7 +47,23 @@ export async function renderQuotations(container) {
   }
 
   // ---- Unit source: pick from Inventory, or enter manually (spec 2A/2B) ----
+  let projects = [];
+  const projectFilterSelect = selectInput([{ value: '', label: t(locale, 'pp_unit_project_filter_any') }]);
   const unitSelect = selectInput([]);
+  // A company with units imported across several projects (the common
+  // real-world case) otherwise dumps every unit from every project into
+  // one flat, unsorted list here — impossible to find the right code in.
+  // Picking a project first narrows the list to just that project's units.
+  function populateUnitSelect() {
+    const filtered = projectFilterSelect.value ? units.filter((u) => u.projectId === projectFilterSelect.value) : units;
+    clear(unitSelect);
+    filtered.forEach((u) => {
+      const bedrooms = u.bedrooms !== undefined && u.bedrooms !== null ? `${u.bedrooms}BR` : null;
+      const extra = [bedrooms, u.buildingLabel].filter(Boolean).join(' / ');
+      unitSelect.appendChild(el('option', { value: u.id }, `${u.code} — ${u.unitType}${extra ? ` (${extra})` : ''} — ${Number(u.listPrice).toLocaleString()}`));
+    });
+  }
+  projectFilterSelect.addEventListener('change', populateUnitSelect);
   const manualCodeInput = el('input', { type: 'text', placeholder: 'B2-304' });
   const manualUnitTypeInput = el('input', { type: 'text', placeholder: t(locale, 'pp_unit_type_placeholder') });
   const manualAreaInput = el('input', { type: 'number', placeholder: '120' });
@@ -59,6 +75,7 @@ export async function renderQuotations(container) {
   const manualProjectIdInput = el('input', { type: 'text', placeholder: t(locale, 'pp_project_optional_placeholder') });
 
   const unitInventoryFields = el('div', { class: 'form-row' }, [
+    el('div', {}, [el('label', {}, t(locale, 'pp_unit_project_filter_label')), projectFilterSelect]),
     el('div', {}, [el('label', {}, t(locale, 'sales_col_unit')), unitSelect]),
   ]);
   const unitManualFields = el('div', { class: 'form-row', style: 'display:none' }, [
@@ -555,14 +572,18 @@ export async function renderQuotations(container) {
 
   async function loadPickers() {
     try {
-      const [unitsPage, templatesPage] = await Promise.all([
+      const [unitsPage, templatesPage, projectsPage] = await Promise.all([
         api.get('/api/inventory/units', { limit: 200 }),
         api.get('/api/payment-plan-templates', { limit: 100 }),
+        api.get('/api/inventory/projects', { limit: 100 }),
       ]);
       units = unitsPage.items;
       templates = templatesPage.items.filter((tpl) => !tpl.adHoc);
-      clear(unitSelect);
-      units.forEach((u) => unitSelect.appendChild(el('option', { value: u.id }, `${u.code} — ${u.unitType} (${Number(u.listPrice).toLocaleString()})`)));
+      projects = projectsPage.items;
+      clear(projectFilterSelect);
+      projectFilterSelect.appendChild(el('option', { value: '' }, t(locale, 'pp_unit_project_filter_any')));
+      projects.forEach((p) => projectFilterSelect.appendChild(el('option', { value: p.id }, p.name)));
+      populateUnitSelect();
       clear(templateSelect);
       templates.forEach((tpl) => templateSelect.appendChild(el('option', { value: tpl.id }, tpl.name)));
     } catch (err) {
