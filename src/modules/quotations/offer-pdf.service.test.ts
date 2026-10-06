@@ -136,6 +136,73 @@ test('buildOfferPdf renders an overpayment/remaining-balance validation summary 
   assert.ok(bufUnder.length > 200);
 });
 
+test('buildOfferPdf (locale "ar") produces a real PDF buffer with Arabic-labeled sections', async () => {
+  const { quotation, calc, unit, project } = fixtures();
+  const buf = await buildOfferPdf(quotation, calc, unit, project, {}, 'ar');
+  assert.ok(buf.length > 200);
+  assert.equal(buf.subarray(0, 5).toString('latin1'), '%PDF-');
+});
+
+test('buildOfferPdf (locale "ar") renders Arabic multi-word labels and Latin payment-type values in correct reading order', async () => {
+  // Regression test for a real bug found during manual verification: pdfkit/
+  // fontkit reorder a multi-word string unpredictably — not just mixed
+  // Arabic/Latin, but even a plain two-word Arabic phrase like "نوع الوحدة"
+  // came out as "الوحدة نوع" when handed to doc.text() directly, and the
+  // RTL-token-placement fix for that, if applied indiscriminately, would in
+  // turn wrongly reverse pure-Latin content like "Down Payment" into
+  // "Payment Down". This decodes the actual PDF content stream (not just
+  // checking buffer size, unlike the other tests in this file) to prove
+  // both directions render in correct logical order.
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const { quotation, calc, unit, project } = fixtures();
+  const buf = await buildOfferPdf(quotation, calc, unit, project, {}, 'ar');
+  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+  let fullText = '';
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    fullText += content.items.map((it) => ('str' in it ? it.str : '')).join(' ');
+  }
+  // Arabic multi-word labels must appear in correct reading order, not
+  // reversed. Deliberately avoids any label containing a lam immediately
+  // followed by a hamza-bearing alef (e.g. "الإجمالي", "الأساسية") — those
+  // render correctly (verified visually against a real PDF viewer) but
+  // pdfjs's text extraction remaps that specific ligature's glyph back to
+  // Unicode in transposed order, which is a text-extraction artifact of
+  // that one letter combination, not a rendering bug this test is after.
+  assert.ok(fullText.includes('كود الوحدة'), `expected "كود الوحدة" (not reversed) in: ${fullText.slice(0, 200)}`);
+  assert.ok(fullText.includes('نوع الوحدة'), `expected "نوع الوحدة" (not reversed) in: ${fullText.slice(0, 200)}`);
+  assert.ok(fullText.includes('نسبة الخصم'), 'expected "نسبة الخصم" (not reversed)');
+  // The payment-type/label columns are deliberately left in English (see
+  // PAYMENT_TYPE_LABELS) and must stay in normal left-to-right reading
+  // order, not be wrongly reversed by the RTL fix.
+  assert.ok(fullText.includes('Down Payment'), 'expected "Down Payment" (not reversed to "Payment Down")');
+  assert.ok(fullText.includes('Installment 1'), 'expected "Installment 1" (not reversed to "1 Installment")');
+});
+
+test('buildOfferPdf (locale "ar") renders exactly one page per schedule-table page break, with no stray blank pages', async () => {
+  // Regression test for a real bug: the page-number footer's own doc.text()
+  // call, missing lineBreak:false at a y position right at the bottom
+  // margin, made pdfkit silently auto-paginate before drawing — turning a
+  // real 1-page document into 3 (two of them blank except for the footer).
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const { quotation, calc, unit, project } = fixtures();
+  const buf = await buildOfferPdf(quotation, calc, unit, project, {}, 'ar');
+  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+  assert.equal(doc.numPages, 1, 'a 2-line schedule must not produce extra blank pages');
+  const page = await doc.getPage(1);
+  const content = await page.getTextContent();
+  const text = content.items.map((it) => ('str' in it ? it.str : '')).join(' ');
+  assert.ok(text.includes('صفحة 1 من 1'), `expected the Arabic page-number footer "صفحة 1 من 1" in: ${text.slice(-100)}`);
+});
+
+test('buildOfferPdf (locale "ar") renders successfully for a manually-entered unit with no linked Unit or Project row', async () => {
+  const { quotation, calc } = fixtures();
+  const buf = await buildOfferPdf(quotation, calc, undefined, undefined, {}, 'ar');
+  assert.ok(buf.length > 200);
+  assert.equal(buf.subarray(0, 5).toString('latin1'), '%PDF-');
+});
+
 test('buildOfferPdf includes a Payment Type column derived from each line\'s kind', async () => {
   const { quotation, calc, unit, project } = fixtures();
   // A schedule with all 4 kinds present must still render without error —

@@ -1141,7 +1141,7 @@ export async function renderCrm(container) {
 
         async function downloadOfferPdf(quotation) {
           try {
-            const result = await api.get(`/api/quotations/${quotation.id}/pdf`);
+            const result = await api.get(`/api/quotations/${quotation.id}/pdf`, { locale });
             downloadBase64(result.filename, result.contentType, result.base64);
           } catch (err) {
             toast(err.message, 'error');

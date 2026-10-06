@@ -465,7 +465,7 @@ export async function renderQuotations(container) {
   // logs a text link unless the native share sheet is available (see
   // shareQuotation); this button always downloads/opens the actual PDF.
   async function fetchOfferPdfFile(quotation) {
-    const result = await api.get(`/api/quotations/${quotation.id}/pdf`);
+    const result = await api.get(`/api/quotations/${quotation.id}/pdf`, { locale });
     const byteChars = atob(result.base64);
     const bytes = new Uint8Array(byteChars.length);
     for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);

@@ -1434,7 +1434,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     // fabricate, degrade the optional sections gracefully instead).
     const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
-    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+    const locale = ctx.query.get('locale') === 'ar' ? 'ar' : 'en';
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images, locale);
     return {
       status: 200,
       body: { filename: `${quotation.referenceNumber}.pdf`, contentType: 'application/pdf', base64: buffer.toString('base64') },
@@ -1455,7 +1456,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
     const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
-    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+    const locale = ctx.query.get('locale') === 'ar' ? 'ar' : 'en';
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images, locale);
 
     const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project?.name ?? calculation.unitSnapshot.code}, Unit ${calculation.unitSnapshot.code}`;
     const result = await integrations.send(
