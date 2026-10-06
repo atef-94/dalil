@@ -655,7 +655,14 @@ async function renderManageTab(container, locale) {
         onImported: () => { load(); loadImportHistory(); },
         uploadOptions: [
           { key: 'fillDownBlankCells', label: t(locale, 'units_import_opt_fill_down'), default: false },
-          { key: 'sheetNameAsProject', label: t(locale, 'units_import_opt_sheet_as_project'), default: false },
+          // On by default: a real multi-tab developer/broker portfolio
+          // export (one project per sheet, no "Project" column at all) is
+          // the common case, not the exception — leaving this off by
+          // default silently read only the first sheet and failed every
+          // row of every other tab with no clear way to tell why. It never
+          // overrides a sheet's own explicit Project column, so a file that
+          // already has one is unaffected either way.
+          { key: 'sheetNameAsProject', label: t(locale, 'units_import_opt_sheet_as_project'), default: true },
         ],
         mappingOptions: [
           {
