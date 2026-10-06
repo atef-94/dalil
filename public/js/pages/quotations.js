@@ -212,6 +212,73 @@ export async function renderQuotations(container) {
     return el('div', { class: 'pp-validation-banner pp-validation-warn' }, `${t(locale, 'pp_validation_remaining_prefix')} ${Number(validation.remainingBalance).toLocaleString()}`);
   }
 
+  /** Plain-text summary of a live calculation — used for the native share
+   * sheet / WhatsApp fallback below. Not tied to a saved Quotation, so this
+   * works straight from the preview, before "Generate" is ever clicked. */
+  function buildPreviewShareText(calc) {
+    const lines = [
+      t(locale, 'pp_share_summary_title'),
+      `${t(locale, 'quotations_stat_total_price')}: ${Number(calc.totalPrice).toLocaleString()}`,
+      `${t(locale, 'quotations_stat_net_value')}: ${Number(calc.netValue).toLocaleString()}`,
+      `${t(locale, 'quotations_stat_down_payment')}: ${Number(calc.downPayment).toLocaleString()}`,
+      `${t(locale, 'quotations_stat_installments')}: ${calc.schedule.length}`,
+    ];
+    return lines.join('\n');
+  }
+
+  /** Prefers the OS's native share sheet (routes to WhatsApp, Email,
+   * Messages, or any other installed app the user picks — not hard-coded
+   * to one channel) and falls back to a WhatsApp deep link when it isn't
+   * available, same fallback shape as shareQuotation() below. */
+  async function sharePreview(calc) {
+    const text = buildPreviewShareText(calc);
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ title: t(locale, 'pp_share_summary_title'), text });
+        return;
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+      }
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  }
+
+  /** Opens a clean, standalone printable page (not the live app shell) with
+   * the stat summary and full schedule, and triggers the browser's print
+   * dialog on it — works from the live preview, no saved record needed. */
+  function printPreview(calc) {
+    const rtl = document.documentElement.dir === 'rtl' || locale === 'ar';
+    const rowsHtml = calc.schedule.map((l, i) => `<tr><td>${i + 1}</td><td>${(l.kind && PAYMENT_TYPE_LABEL_KEYS[l.kind] ? t(locale, PAYMENT_TYPE_LABEL_KEYS[l.kind]) : '')}</td><td>${l.label}</td><td>${new Date(l.dueDate).toLocaleDateString()}</td><td>${Number(l.amount).toLocaleString()}</td></tr>`).join('');
+    const statHtml = (value, label) => `<div class="stat"><strong>${value}</strong><div>${label}</div></div>`;
+    const html = `<!doctype html><html dir="${rtl ? 'rtl' : 'ltr'}"><head><meta charset="utf-8"><title>${t(locale, 'pp_share_summary_title')}</title>
+<style>
+body{font-family:system-ui,sans-serif;padding:24px;color:#111}
+.stats{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0}
+.stat{border:1px solid #ddd;border-radius:8px;padding:10px 18px;min-width:110px}
+.stat strong{font-size:18px;display:block}
+.stat div{font-size:12px;color:#666;margin-top:4px}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th,td{border:1px solid #ddd;padding:8px;text-align:start;font-size:13px}
+th{background:#f5f5f5}
+</style></head><body>
+<h2>${t(locale, 'pp_share_summary_title')}</h2>
+<div class="stats">
+${statHtml(Number(calc.totalPrice).toLocaleString(), t(locale, 'quotations_stat_total_price'))}
+${statHtml(Number(calc.netValue).toLocaleString(), t(locale, 'quotations_stat_net_value'))}
+${statHtml(Number(calc.downPayment).toLocaleString(), t(locale, 'quotations_stat_down_payment'))}
+${statHtml(String(calc.schedule.length), t(locale, 'quotations_stat_installments'))}
+</div>
+<table><thead><tr><th>#</th><th>${t(locale, 'pp_col_type')}</th><th>${t(locale, 'quotations_col_label')}</th><th>${t(locale, 'sales_col_due_date')}</th><th>${t(locale, 'sales_col_amount')}</th></tr></thead>
+<tbody>${rowsHtml}</tbody></table>
+</body></html>`;
+    const w = window.open('', '_blank');
+    if (!w) { toast(t(locale, 'pp_print_popup_blocked'), 'error'); return; }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    w.print();
+  }
+
   function renderPreview(calc) {
     clear(previewSlot);
     if (!calc) return;
@@ -229,6 +296,11 @@ export async function renderQuotations(container) {
       if (snap.maintenanceFeeAmount != null) statCards.push(stat(Number(snap.maintenanceFeeAmount).toLocaleString(), t(locale, 'pp_stat_maintenance')));
     }
     previewSlot.appendChild(el('div', { class: 'stat-grid' }, statCards));
+    const printBtn = el('button', {}, t(locale, 'pp_print_btn'));
+    printBtn.addEventListener('click', () => printPreview(calc));
+    const shareBtn = el('button', {}, t(locale, 'quotations_share_btn'));
+    shareBtn.addEventListener('click', () => sharePreview(calc));
+    previewSlot.appendChild(el('div', { class: 'form-actions' }, [printBtn, shareBtn]));
     previewSlot.appendChild(table(
       [
         { label: '#', render: (l) => String(l.sequence + 1) },

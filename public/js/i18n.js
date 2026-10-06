@@ -987,6 +987,9 @@ export const STRINGS = {
     pp_type_fee: 'Fee',
     pp_manage_templates_toggle: 'Manage reusable templates',
     pp_preview_btn: 'Preview PDF',
+    pp_print_btn: 'Print',
+    pp_share_summary_title: 'Payment Plan',
+    pp_print_popup_blocked: 'Could not open the print window — check your browser\'s popup blocker',
     // ---- Contracts (contracts.js) ----
     contracts_page_subtitle: 'Every signed, draft, or cancelled contract across Sales — cancel a signed contract or open its payment schedule.',
     contracts_threshold_placeholder: 'e.g. 10',
@@ -2621,6 +2624,9 @@ export const STRINGS = {
     pp_type_fee: 'رسوم',
     pp_manage_templates_toggle: 'إدارة القوالب الجاهزة',
     pp_preview_btn: 'معاينة PDF',
+    pp_print_btn: 'طباعة',
+    pp_share_summary_title: 'خطة الدفع',
+    pp_print_popup_blocked: 'تعذر فتح نافذة الطباعة — تحقق من إعدادات حظر النوافذ المنبثقة في المتصفح',
     // ---- Contracts (contracts.js) ----
     contracts_page_subtitle: 'كل عقد موقّع أو مسودة أو ملغى عبر المبيعات — ألغِ عقدًا موقّعًا أو افتح جدول دفعاته.',
     contracts_threshold_placeholder: 'مثال: 10',
