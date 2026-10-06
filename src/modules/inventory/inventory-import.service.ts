@@ -54,6 +54,11 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
     label: 'Area (sqm)',
     aliases: [
       'area', 'size', 'area sqm', 'area m2', 'total area', 'sqm', 'sq m', 'sq.m', 'bua', 'built up area', 'built-up area', 'unit gross area', 'gross area',
+      // Retail/commercial price-list exports (e.g. a mall/shop building)
+      // commonly split area into an indoor and outdoor figure instead of
+      // one "Area" column — "In Door" is the unit's real covered area, the
+      // same concept this field already holds for a residential export.
+      'in door', 'indoor', 'indoor area',
       'مساحة الوحدة', 'مساحة المباني', 'المساحة', 'مساحة الوحده',
     ],
     required: true,
@@ -61,7 +66,17 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
   {
     key: 'listPrice',
     label: 'List Price',
-    aliases: ['price', 'total price', 'total unit price', 'unit price', 'selling price', 'unit value', 'price egp', 'السعر', 'إجمالي السعر', 'السعر الإجمالي', 'قيمة الوحدة'],
+    aliases: [
+      'price', 'total price', 'total unit price', 'unit price', 'selling price', 'unit value', 'price egp',
+      // "Final Price" (common on a Price/Meter + Final Price pair export)
+      // and "total price before discount" both name the real sellable
+      // total — the latter needs to be an exact alias, not left to the
+      // generic 'price'/'total price' substring match, because it also
+      // contains "discount" and would otherwise tie with Cash Discount's
+      // own alias and get left unmapped as an ambiguous substring.
+      'final price', 'total price before discount',
+      'السعر', 'إجمالي السعر', 'السعر الإجمالي', 'قيمة الوحدة',
+    ],
     required: true,
   },
   { key: 'areaSqmFrom', label: 'Area (sqm) — From', aliases: ['area from', 'bua from', 'size from'] },
@@ -74,11 +89,28 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
   { key: 'bedrooms', label: 'No of Bedrooms', aliases: ['bedrooms', 'beds', 'br', 'no of beds', 'عدد الغرف', 'غرف النوم'] },
   { key: 'designType', label: 'Design Type', aliases: ['design', 'model type', 'نوع التصميم'] },
   { key: 'view', label: 'View', aliases: ['unit view', 'الاطلالة', 'إطلالة'] },
-  { key: 'unitGardenAreaSqm', label: 'Garden Area', aliases: ['garden', 'garden area sqm', 'حديقة', 'مساحة الحديقة'] },
+  {
+    key: 'unitGardenAreaSqm',
+    label: 'Garden Area',
+    // "Out Door" (paired with "In Door" — see areaSqm above) is the same
+    // concept as Garden Area for a residential unit: extra non-covered
+    // space attached to the unit, beyond its indoor/BUA figure.
+    aliases: ['garden', 'garden area sqm', 'out door', 'outdoor', 'outdoor area', 'حديقة', 'مساحة الحديقة'],
+  },
   { key: 'buildingLabel', label: 'Building', aliases: ['block', 'المبنى', 'البلوك'] },
   { key: 'finishingType', label: 'Finishing Type', aliases: ['finishing', 'finish', 'تشطيب', 'نوع التشطيب'] },
   { key: 'deliveryDate', label: 'Delivery Date', aliases: ['delivery', 'handover', 'handover date', 'تاريخ التسليم', 'التسليم'] },
-  { key: 'pricePerMeter', label: 'Price Per Meter', aliases: ['price/m2', 'price per sqm', 'price per meter', 'سعر المتر'] },
+  {
+    key: 'pricePerMeter',
+    label: 'Price Per Meter',
+    // 'price / meter' is a distinct exact alias from 'price per meter' —
+    // normalizeHeader strips spaces/punctuation but not the word "per", so
+    // "Price / Meter" and "Price Per Meter" fold to different strings
+    // ("pricemeter" vs "pricepermeter"). Without this exact alias, "Price /
+    // Meter" has no exact match anywhere and falls through to the generic
+    // 'price' substring, wrongly stealing the required List Price slot.
+    aliases: ['price/m2', 'price per sqm', 'price per meter', 'price / meter', 'سعر المتر'],
+  },
   { key: 'phaseName', label: 'Phase', aliases: ['project phase', 'المرحلة'] },
   {
     key: 'availabilityStatus',

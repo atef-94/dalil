@@ -678,6 +678,33 @@ test('two differently-worded availability header sets both resolve, through sugg
   }
 });
 
+test('a real "Code/FLOOR/Unit Type/In Door/Out Door/Price per Meter/Final Price" retail export (In Door is the real area, Final Price the real total, not Price/Meter) maps and imports correctly', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Shadows' });
+
+  const raw = { Code: 'B47', FLOOR: 'Basement', 'Unit Type': 'Shop', 'In Door': '73', 'Out Door': '0', 'Price / Meter': '173040', 'Final Price': '12631920', Status: 'Available' };
+  const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+  assert.equal(mapping['In Door'], 'areaSqm');
+  assert.equal(mapping['Out Door'], 'unitGardenAreaSqm');
+  assert.equal(mapping['Price / Meter'], 'pricePerMeter');
+  assert.equal(mapping['Final Price'], 'listPrice');
+
+  const mapped: Record<string, string> = { projectName: project.name };
+  for (const [col, fieldKey] of Object.entries(mapping)) {
+    if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+  }
+  const result = await svc.importRows('c1', [mapped], async () => {});
+  assert.equal(result.succeeded, 1);
+  const [unit] = await inventory.listUnits('c1', project.id);
+  assert.equal(unit!.areaSqm, 73);
+  assert.equal(unit!.listPrice, 12_631_920);
+});
+
+test('"total price before discount" maps to List Price, not left ambiguous against Cash Discount\'s own "discount" alias', async () => {
+  const mapping = suggestMapping(['total price before discount'], INVENTORY_IMPORT_FIELDS);
+  assert.equal(mapping['total price before discount'], 'listPrice');
+});
+
 test('CATALOG_IMPORT_FIELDS and AVAILABILITY_IMPORT_FIELDS are both non-empty subsets of the one shared INVENTORY_IMPORT_FIELDS dictionary (one mapping engine, not two)', () => {
   const allKeys = new Set(INVENTORY_IMPORT_FIELDS.map((f) => f.key));
   assert.ok(CATALOG_IMPORT_FIELDS.length > 0);
