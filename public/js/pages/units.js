@@ -381,7 +381,7 @@ async function renderCatalogTab(root, locale) {
           // real units existed (visible in Manage) but never rendered in
           // this panel. Prefer real units when the project has any; fall
           // back to catalog ranges only when it doesn't.
-          const unitsPage = await api.get('/api/inventory/units', { projectId: p.id, status: 'available', limit: 5 });
+          const unitsPage = await api.get('/api/inventory/units', { projectId: p.id, status: 'any', limit: 5 });
           clear(footerPanel);
           if (unitsPage.items.length) {
             footerPanel.appendChild(table(
