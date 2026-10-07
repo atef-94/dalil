@@ -157,8 +157,10 @@ export class HttpServer {
       // "paste an already-hosted URL" — this system has no object-storage
       // upload pipeline, so those images live on whatever external host
       // the developer already uses. img-src can't execute script, so this
-      // stays a narrow, image-only relaxation.
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:",
+      // stays a narrow, image-only relaxation. style-src/font-src name the
+      // two Google Fonts hosts specifically (not a broad https:) for the
+      // Inter webfont <link> in index.html — same narrow-allowlist pattern.
+      "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:",
     );
     if (this.options.nodeEnv === 'production') {
       res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');

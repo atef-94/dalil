@@ -273,7 +273,7 @@ export function badge(text, color = '') {
 }
 
 const STATUS_COLORS = {
-  active: 'green', approved: 'green', paid: 'green', won: 'green', signed: 'green', converted: 'green', verified: 'green',
+  active: 'green', approved: 'green', paid: 'green', won: 'green', signed: 'green', converted: 'green', verified: 'green', available: 'green',
   pending: 'amber', upcoming: 'amber', held: 'amber', reserved: 'amber', pending_approval: 'amber', new: 'blue', open: 'blue',
   overdue: 'red', lost: 'red', rejected: 'red', cancelled: 'red', suspended: 'red', terminated: 'red', rejected_duplicate: 'red', rejected_other: 'red', failed: 'red',
 };

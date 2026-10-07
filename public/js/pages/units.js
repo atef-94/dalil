@@ -1,6 +1,7 @@
 import {
   el, clear, table, toast, errorBanner, statusBadge, badge, paginationControls, loadingState, emptyState,
   searchInput, selectInput, contentModal, formModal, tabs, icon, scrollRow, iconToggleButton, popover, field,
+  collapsible,
 } from '../ui.js';
 import { t, formatNumber } from '../i18n.js';
 import { api } from '../api.js';
@@ -795,18 +796,15 @@ async function renderManageTab(container, locale) {
     try {
       const page = await api.get('/api/inventory/developers', { limit: 50 });
       developers = page.items;
-      developersListSlot.appendChild(table(
-        [
-          { label: t(locale, 'units_col_name'), key: 'name' },
-          { label: '', render: (d) => {
-            const btn = el('button', {}, t(locale, 'units_manage_portfolio_btn'));
-            btn.addEventListener('click', () => viewDeveloperPortfolio(d));
-            return btn;
-          } },
-        ],
-        developers,
-        { empty: t(locale, 'units_manage_no_developers') },
-      ));
+      if (developers.length === 0) {
+        developersListSlot.appendChild(emptyState({ icon: 'branches', title: t(locale, 'units_manage_no_developers') }));
+        return;
+      }
+      developersListSlot.appendChild(el('div', { class: 'chip-grid' }, developers.map((d) => {
+        const btn = el('button', {}, t(locale, 'units_manage_portfolio_btn'));
+        btn.addEventListener('click', () => viewDeveloperPortfolio(d));
+        return el('div', { class: 'dev-chip' }, [el('span', {}, d.name), btn]);
+      })));
     } catch (err) {
       developersListSlot.appendChild(errorBanner(err.message));
     }
@@ -974,7 +972,7 @@ async function renderManageTab(container, locale) {
 
   container.appendChild(el('div', { class: 'card' }, [
     el('h3', { style: 'margin-top:0' }, t(locale, 'units_manage_add_unit_title')),
-    el('div', { class: 'form-row', style: 'flex-wrap:wrap' }, [
+    el('div', { class: 'form-grid-2' }, [
       el('div', {}, [el('label', {}, t(locale, 'units_manage_project_field')), projectSelect]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_unit_code_field')), codeInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_type_field')), typeInput]),
@@ -1036,20 +1034,20 @@ async function renderManageTab(container, locale) {
     load();
   });
 
+  const filtersPanel = el('div', { class: 'form-row', style: 'flex-wrap:wrap' }, [
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_min_price_field')), filterMinPrice]),
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_max_price_field')), filterMaxPrice]),
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_min_area_field')), filterMinArea]),
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_max_area_field')), filterMaxArea]),
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_bedrooms_field')), filterBedrooms]),
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_finishing_field')), filterFinishing]),
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_destination_field')), filterDestinationSelect]),
+    el('div', {}, [el('label', {}, t(locale, 'units_manage_status_field')), filterStatusSelect]),
+    el('div', { style: 'align-self:flex-end;display:flex;gap:6px' }, [applyFiltersBtn, clearFiltersBtn]),
+  ]);
   container.appendChild(el('div', { class: 'card' }, [
     el('div', { class: 'form-row', style: 'max-width:320px' }, [search]),
-    el('h4', { style: 'margin:12px 0 6px' }, t(locale, 'units_manage_advanced_filters')),
-    el('div', { class: 'form-row', style: 'flex-wrap:wrap' }, [
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_min_price_field')), filterMinPrice]),
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_max_price_field')), filterMaxPrice]),
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_min_area_field')), filterMinArea]),
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_max_area_field')), filterMaxArea]),
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_bedrooms_field')), filterBedrooms]),
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_finishing_field')), filterFinishing]),
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_destination_field')), filterDestinationSelect]),
-      el('div', {}, [el('label', {}, t(locale, 'units_manage_status_field')), filterStatusSelect]),
-      el('div', { style: 'align-self:flex-end;display:flex;gap:6px' }, [applyFiltersBtn, clearFiltersBtn]),
-    ]),
+    collapsible(t(locale, 'units_manage_advanced_filters'), filtersPanel),
   ]));
 
   const listSlot = el('div');
