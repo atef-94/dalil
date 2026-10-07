@@ -734,6 +734,28 @@ test('importRows recovers the real unit type from Bedrooms when Type holds a bar
   assert.equal(b2.bedrooms, undefined);
 });
 
+test('importRows recovers Unit Type from Bedrooms when the sheet has no Type column at all (the "Jiran" shape: Code/Block/Floor/Beds B/Area/.../Status)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Jiran' });
+
+  // A real sheet reported by a user: no "Type"/"Unit Type" column exists at
+  // all — the only type-like signal is "Beds B", holding codes like "3B".
+  const raw = { Code: 'A1-02', Block: 'A1', Floor: 'Ground', 'Beds B': '3B', Area: '139', 'Total Price': '5716752', Status: 'Available' };
+  const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+  assert.equal(mapping.Type ?? null, null, 'no Type column exists in this fixture');
+  assert.equal(mapping['Beds B'], 'bedrooms');
+  const mapped: Record<string, string> = { projectName: project.name };
+  for (const [col, fieldKey] of Object.entries(mapping)) {
+    if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+  }
+
+  const result = await svc.importRows('c1', [mapped], async () => {});
+  assert.equal(result.succeeded, 1, `row failed: ${JSON.stringify(result.results)}`);
+  const [unit] = await inventory.listUnits('c1', project.id);
+  assert.equal(unit!.unitType, '3B');
+  assert.equal(unit!.bedrooms, 3);
+});
+
 test('importRows leaves an ordinary numeric Bedrooms value and a real descriptive Unit Type alone (the swap heuristic never fires on a normal file)', async () => {
   const { inventory, svc } = setup();
   const project = await inventory.createProject({ companyId: 'c1', name: 'Portfolio Co' });

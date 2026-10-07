@@ -473,13 +473,18 @@ export class InventoryImportService {
       // it with a bare building/zone code ("A", "G1") rather than a real
       // descriptive type, with the actual type ("Studio", "2 BR", "Twin
       // Studio") living in the Bedrooms column instead — confirmed against
-      // a real multi-building file. Recovering it needs no per-file
-      // configuration: this only fires when the mapped Unit Type looks like
-      // a short code AND the Bedrooms column's raw text is itself
-      // descriptive (contains a letter), never for an ordinary numeric
-      // bedroom count or a blank cell.
+      // a real multi-building file. A real sheet can also have NO Type
+      // column at all, only a "Beds"-style column whose own values ("3B",
+      // "2B") are the only type-like signal the row has — confirmed against
+      // a real 7-sheet portfolio export where one sheet was shaped exactly
+      // this way and every one of its rows failed "Unit Type is required"
+      // with no column a user could even map it from. Recovering it needs
+      // no per-file configuration: this only fires when Unit Type is
+      // missing entirely or looks like a short code, AND the Bedrooms
+      // column's raw text is itself descriptive (contains a letter), never
+      // for an ordinary numeric bedroom count or a blank cell.
       const rawBedroomsText = raw.bedrooms?.trim();
-      if (unitType && /^[A-Za-z]\d{0,2}$/.test(unitType) && rawBedroomsText && /[A-Za-z]/.test(rawBedroomsText)) {
+      if ((!unitType || /^[A-Za-z]\d{0,2}$/.test(unitType)) && rawBedroomsText && /[A-Za-z]/.test(rawBedroomsText)) {
         unitType = rawBedroomsText;
       }
       const areaSqm = resolveRangeValue(raw.areaSqm, raw.areaSqmFrom, raw.areaSqmTo, rangeStrategy);
@@ -809,10 +814,10 @@ export class InventoryImportService {
       const projectName = raw.projectName?.trim();
       let unitType = raw.unitType?.trim();
       // Same correction as the availability-row path: a Unit Type column
-      // holding a bare building/zone code with the real descriptive type
-      // sitting in Bedrooms instead.
+      // holding a bare building/zone code — or missing entirely — with the
+      // real descriptive type sitting in Bedrooms instead.
       const rawBedroomsText = raw.bedrooms?.trim();
-      if (unitType && /^[A-Za-z]\d{0,2}$/.test(unitType) && rawBedroomsText && /[A-Za-z]/.test(rawBedroomsText)) {
+      if ((!unitType || /^[A-Za-z]\d{0,2}$/.test(unitType)) && rawBedroomsText && /[A-Za-z]/.test(rawBedroomsText)) {
         unitType = rawBedroomsText;
       }
       const bedrooms = parseBedrooms(raw.bedrooms);
