@@ -1791,6 +1791,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           fields: INVENTORY_IMPORT_FIELDS,
           detectedSheetKind,
           formulaErrors: session.formulaErrors,
+          sheetGaps: session.sheetGaps,
         },
       };
     },

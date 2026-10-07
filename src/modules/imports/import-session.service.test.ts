@@ -230,6 +230,102 @@ test('createSession with sheetNameAsColumn merges every sheet, injecting the she
   assert.equal(session.rawRows[1]!['Unit Type'], 'Duplex');
 });
 
+// ---- Real bug reported by a user: a 7-sheet portfolio export where most
+// sheets have a real "Unit Type" column but one ("Jiran") only has a
+// "Beds B" column (bedroom-count codes like "3B", not a type) — the
+// file-wide suggestedMapping (built from the UNION of every sheet's
+// headers) still showed Unit Type as "mapped" because OTHER sheets had it,
+// so the whole file sailed straight past the Mapping step with no warning,
+// and every one of that one sheet's rows silently failed validation at
+// Preview with no indication why. sheetGaps is computed per sheet instead,
+// so this case is now caught and surfaced before Preview. ----
+
+test('createSession with sheetNameAsColumn flags a sheet whose own columns are missing a required field, even though another sheet supplies it', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type', 'Area (sqm) — From']);
+  stayn.addRow(['Apartment', '150']);
+  const jiran = wb.addWorksheet('Jiran');
+  jiran.addRow(['Code', 'Beds B']);
+  jiran.addRow(['A1-02', '3B']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  // File-wide, Unit Type looks mapped (Stayn supplies it) — exactly the
+  // masking behavior that let this slip through before.
+  assert.equal(session.suggestedMapping['Unit Type'], 'unitType');
+  // But sheetGaps must still call out Jiran specifically.
+  assert.ok(session.sheetGaps, 'expected sheetGaps to be populated');
+  assert.equal(session.sheetGaps!.length, 1);
+  assert.equal(session.sheetGaps![0]!.sheetName, 'Jiran');
+  assert.deepEqual(session.sheetGaps![0]!.missingRequiredFieldKeys, ['unitType']);
+});
+
+test('createSession with sheetNameAsColumn leaves sheetGaps undefined when every sheet covers every required field', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type', 'Area (sqm) — From']);
+  stayn.addRow(['Apartment', '150']);
+  const connect4 = wb.addWorksheet('Connect4');
+  connect4.addRow(['Unit Type', 'Area (sqm) — From']);
+  connect4.addRow(['Duplex', '220']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.equal(session.sheetGaps, undefined);
+});
+
+test('createSession with sheetNameAsColumn never flags a required field that has a real fallback, even when a sheet has no column for it', async () => {
+  const fieldsWithFallback: ImportFieldDef[] = [
+    ...INVENTORY_LIKE_FIELDS,
+    { key: 'unitCode', label: 'Unit Code', aliases: ['code'], required: true, autoFallbackOptionKey: 'autoGenerateUnitCode' },
+  ];
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Code', 'Unit Type', 'Area (sqm) — From']);
+  stayn.addRow(['A-101', 'Apartment', '150']);
+  const jiran = wb.addWorksheet('Jiran');
+  jiran.addRow(['Unit Type', 'Area (sqm) — From']); // no Code column at all
+  jiran.addRow(['Apartment', '150']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: fieldsWithFallback,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.equal(session.sheetGaps, undefined);
+});
+
 // ---- Section 5 fix: formula-error cells detected by the xlsx parser must
 // survive into the ImportSession, not be silently discarded ----
 

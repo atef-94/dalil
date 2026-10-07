@@ -1302,6 +1302,16 @@ export interface ImportSession {
    * data next to a broken formula without knowing it. Always undefined for
    * CSV/PDF imports, which have no formula concept. */
   formulaErrors?: string[];
+  /** Multi-sheet .xlsx import only (sheetNameAsColumn): one entry per sheet
+   * whose own columns don't cover every required target field, even though
+   * `suggestedMapping` (built from the union of every sheet's headers) may
+   * show that field as mapped because a DIFFERENT sheet supplied it — e.g.
+   * a 7-tab portfolio export where 6 sheets have a real "Type" column and
+   * one doesn't still looks "fully mapped" file-wide, so that one sheet's
+   * rows would otherwise sail straight through to Preview and fail there
+   * with no warning beforehand. Undefined/empty means every sheet's own
+   * columns cover every required field. */
+  sheetGaps?: { sheetName: string; missingRequiredFieldKeys: string[] }[];
   createdAt: string;
   expiresAt: string;
 }

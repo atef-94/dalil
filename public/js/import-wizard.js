@@ -60,6 +60,14 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
    */
   function isFullyAutoMappable() {
     if (!session || !session.suggestedMapping) return false;
+    // A multi-sheet import's suggestedMapping is built from the UNION of
+    // every sheet's own headers — a required field can show up as "mapped"
+    // there because sheet A has that column, even though sheet B doesn't
+    // and would silently fail every one of its own rows at the preview
+    // step with no warning beforehand. sheetGaps (set by the backend only
+    // when that happened) always forces the manual Mapping screen instead,
+    // where sheetGapsNote() explains exactly which sheet/field is short.
+    if (session.sheetGaps && session.sheetGaps.length > 0) return false;
     const mappedKeys = new Set(Object.values(session.suggestedMapping).filter(Boolean));
     return (session.fields || []).every((f) => {
       if (!f.required) return true;
@@ -152,6 +160,27 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     ]);
   }
 
+  /** Surfaces sheetGaps (see isFullyAutoMappable's comment) on the Mapping
+   * step — the one place the user can still act on it, by manually mapping
+   * one of that sheet's own columns onto the missing field (each raw
+   * column's dropdown below is independent, so e.g. a "Beds B" column can
+   * be pointed at Unit Type even though it's also the source for
+   * Bedrooms). Without this note the short sheet's rows would otherwise
+   * just show up "invalid" on the next (Preview) step with no indication
+   * of why, easy to miss in a large combined-sheet row list. */
+  function sheetGapsNote() {
+    const gaps = session && session.sheetGaps;
+    if (!gaps || gaps.length === 0) return null;
+    const fieldLabel = (key) => (session.fields || []).find((f) => f.key === key)?.label || key;
+    return el('div', { class: 'error-banner', style: 'flex-direction:column;align-items:stretch;gap:6px' }, [
+      el('strong', {}, t(locale, 'import_sheet_gaps_heading')),
+      el('ul', { style: 'margin:0;padding-inline-start:20px;font-size:12.5px' },
+        gaps.map((g) => el('li', {},
+          `"${g.sheetName}" — ${g.missingRequiredFieldKeys.map(fieldLabel).join(', ')}`,
+        ))),
+    ]);
+  }
+
   function sampleValuesFor(column) {
     const values = (session.sampleRows || []).map((r) => r[column]).filter((v) => v);
     return values.length > 0 ? values.slice(0, 2).join(', ') : '(blank)';
@@ -207,6 +236,7 @@ export function openImportWizard({ title, uploadPath, onImported, uploadOptions 
     body.appendChild(el('div', {}, [
       el('p', { class: 'page-subtitle' }, `${session.totalRows}${t(locale, 'import_rows_detected_middle')}${session.fileName}${t(locale, 'import_mapping_confirm_suffix')}`),
       sheetKindNote(),
+      sheetGapsNote(),
       formulaErrorsNote(),
       ...mappingRows,
       ...optionControls,

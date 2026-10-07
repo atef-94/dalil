@@ -100,6 +100,7 @@ export class ImportSessionService {
     let rows: Record<string, string>[];
     let reliable = true;
     let formulaErrors: string[] = [];
+    let sheetGaps: { sheetName: string; missingRequiredFieldKeys: string[] }[] = [];
 
     if (fileType === 'csv') {
       rows = parseCsvRecords(input.fileBuffer.toString('utf8'));
@@ -125,12 +126,28 @@ export class ImportSessionService {
       // in from whichever sheet actually carried it.
       const fieldKeyToCanonicalHeader = new Map<string, string>();
       const headerSet = new Set<string>([projectColumn]);
+      // The project column itself is never a real sheetGaps gap: every row
+      // ends up with a real value there regardless of whether this sheet
+      // has its own matching column, via the sheet-name fallback below.
+      const projectColumnFieldKey = suggestMapping([projectColumn], input.fields)[projectColumn] ?? undefined;
       rows = [];
       for (const sheet of sheets) {
         if (sheet.formulaErrors.length > 0) {
           formulaErrors.push(...sheet.formulaErrors.map((e) => `sheet "${sheet.sheetName}", ${e}`));
         }
         const sheetMapping = suggestMapping(sheet.headers, input.fields);
+        // A required field with a real fallback (today, only unitCode via
+        // autoGenerateUnitCode) is never a gap — the fallback recovers a
+        // value for every row that needs it regardless of which sheet it
+        // came from, so it would never actually block that sheet's rows the
+        // way a column with no fallback at all would.
+        const mappedFieldKeys = new Set(Object.values(sheetMapping).filter((k): k is string => !!k));
+        const missingRequiredFieldKeys = input.fields
+          .filter((f) => f.required && !f.autoFallbackOptionKey && f.key !== projectColumnFieldKey && !mappedFieldKeys.has(f.key))
+          .map((f) => f.key);
+        if (missingRequiredFieldKeys.length > 0) {
+          sheetGaps.push({ sheetName: sheet.sheetName, missingRequiredFieldKeys });
+        }
         const renameHeader = new Map<string, string>();
         for (const header of sheet.headers) {
           const fieldKey = sheetMapping[header];
@@ -200,6 +217,7 @@ export class ImportSessionService {
       rawRows: rows,
       reliable,
       formulaErrors: formulaErrors.length > 0 ? formulaErrors : undefined,
+      sheetGaps: sheetGaps.length > 0 ? sheetGaps : undefined,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + SESSION_TTL_MS).toISOString(),
     };
