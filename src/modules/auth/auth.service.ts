@@ -1,14 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import type { Company, User, UserType } from '../../domain/types.js';
+import type { Company, PasswordResetToken, User, UserType } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
-import { hashPassword, verifyPassword, signToken, encryptSecret, decryptSecret } from '../../infra/security.js';
+import { hashPassword, verifyPassword, signToken, encryptSecret, decryptSecret, hashToken, generateRawToken } from '../../infra/security.js';
 import { generateTotpSecret, verifyTotpCode, buildTotpUri, generateRecoveryCodes } from '../../infra/totp.js';
-import { ValidationError, TokenError, NotFoundError } from '../../infra/errors.js';
+import { SlidingWindowRateLimiter } from '../../infra/rate-limiter.js';
+import { ValidationError, TokenError, NotFoundError, RateLimitError } from '../../infra/errors.js';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
 const MIN_PASSWORD_LENGTH = 8;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Keyed by companyId:email, independent of the IP-keyed rate limiter at the
+// HTTP layer (http-server.ts) — this one throttles repeated attempts
+// against one specific account regardless of how many different IPs they
+// come from, which an IP-only limiter cannot do.
+const LOGIN_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
+const LOGIN_RATE_LIMIT_MAX = 15;
 
 export interface RegisterInput {
   companyId: string;
@@ -34,6 +42,8 @@ export interface LoginInput {
 }
 
 export class AuthService {
+  private readonly loginRateLimiter = new SlidingWindowRateLimiter(LOGIN_RATE_LIMIT_WINDOW_MS, LOGIN_RATE_LIMIT_MAX);
+
   constructor(
     private readonly users: Repository<User>,
     private readonly tokenSecret: string,
@@ -42,6 +52,7 @@ export class AuthService {
      * encryptSecret). Falls back to tokenSecret when unset, same convention
      * as AutomationService's secretStoreKey (see app.ts). */
     private readonly encryptionSecret?: string,
+    private readonly passwordResetTokens?: Repository<PasswordResetToken>,
   ) {}
 
   private get secretKey(): string {
@@ -87,6 +98,11 @@ export class AuthService {
 
   async login(input: LoginInput): Promise<{ token: string; user: User }> {
     const email = input.email.trim().toLowerCase();
+
+    if (!this.loginRateLimiter.consume(`${input.companyId}:${email}`).allowed) {
+      throw new RateLimitError('too many login attempts for this account, try again later');
+    }
+
     const [user] = await this.users.findAll((u) => u.companyId === input.companyId && u.email === email);
 
     // Constant-shaped failure: don't reveal whether the account exists.
@@ -228,5 +244,64 @@ export class AuthService {
     const recoveryCodes = generateRecoveryCodes();
     await this.users.save({ ...user, recoveryCodesHashed: recoveryCodes.map((c) => hashPassword(c)) });
     return recoveryCodes;
+  }
+
+  // ---- Password reset ----
+  //
+  // No email/SMS provider exists anywhere in this codebase (see the plan's
+  // own honest-risks section) — the raw token is handed back to the caller
+  // (app.ts's route), which audit-logs it for an operator to relay
+  // out-of-band, rather than ever putting it in the public HTTP response
+  // (that response is observable by anyone who submits any email address,
+  // so returning the token there would be a direct account-takeover path).
+
+  /** Returns the user+rawToken only when the email matches a real account in
+   * this company — but the caller must still always report generic success
+   * to its own caller regardless, to avoid confirming whether the email
+   * exists (same no-enumeration convention as login()'s own error). */
+  async requestPasswordReset(companyId: string, email: string): Promise<{ user: User; rawToken: string } | undefined> {
+    if (!this.passwordResetTokens) return undefined;
+    const normalizedEmail = email.trim().toLowerCase();
+    const [user] = await this.users.findAll((u) => u.companyId === companyId && u.email === normalizedEmail);
+    if (!user) return undefined;
+    const rawToken = generateRawToken();
+    await this.passwordResetTokens.save({
+      id: randomUUID(),
+      userId: user.id,
+      tokenHash: hashToken(rawToken),
+      expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS).toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+    return { user, rawToken };
+  }
+
+  /** Resets the password and, as a side effect, force-logs-out every other
+   * session the user holds (sessionsRevokedBefore) — a password reset is a
+   * reasonable trigger to assume the old password/sessions may be
+   * compromised, same security logic as most real-world "reset password"
+   * flows. */
+  async resetPassword(rawToken: string, newPassword: string): Promise<User> {
+    if (!this.passwordResetTokens) throw new ValidationError('password reset is not available');
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      throw new ValidationError(`password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
+    const tokenHash = hashToken(rawToken);
+    const now = Date.now();
+    const [resetToken] = await this.passwordResetTokens.findAll(
+      (t) => t.tokenHash === tokenHash && !t.usedAt && Date.parse(t.expiresAt) > now,
+    );
+    if (!resetToken) throw new ValidationError('reset link is invalid, expired, or already used');
+    const user = await this.users.findById(resetToken.userId);
+    if (!user) throw new NotFoundError('user not found');
+
+    await this.users.save({
+      ...user,
+      passwordHash: hashPassword(newPassword),
+      failedLoginCount: 0,
+      lockedUntil: undefined,
+      sessionsRevokedBefore: new Date().toISOString(),
+    });
+    await this.passwordResetTokens.save({ ...resetToken, usedAt: new Date().toISOString() });
+    return user;
   }
 }

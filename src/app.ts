@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   ActionName,
   AgentDecision,
@@ -16,6 +17,8 @@ import type {
   IntegrationConnection,
   IntegrationEvent,
   Invitation,
+  RevokedToken,
+  PasswordResetToken,
   AuditLogEntry,
   Branch,
   BrokerCompany,
@@ -283,6 +286,11 @@ export interface Application {
      * sweepOverdueAndEmit/sweepSlaBreachesAndEmit above, including the
      * optional `companyId` rule. */
     sweepExpiredReservationsAndEmit: (companyId?: string) => Promise<number>;
+    /** Prunes RevokedToken rows past their own expiresAt — a token that old
+     * could never be replayed anyway (its 12h TTL is already up), so the
+     * row is pure bookkeeping at that point. Unscoped by design (it isn't a
+     * tenant-data query, just storage hygiene). */
+    sweepExpiredRevokedTokens: () => Promise<number>;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -364,6 +372,8 @@ function buildRepos(db?: DatabaseSync) {
     aiWorkflowStepRuns: repo<AiWorkflowStepRun>('ai_workflow_step_runs'),
     signatureEnvelopes: repo<SignatureEnvelope>('signature_envelopes'),
     invitations: repo<Invitation>('invitations'),
+    revokedTokens: repo<RevokedToken>('revoked_tokens'),
+    passwordResetTokens: repo<PasswordResetToken>('password_reset_tokens'),
   };
 }
 
@@ -371,6 +381,11 @@ interface Actor {
   userId: string;
   companyId: string;
   userType: string;
+  /** Only set for a real bearer-token request (absent for the dev x-demo-user
+   * bypass, which has no underlying token to revoke). Lets logout() revoke
+   * exactly this session — see RevokedToken. */
+  jti?: string;
+  tokenExp?: number;
 }
 
 async function resolveActor(
@@ -378,13 +393,29 @@ async function resolveActor(
   users: Repository<User>,
   tokenSecret: string,
   nodeEnv: string,
+  revokedTokens: Repository<RevokedToken>,
 ): Promise<Actor> {
   const authHeader = ctx.headers.authorization;
   if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice('Bearer '.length);
     try {
       const payload = verifyToken(token, tokenSecret);
-      return { userId: payload.sub, companyId: payload.companyId, userType: payload.userType };
+      // Two independent revocation checks (see RevokedToken/sessionsRevokedBefore
+      // doc comments in domain/types.ts for why there are two): a specific
+      // token killed by logout, or every token for this user killed at once
+      // by an admin/owner (forced logout after a password change, breach
+      // response, migration cleanup).
+      const user = await users.findById(payload.sub);
+      if (!user) throw new TokenError('invalid or expired token');
+      // <= (not <): sessionsRevokedBefore has only whole-second resolution
+      // (via iat), so a token issued in the very same second as the revoke
+      // call must still be treated as revoked, not waved through by a tie.
+      if (user.sessionsRevokedBefore && payload.iat <= Math.floor(Date.parse(user.sessionsRevokedBefore) / 1000)) {
+        throw new TokenError('session has been revoked');
+      }
+      const [revoked] = await revokedTokens.findAll((r) => r.jti === payload.jti);
+      if (revoked) throw new TokenError('session has been revoked');
+      return { userId: payload.sub, companyId: payload.companyId, userType: payload.userType, jti: payload.jti, tokenExp: payload.exp };
     } catch {
       throw new TokenError('invalid or expired token');
     }
@@ -448,7 +479,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
   const auditLog = new AuditLog(repos.auditEntries);
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
-  const auth = new AuthService(repos.users, options.tokenSecret, repos.companies, options.secretStoreKey ?? options.tokenSecret);
+  const auth = new AuthService(repos.users, options.tokenSecret, repos.companies, options.secretStoreKey ?? options.tokenSecret, repos.passwordResetTokens);
   const crmStages = new CrmStageService(repos.crmStages);
   const crm = new CrmService(repos.leads, crmStages);
   const importSessions = new ImportSessionService(repos.importSessions);
@@ -661,7 +692,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     trustProxy: options.trustProxy ?? false,
   });
 
-  const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv);
+  const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv, repos.revokedTokens);
 
   // Fires every event-triggered workflow synchronously (so an automation's
   // side effects, e.g. a created task, are visible by the time the request
@@ -724,6 +755,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
         payload: { ...reservation },
         dedupeKey: `reservation.expired:${reservation.id}`,
       });
+    }
+    return expired.length;
+  };
+
+  const sweepExpiredRevokedTokens = async (): Promise<number> => {
+    const now = Date.now();
+    const expired = await repos.revokedTokens.findAll((r) => Date.parse(r.expiresAt) <= now);
+    for (const row of expired) {
+      await repos.revokedTokens.deleteById(row.id);
     }
     return expired.length;
   };
@@ -927,7 +967,59 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // calls it before discarding its local token.
   httpServer.post('/api/auth/logout', async (ctx) => {
     const actor = await actorOf(ctx);
+    if (actor.jti && actor.tokenExp) {
+      await repos.revokedTokens.save({ id: randomUUID(), jti: actor.jti, expiresAt: new Date(actor.tokenExp * 1000).toISOString() });
+    }
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'logout', resource: 'session', resourceId: actor.userId, metadata: {} });
+    return { status: 200, body: { success: true } };
+  });
+
+  // Force-logout every session a user holds in one write, without needing
+  // to know which jtis are outstanding (see User.sessionsRevokedBefore's own
+  // doc comment) — used for forced logout after a password reset/compromise,
+  // and by the migration-safety step that needs to invalidate sessions.
+  // Self-service (a user can always force-logout their own other sessions)
+  // or gated on edit:employee within the same company, or a platform owner.
+  httpServer.post('/api/users/:id/revoke-sessions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const targetId = ctx.params.id!;
+    const actorUser = await repos.users.findById(actor.userId);
+    const actorIsOwner = !!actorUser && isPlatformOwner(actorUser.email, ownerEmails);
+
+    if (targetId !== actor.userId && !actorIsOwner && !(await rbac.can(actor.userId, 'edit', 'employee'))) {
+      throw new ForbiddenError('missing edit:employee permission');
+    }
+    const target = await repos.users.findById(targetId);
+    if (!target || (!actorIsOwner && target.companyId !== actor.companyId)) {
+      throw new NotFoundError('user not found');
+    }
+    await repos.users.save({ ...target, sessionsRevokedBefore: new Date().toISOString() });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'session', resourceId: targetId, metadata: { securityAlert: true, event: 'sessions_revoked' } });
+    return { status: 200, body: { success: true } };
+  });
+
+  // ---- Password reset — public, token-gated, no email/SMS provider exists
+  // in this codebase (see the plan's honest-risks section), so the raw
+  // token never goes in this route's own HTTP response (anyone who submits
+  // any email gets the same generic response — putting the token there
+  // would be a direct account-takeover path). It's audit-logged instead, for
+  // an operator to relay out-of-band until a real provider is wired in. ----
+  httpServer.post('/api/auth/password-reset/request', async (ctx) => {
+    const body = parseJsonBody<{ companyId: string; email: string }>(ctx.body);
+    const result = await auth.requestPasswordReset(body.companyId, body.email);
+    if (result) {
+      await auditLog.record({
+        companyId: result.user.companyId, actorUserId: 'system', action: 'create', resource: 'password_reset_token', resourceId: result.user.id,
+        metadata: { securityAlert: true, event: 'password_reset_requested', resetTokenForOperatorRelay: result.rawToken },
+      });
+    }
+    return { status: 200, body: { success: true } };
+  });
+
+  httpServer.post('/api/auth/password-reset/confirm', async (ctx) => {
+    const body = parseJsonBody<{ token: string; newPassword: string }>(ctx.body);
+    const user = await auth.resetPassword(body.token, body.newPassword);
+    await auditLog.record({ companyId: user.companyId, actorUserId: user.id, action: 'edit', resource: 'session', resourceId: user.id, metadata: { securityAlert: true, event: 'password_reset_completed' } });
     return { status: 200, body: { success: true } };
   });
 
@@ -5091,7 +5183,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding, invitations, platformAdmin,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, sweepExpiredRevokedTokens, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,

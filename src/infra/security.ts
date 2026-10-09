@@ -1,4 +1,4 @@
-import { randomBytes, scryptSync, timingSafeEqual, createHmac, createHash, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHmac, createHash, createCipheriv, createDecipheriv } from 'node:crypto';
 
 const SCRYPT_KEYLEN = 64;
 // A flat, non-refreshable TTL (no refresh-token flow exists) — long enough
@@ -49,16 +49,20 @@ export interface TokenPayload {
   userType: string;
   iat: number;
   exp: number;
+  /** Unique per issued token (not per user) — lets a single still-valid
+   * token be revoked individually (see RevokedToken, app.ts resolveActor/
+   * logout) without affecting any other session the same user holds. */
+  jti: string;
 }
 
 function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64url');
 }
 
-export function signToken(payload: Omit<TokenPayload, 'iat' | 'exp'>, secret: string): string {
+export function signToken(payload: Omit<TokenPayload, 'iat' | 'exp' | 'jti'>, secret: string): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const now = Math.floor(Date.now() / 1000);
-  const fullPayload: TokenPayload = { ...payload, iat: now, exp: now + TOKEN_TTL_SECONDS };
+  const fullPayload: TokenPayload = { ...payload, iat: now, exp: now + TOKEN_TTL_SECONDS, jti: randomUUID() };
   const encodedHeader = base64url(JSON.stringify(header));
   const encodedPayload = base64url(JSON.stringify(fullPayload));
   const signature = createHmac('sha256', secret)

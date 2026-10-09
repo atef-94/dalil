@@ -119,6 +119,14 @@ async function main(): Promise<void> {
   }, 60_000);
   memorySweepInterval.unref();
 
+  // Prunes RevokedToken rows past their own expiresAt — pure storage
+  // hygiene (an expired token could never be replayed anyway), so a slower
+  // cadence than the correctness-sensitive ticks above is fine.
+  const revokedTokenSweepInterval = setInterval(() => {
+    void services.sweepExpiredRevokedTokens();
+  }, 10 * 60_000);
+  revokedTokenSweepInterval.unref();
+
   // Same-volume SQLite backup (node:sqlite's online backup API — safe under
   // WAL, not a raw file copy) on boot and every 24h after. Protects against
   // corruption or a bad write, not against losing the volume itself; see
@@ -143,6 +151,7 @@ async function main(): Promise<void> {
     clearInterval(aiWorkflowSweepInterval);
     clearInterval(reservationSweepInterval);
     clearInterval(memorySweepInterval);
+    clearInterval(revokedTokenSweepInterval);
     clearInterval(backupInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');

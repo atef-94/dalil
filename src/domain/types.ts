@@ -35,6 +35,32 @@ export interface Invitation {
   revokedAt?: string;
 }
 
+/** One revoked bearer token, keyed by its jti (see security.ts signToken).
+ * Rows are pruned by expiresAt, since a token past its own 12h TTL can never
+ * be replayed anyway regardless of this table — see app.ts's periodic sweep.
+ * Lets real POST /api/auth/logout kill the one specific token that called
+ * it, as opposed to User.sessionsRevokedBefore, which kills every token for
+ * a user at once (see that field's own doc comment). */
+export interface RevokedToken {
+  id: string;
+  jti: string;
+  expiresAt: string;
+}
+
+/** A password-reset link, same single-use/expiring/hashed-token shape as
+ * Invitation — see that type's doc comment for why tokenHash is SHA-256,
+ * not scrypt. Requesting a reset never reveals whether the email exists
+ * (see auth.service.ts requestPasswordReset); this row is simply never
+ * created for an unknown email. */
+export interface PasswordResetToken {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  createdAt: string;
+  usedAt?: string;
+}
+
 export interface Branch {
   id: string;
   companyId: string;
