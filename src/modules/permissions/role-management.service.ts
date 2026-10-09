@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { ActionName, PermissionGrant, ResourceName, Role, ScopeName, SensitivityTier, UserRole } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
-import { NotFoundError, ValidationError } from '../../infra/errors.js';
+import { NotFoundError, ValidationError, ForbiddenError } from '../../infra/errors.js';
+import { RbacEvaluator, SCOPE_PRIORITY } from './rbac.evaluator.js';
 
 export interface AddGrantInput {
   action: ActionName;
@@ -23,6 +24,11 @@ export class RoleManagementService {
     private readonly roles: Repository<Role>,
     private readonly grants: Repository<PermissionGrant>,
     private readonly userRoles: Repository<UserRole>,
+    /** Optional so existing tests that construct this service directly
+     * (without a full RbacEvaluator) keep working unchanged — addGrant()'s
+     * privilege-escalation guard below simply no-ops when it's absent. Every
+     * real caller in app.ts passes the real one. */
+    private readonly rbac?: RbacEvaluator,
   ) {}
 
   async createRole(companyId: string, name: string): Promise<Role> {
@@ -39,9 +45,35 @@ export class RoleManagementService {
     return this.roles.findById(id);
   }
 
-  async addGrant(companyId: string, roleId: string, input: AddGrantInput): Promise<PermissionGrant> {
+  /**
+   * `actorUserId` guards against privilege escalation: a company admin with
+   * only edit:role (not the permission being granted itself) could
+   * otherwise create a role granting itself — or any other user — broader
+   * access than it actually holds, including a scope wider than its own
+   * (e.g. a 'department'-scoped manager granting a 'company'-wide view:lead
+   * grant to any role, then assigning that role to themselves). Skipped
+   * (no-op) when `actorUserId` is omitted or `rbac` wasn't supplied to the
+   * constructor, so every pre-existing call site keeps working unchanged;
+   * every real app.ts route below passes both.
+   */
+  async addGrant(companyId: string, roleId: string, input: AddGrantInput, actorUserId?: string): Promise<PermissionGrant> {
     const role = await this.roles.findById(roleId);
     if (!role || role.companyId !== companyId) throw new NotFoundError('role not found');
+
+    if (actorUserId && this.rbac && input.scope !== 'broker_own') {
+      const actorScope = await this.rbac.getListAccessScope(actorUserId, input.action, input.resource);
+      if (actorScope.kind === 'none') {
+        throw new ForbiddenError(`cannot grant ${input.action}:${input.resource} — you do not hold that permission yourself`);
+      }
+      const grantedRank = SCOPE_PRIORITY.indexOf(input.scope);
+      const actorRank = SCOPE_PRIORITY.indexOf(actorScope.kind as ScopeName);
+      if (grantedRank < actorRank) {
+        throw new ForbiddenError(
+          `cannot grant ${input.action}:${input.resource} at scope '${input.scope}' — broader than your own '${actorScope.kind}' access to it`,
+        );
+      }
+    }
+
     const grant: PermissionGrant = {
       id: randomUUID(),
       roleId,

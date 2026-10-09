@@ -14,13 +14,20 @@ export interface ScopeOwnerKeys {
  * a given record — callers pass a cheap in-memory lookup since the acting
  * user's own scope is already resolved by getListAccessScope().
  */
-export async function filterByListScope<T>(
+export async function filterByListScope<T extends { companyId: string }>(
   items: T[],
   scope: ListScope,
   resolveKeys: (item: T) => Promise<ScopeOwnerKeys>,
 ): Promise<T[]> {
   if (scope.kind === 'none') return [];
-  if (scope.kind === 'company') return items;
+  if (scope.kind === 'company') {
+    // Defense-in-depth, not the primary tenant boundary (every service
+    // method's own companyId check and RbacEvaluator's hard wall already
+    // enforce that) — a per-item re-check in case a caller ever passes an
+    // `items` array that wasn't already pre-filtered to the acting user's
+    // own company, instead of trusting the input blindly.
+    return items.filter((item) => item.companyId === scope.companyId);
+  }
 
   const results: T[] = [];
   for (const item of items) {

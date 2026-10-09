@@ -521,7 +521,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const paymentImport = new PaymentImportService(repos.leads, inventory, sales, paymentPlans, finance);
   const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm, repos.contracts, repos.reservations);
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
-  const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
+  const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles, rbac);
   const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
   const invitations = new InvitationService(repos.invitations, repos.roles, organization, auth, roleManagement);
   const platformAdmin = new PlatformAdminService(onboarding, repos.companies, auditLog);
@@ -1363,7 +1363,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:role permission');
     }
     const body = parseJsonBody<{ action: PermissionGrant['action']; resource: PermissionGrant['resource']; scope: PermissionGrant['scope']; sensitivity?: PermissionGrant['sensitivity'] }>(ctx.body);
-    const grant = await roleManagement.addGrant(actor.companyId, ctx.params.roleId!, body);
+    const grant = await roleManagement.addGrant(actor.companyId, ctx.params.roleId!, body, actor.userId);
     return { status: 201, body: grant };
   });
 
@@ -1410,7 +1410,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
         role = await roleManagement.createRole(actor.companyId, roleName);
         roleByName.set(roleName, role);
       }
-      return roleManagement.addGrant(actor.companyId, role.id, { action, resource, scope, sensitivity });
+      return roleManagement.addGrant(actor.companyId, role.id, { action, resource, scope, sensitivity }, actor.userId);
     });
     return { status: 200, body: result };
   });
@@ -1633,7 +1633,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       leadId: ctx.query.get('leadId') ?? undefined,
     });
     const filtered = await filterByListScope(all, scope, (q) => employeeScopeKeys(q.createdByUserId));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    return { status: 200, body: paginate(filtered, ctx.query, actor.companyId) };
   });
 
   const quotationScopeCheck = async (actor: Actor, action: ActionName, quotationId: string) => {
@@ -2349,7 +2349,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       limit: 500,
     });
     const filtered = searchFilter(units, ['code', 'unitType'], ctx.query.get('q'));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    return { status: 200, body: paginate(filtered, ctx.query, actor.companyId) };
   });
 
   // Manual unit edit route — previously updateUnitDetails() was only ever
@@ -2725,7 +2725,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const ownerEmployeeUserId = ctx.query.get('ownerEmployeeUserId');
     if (ownerEmployeeUserId) leads = leads.filter((l) => l.ownerEmployeeUserId === ownerEmployeeUserId);
     const filtered = searchFilter(leads, ['fullName', 'phone', 'email'], ctx.query.get('q'));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    return { status: 200, body: paginate(filtered, ctx.query, actor.companyId) };
   });
 
   httpServer.get('/api/crm/leads/:leadId', async (ctx) => {
@@ -3507,7 +3507,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:payment_schedule permission');
     }
     const refunds = await finance.listRefunds(actor.companyId);
-    return { status: 200, body: paginate(refunds, ctx.query) };
+    return { status: 200, body: paginate(refunds, ctx.query, actor.companyId) };
   });
 
   // Reversing money already collected is always sensitive — every
@@ -5164,7 +5164,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:audit_log permission');
     }
     const entries = await auditLog.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(entries, ctx.query) };
+    return { status: 200, body: paginate(entries, ctx.query, actor.companyId) };
   });
 
   // ---- Health / dev-only ----

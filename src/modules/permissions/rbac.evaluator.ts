@@ -32,7 +32,11 @@ export interface RecordTarget {
   submittedByUserId?: string;
 }
 
-const SCOPE_PRIORITY: ScopeName[] = ['company', 'branch', 'department', 'team', 'own', 'broker_own'];
+// Broadest first. Exported so role-management.service.ts's addGrant() can
+// compare "is the scope being granted at least as narrow as what the
+// granting actor themselves already holds" without duplicating this
+// ordering — see that method's own doc comment for why that check exists.
+export const SCOPE_PRIORITY: ScopeName[] = ['company', 'branch', 'department', 'team', 'own', 'broker_own'];
 
 export type ListScope =
   | { kind: 'none' }
