@@ -1,6 +1,6 @@
 import type { DeliveryInfo, Project, ProjectUnitSpec, Unit, UnitStatus } from '../../domain/types.js';
 import type { ImportFieldDef } from '../../infra/field-mapping.js';
-import { parseBedrooms, parseCurrencyNumber, parseDeliveryInfo, parsePercent, normalizeFinishing, normalizeAvailabilityStatus, splitList } from '../../infra/import-normalize.js';
+import { parseBedrooms, parseBooleanish, parseCurrencyNumber, parseDeliveryInfo, parsePercent, normalizeFinishing, normalizeAvailabilityStatus, splitList } from '../../infra/import-normalize.js';
 import type { CreateProjectUnitSpecInput, InventoryService, UpdateProjectDetailsInput, UpdateUnitDetailsInput } from './inventory.service.js';
 
 /**
@@ -98,6 +98,14 @@ export const INVENTORY_IMPORT_FIELDS: ImportFieldDef[] = [
     aliases: ['garden', 'garden area sqm', 'out door', 'outdoor', 'outdoor area', 'حديقة', 'مساحة الحديقة'],
   },
   { key: 'buildingLabel', label: 'Building', aliases: ['block', 'المبنى', 'البلوك'] },
+  {
+    key: 'landAreaSqm',
+    label: 'Land Area',
+    aliases: ['land area', 'plot area', 'land area sqm', 'plot', 'مساحة الأرض', 'أرض الوحدة'],
+  },
+  { key: 'parkingIncluded', label: 'Parking Included', aliases: ['parking included', 'has parking', 'جراج متضمن', 'باركينج متضمن'] },
+  { key: 'parkingSpaces', label: 'Parking Spaces', aliases: ['parking count', 'no of parking', 'عدد الجراجات'] },
+  { key: 'parkingPrice', label: 'Parking Price', aliases: ['parking cost', 'garage price', 'سعر الجراج'] },
   { key: 'finishingType', label: 'Finishing Type', aliases: ['finishing', 'finish', 'تشطيب', 'نوع التشطيب'] },
   { key: 'deliveryDate', label: 'Delivery Date', aliases: ['delivery', 'handover', 'handover date', 'تاريخ التسليم', 'التسليم'] },
   {
@@ -171,6 +179,7 @@ const AVAILABILITY_FIELD_KEYS = new Set([
   'projectName', 'unitCode', 'floorLabel', 'buildingLabel', 'unitType', 'bedrooms',
   'areaSqm', 'areaSqmFrom', 'areaSqmTo', 'listPrice', 'listPriceFrom', 'listPriceTo',
   'availabilityStatus', 'designType', 'view', 'unitGardenAreaSqm', 'pricePerMeter', 'phaseName',
+  'landAreaSqm', 'parkingIncluded', 'parkingSpaces', 'parkingPrice',
 ]);
 /** The field(s) that give a row real identity in each mode — see
  * classifySheet's own doc comment for why an anchor match is required
@@ -232,10 +241,14 @@ export interface ResolvedUnitExtra {
   designType?: string;
   view?: string[];
   gardenAreaSqm?: number;
+  landAreaSqm?: number;
   buildingLabel?: string;
   finishingType?: string;
   delivery?: DeliveryInfo;
   pricePerMeterOverride?: number;
+  parkingIncluded?: boolean;
+  parkingSpaces?: number;
+  parkingPrice?: number;
   /** Set only when the row's status column value normalized successfully —
    * see normalizeAvailabilityStatus. Absent when there was no status
    * column value, or when it was present but unrecognized (in which case
@@ -411,10 +424,14 @@ export class InventoryImportService {
       designType: raw.designType?.trim() || undefined,
       view: splitList(raw.view).length ? splitList(raw.view) : undefined,
       gardenAreaSqm: parseCurrencyNumber(raw.unitGardenAreaSqm),
+      landAreaSqm: parseCurrencyNumber(raw.landAreaSqm),
       buildingLabel: raw.buildingLabel?.trim() || undefined,
       finishingType: normalizeFinishing(raw.finishingType),
       delivery: parseDeliveryInfo(raw.deliveryDate),
       pricePerMeterOverride: parseCurrencyNumber(raw.pricePerMeter),
+      parkingIncluded: parseBooleanish(raw.parkingIncluded),
+      parkingSpaces: parseBedrooms(raw.parkingSpaces),
+      parkingPrice: parseCurrencyNumber(raw.parkingPrice),
     };
   }
 
@@ -506,7 +523,10 @@ export class InventoryImportService {
       if (!Number.isFinite(areaSqm) || areaSqm <= 0) issues.push('"Area (sqm)" must be a positive number');
       if (!Number.isFinite(listPrice) || listPrice <= 0) issues.push('"List Price" must be a positive number');
       if (unitExtra.gardenAreaSqm !== undefined && unitExtra.gardenAreaSqm < 0) issues.push('"Garden Area" must be >= 0');
+      if (unitExtra.landAreaSqm !== undefined && unitExtra.landAreaSqm < 0) issues.push('"Land Area" must be >= 0');
       if (unitExtra.bedrooms !== undefined && unitExtra.bedrooms < 0) issues.push('"No of Bedrooms" must be >= 0');
+      if (unitExtra.parkingSpaces !== undefined && unitExtra.parkingSpaces < 0) issues.push('"Parking Spaces" must be >= 0');
+      if (unitExtra.parkingPrice !== undefined && unitExtra.parkingPrice < 0) issues.push('"Parking Price" must be >= 0');
       if (projectExtra.cashDiscountPercent !== undefined && (projectExtra.cashDiscountPercent < 0 || projectExtra.cashDiscountPercent > 100)) {
         issues.push('"Cash Discount" must be between 0 and 100');
       }
@@ -722,10 +742,14 @@ export class InventoryImportService {
             designType: resolved.unitExtra.designType,
             view: resolved.unitExtra.view,
             gardenAreaSqm: resolved.unitExtra.gardenAreaSqm,
+            landAreaSqm: resolved.unitExtra.landAreaSqm,
             buildingLabel: resolved.unitExtra.buildingLabel,
             finishingType: resolved.unitExtra.finishingType,
             delivery: resolved.unitExtra.delivery,
             pricePerMeterOverride: resolved.unitExtra.pricePerMeterOverride,
+            parkingIncluded: resolved.unitExtra.parkingIncluded,
+            parkingSpaces: resolved.unitExtra.parkingSpaces,
+            parkingPrice: resolved.unitExtra.parkingPrice,
             initialStatus: resolved.unitExtra.status,
             sourceStatus: resolved.unitExtra.sourceStatus,
             ...rowProvenance,
@@ -743,10 +767,14 @@ export class InventoryImportService {
           if (resolved.unitExtra.designType) updates.designType = resolved.unitExtra.designType;
           if (resolved.unitExtra.view) updates.view = resolved.unitExtra.view;
           if (resolved.unitExtra.gardenAreaSqm !== undefined) updates.gardenAreaSqm = resolved.unitExtra.gardenAreaSqm;
+          if (resolved.unitExtra.landAreaSqm !== undefined) updates.landAreaSqm = resolved.unitExtra.landAreaSqm;
           if (resolved.unitExtra.buildingLabel) updates.buildingLabel = resolved.unitExtra.buildingLabel;
           if (resolved.unitExtra.finishingType) updates.finishingType = resolved.unitExtra.finishingType;
           if (resolved.unitExtra.delivery) updates.delivery = resolved.unitExtra.delivery;
           if (resolved.unitExtra.pricePerMeterOverride !== undefined) updates.pricePerMeterOverride = resolved.unitExtra.pricePerMeterOverride;
+          if (resolved.unitExtra.parkingIncluded !== undefined) updates.parkingIncluded = resolved.unitExtra.parkingIncluded;
+          if (resolved.unitExtra.parkingSpaces !== undefined) updates.parkingSpaces = resolved.unitExtra.parkingSpaces;
+          if (resolved.unitExtra.parkingPrice !== undefined) updates.parkingPrice = resolved.unitExtra.parkingPrice;
           unit = await this.inventory.updateUnitDetails(resolved.existingUnitId!, companyId, updates);
           // A recognized status differing from the unit's current one is a
           // separate, narrower write (see updateUnitAvailabilityFromImport)

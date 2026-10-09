@@ -34,6 +34,7 @@ export interface CreateUnitInput {
   designType?: string;
   view?: string[];
   gardenAreaSqm?: number;
+  landAreaSqm?: number;
   buildingLabel?: string;
   finishingType?: string;
   delivery?: DeliveryInfo;
@@ -74,6 +75,7 @@ export type UpdateUnitDetailsInput = Partial<
     | 'designType'
     | 'view'
     | 'gardenAreaSqm'
+    | 'landAreaSqm'
     | 'buildingLabel'
     | 'finishingType'
     | 'delivery'
@@ -133,6 +135,7 @@ export interface CreateProjectInput {
   imageUrls?: string[];
   masterPlanImageUrl?: string;
   coverImageUrl?: string;
+  brochureUrl?: string;
 }
 
 /** Every field is optional and only ever overwrites what's explicitly
@@ -302,6 +305,7 @@ export class InventoryService {
     if (input.imageUrls !== undefined) out.imageUrls = input.imageUrls.length ? input.imageUrls : undefined;
     if (input.masterPlanImageUrl !== undefined) out.masterPlanImageUrl = input.masterPlanImageUrl?.trim() || undefined;
     if (input.coverImageUrl !== undefined) out.coverImageUrl = input.coverImageUrl?.trim() || undefined;
+    if (input.brochureUrl !== undefined) out.brochureUrl = input.brochureUrl?.trim() || undefined;
     return out;
   }
 
@@ -411,6 +415,7 @@ export class InventoryService {
     if (!(input.listPrice > 0)) throw new ValidationError('listPrice must be positive');
     if (input.bedrooms !== undefined && !(input.bedrooms >= 0)) throw new ValidationError('bedrooms must be >= 0');
     if (input.gardenAreaSqm !== undefined && !(input.gardenAreaSqm >= 0)) throw new ValidationError('gardenAreaSqm must be >= 0');
+    if (input.landAreaSqm !== undefined && !(input.landAreaSqm >= 0)) throw new ValidationError('landAreaSqm must be >= 0');
     if (input.maintenanceFeePercentOverride !== undefined && !(input.maintenanceFeePercentOverride >= 0 && input.maintenanceFeePercentOverride <= 100)) {
       throw new ValidationError('maintenanceFeePercentOverride must be between 0 and 100');
     }
@@ -444,6 +449,7 @@ export class InventoryService {
       designType: input.designType?.trim() || undefined,
       view: input.view?.length ? input.view : undefined,
       gardenAreaSqm: input.gardenAreaSqm,
+      landAreaSqm: input.landAreaSqm,
       buildingLabel: input.buildingLabel?.trim() || undefined,
       finishingType: input.finishingType?.trim() || undefined,
       delivery: input.delivery,
@@ -544,6 +550,7 @@ export class InventoryService {
     if (updates.listPrice !== undefined && !(updates.listPrice > 0)) throw new ValidationError('listPrice must be positive');
     if (updates.bedrooms !== undefined && !(updates.bedrooms >= 0)) throw new ValidationError('bedrooms must be >= 0');
     if (updates.gardenAreaSqm !== undefined && !(updates.gardenAreaSqm >= 0)) throw new ValidationError('gardenAreaSqm must be >= 0');
+    if (updates.landAreaSqm !== undefined && !(updates.landAreaSqm >= 0)) throw new ValidationError('landAreaSqm must be >= 0');
     if (updates.maintenanceFeePercentOverride !== undefined && !(updates.maintenanceFeePercentOverride >= 0 && updates.maintenanceFeePercentOverride <= 100)) {
       throw new ValidationError('maintenanceFeePercentOverride must be between 0 and 100');
     }
@@ -561,6 +568,7 @@ export class InventoryService {
       designType: updates.designType !== undefined ? updates.designType?.trim() || undefined : unit.designType,
       view: updates.view !== undefined ? (updates.view.length ? updates.view : undefined) : unit.view,
       gardenAreaSqm: updates.gardenAreaSqm ?? unit.gardenAreaSqm,
+      landAreaSqm: updates.landAreaSqm ?? unit.landAreaSqm,
       buildingLabel: updates.buildingLabel !== undefined ? updates.buildingLabel?.trim() || undefined : unit.buildingLabel,
       finishingType: updates.finishingType !== undefined ? updates.finishingType?.trim() || undefined : unit.finishingType,
       floorPlanImageUrl: updates.floorPlanImageUrl !== undefined ? updates.floorPlanImageUrl?.trim() || undefined : unit.floorPlanImageUrl,

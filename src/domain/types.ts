@@ -573,6 +573,28 @@ export interface Project {
    * same "paste a URL" convention as imageUrls; falls back to
    * imageUrls[0] at the presentation layer when unset, never required. */
   coverImageUrl?: string;
+  /** The project's sales brochure — a URL pointing at a real uploaded file
+   * (see FileAsset/FileStorageService), not an externally-hosted link like
+   * the fields above; this is the one media field with a real upload path
+   * in this app. */
+  brochureUrl?: string;
+  createdAt: string;
+}
+
+/** A real uploaded file (project media: cover image, master plan, gallery
+ * image, brochure) — the one place in this app where a "file" field is
+ * backed by actual stored bytes rather than a pasted external URL. Scoped
+ * to a company the same way every other entity is; `storagePath` is
+ * relative to the server's configured upload directory, never an absolute
+ * path, so the storage root can move without invalidating existing rows. */
+export interface FileAsset {
+  id: string;
+  companyId: string;
+  originalName: string;
+  contentType: string;
+  sizeBytes: number;
+  storagePath: string;
+  uploadedByUserId: string;
   createdAt: string;
 }
 
@@ -626,6 +648,9 @@ export interface Unit {
   /** Multiple views are allowed (e.g. ["Garden", "Pool"]). */
   view?: string[];
   gardenAreaSqm?: number;
+  /** Plot/land area for villa-style units — distinct from areaSqm (the
+   * built-up/BUA area) and gardenAreaSqm (uncovered garden only). */
+  landAreaSqm?: number;
   buildingLabel?: string;
   /** Overrides Project.finishingType when this specific unit differs. */
   finishingType?: string;

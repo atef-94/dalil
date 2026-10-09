@@ -192,6 +192,10 @@ test('importRows writes bedrooms/view/finishing/garden area/floor/design/buildin
         buildingLabel: 'B3',
         deliveryDate: 'Q2 2028',
         pricePerMeter: '12500',
+        landAreaSqm: '250',
+        parkingIncluded: 'Yes',
+        parkingSpaces: '2',
+        parkingPrice: '50000',
       },
     ],
     async (unit) => {
@@ -209,6 +213,10 @@ test('importRows writes bedrooms/view/finishing/garden area/floor/design/buildin
   assert.equal(written!.buildingLabel, 'B3');
   assert.deepEqual(written!.delivery, { quarter: 2, year: 2028 });
   assert.equal(written!.pricePerMeterOverride, 12500);
+  assert.equal(written!.landAreaSqm, 250);
+  assert.equal(written!.parkingIncluded, true);
+  assert.equal(written!.parkingSpaces, 2);
+  assert.equal(written!.parkingPrice, 50000);
 });
 
 test('importRows resolves a Phase name to a real ProjectPhase, creating it once and reusing it on later rows', async () => {

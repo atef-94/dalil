@@ -88,6 +88,17 @@ export function parseCurrencyNumber(raw: string | undefined): number | undefined
   return Number.isFinite(n) ? n : undefined;
 }
 
+/** "Yes"/"Included"/"1"/"نعم"/"متضمن" -> true, "No"/"Not Included"/"0"/"لا" ->
+ * false, anything else (blank, unrecognized text) -> undefined so a bad
+ * value is left unmapped rather than guessed. */
+export function parseBooleanish(raw: string | undefined): boolean | undefined {
+  if (!raw?.trim()) return undefined;
+  const text = raw.trim().toLowerCase();
+  if (/^(yes|y|true|1|included|نعم|متضمن|مدرج)$/.test(text)) return true;
+  if (/^(no|n|false|0|not included|لا|غير متضمن|غير مدرج)$/.test(text)) return false;
+  return undefined;
+}
+
 const FINISHING_SYNONYMS: { canonical: string; patterns: RegExp[] }[] = [
   { canonical: 'Core & Shell', patterns: [/core\s*&?\s*shell/i, /^shell$/i, /على\s*الطوب/, /دون\s*تشطيب/] },
   { canonical: 'Semi Finished', patterns: [/semi[\s-]?finish/i, /نصف\s*تشطيب/] },

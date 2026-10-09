@@ -51,6 +51,7 @@ import type {
   SalesPhoneNumber,
   ProjectUnitSpec,
   ProjectFavorite,
+  FileAsset,
   ActionApproval,
   ApprovableActionType,
   DiscountApprovalPolicy,
@@ -81,6 +82,8 @@ import type {
 } from './domain/types.js';
 import { netContractValue } from './domain/money.js';
 import type { DatabaseSync } from 'node:sqlite';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { InMemoryRepository, type Repository } from './infra/repository.js';
 import { SqliteRepository } from './infra/sqlite-repository.js';
 import { HttpServer, type RequestContext } from './infra/http-server.js';
@@ -94,6 +97,7 @@ import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
 import { seedDemoData, lockDemoData } from './infra/seed.js';
 import { EventBus, type DomainEvent } from './infra/event-bus.js';
+import { FileStorageService } from './infra/file-storage.js';
 
 import { RbacEvaluator } from './modules/permissions/rbac.evaluator.js';
 import { buildPermissionManifest } from './modules/permissions/manifest.builder.js';
@@ -184,6 +188,12 @@ export interface AppOptions {
    * request). Only set true when genuinely deployed behind a trusted single
    * reverse proxy. */
   trustProxy?: boolean;
+  /** Directory real uploaded project media (cover image, master plan,
+   * gallery, brochure) is written to — see FileStorageService. Omit (as
+   * the test suite does) for a disposable OS temp directory; main.ts
+   * passes a real path on the same persistent volume the SQLite file
+   * itself lives on. */
+  fileStorageDir?: string;
 }
 
 export interface Application {
@@ -276,6 +286,7 @@ function buildRepos(db?: DatabaseSync) {
     salesPhoneNumbers: repo<SalesPhoneNumber>('sales_phone_numbers'),
     projectUnitSpecs: repo<ProjectUnitSpec>('project_unit_specs'),
     projectFavorites: repo<ProjectFavorite>('project_favorites'),
+    fileAssets: repo<FileAsset>('file_assets'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
@@ -440,6 +451,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     repos.projectFavorites,
   );
   const inventoryImport = new InventoryImportService(inventory);
+  const fileStorage = new FileStorageService(options.fileStorageDir ?? join(tmpdir(), 'active-os-uploads'), repos.fileAssets);
   const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
   const quotations = new QuotationService(repos.quotations, repos.units, repos.projects, paymentPlans);
@@ -1735,6 +1747,50 @@ export async function buildApplication(options: AppOptions): Promise<Application
       },
     );
     return { status: 200, body: result };
+  });
+
+  // ---- Project media file upload/download ----
+  // The one place in this app where a "file" field is backed by real
+  // stored bytes rather than a pasted external URL — see
+  // infra/file-storage.ts's own doc comment. Covers Project cover image,
+  // master plan image, gallery images, and brochure PDF; every other
+  // media/document field (locationMapUrl, ministerialDecisionDocumentUrl,
+  // floorPlanImageUrl, …) keeps the existing paste-a-URL convention.
+  httpServer.post(
+    '/api/inventory/files/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'edit', 'project'))) {
+        throw new ForbiddenError('missing edit:project permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+      const asset = await fileStorage.saveFile({
+        companyId: actor.companyId,
+        uploadedByUserId: actor.userId,
+        originalName: file.filename,
+        contentType: file.contentType,
+        data: file.data,
+      });
+      return {
+        status: 201,
+        body: { fileId: asset.id, url: `/api/inventory/files/${asset.id}`, contentType: asset.contentType, originalName: asset.originalName },
+      };
+    },
+    { maxBodyBytes: 16 * 1024 * 1024 },
+  );
+
+  httpServer.get('/api/inventory/files/:fileId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) {
+      throw new ForbiddenError('missing view:project permission');
+    }
+    const { asset, data } = await fileStorage.getFile(ctx.params.fileId!, actor.companyId);
+    return {
+      status: 200,
+      body: { contentType: asset.contentType, base64: data.toString('base64'), originalName: asset.originalName },
+    };
   });
 
   // ---- Inventory Import pipeline (staged: upload -> preview -> confirm) ----

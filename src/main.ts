@@ -25,6 +25,12 @@ async function main(): Promise<void> {
   const db = openDatabase(dbPath);
   process.stdout.write(`persistent storage: ${dbPath}\n`);
 
+  // Uploaded project media (cover image, master plan, gallery, brochure)
+  // lives alongside the SQLite file on the same persistent volume — zero
+  // additional Railway configuration needed.
+  const fileStorageDir = join(dirname(dbPath), 'uploads');
+  mkdirSync(fileStorageDir, { recursive: true });
+
   const { httpServer, services } = await buildApplication({
     nodeEnv,
     tokenSecret,
@@ -33,6 +39,7 @@ async function main(): Promise<void> {
     staticDir: join(__dirname, '..', 'public'),
     db,
     seed: seedDemo,
+    fileStorageDir,
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS ? Number(process.env.RATE_LIMIT_WINDOW_MS) : undefined,
     rateLimitMax: process.env.RATE_LIMIT_MAX ? Number(process.env.RATE_LIMIT_MAX) : undefined,
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
