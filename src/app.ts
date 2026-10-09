@@ -394,6 +394,7 @@ async function resolveActor(
   tokenSecret: string,
   nodeEnv: string,
   revokedTokens: Repository<RevokedToken>,
+  companies: Repository<Company>,
 ): Promise<Actor> {
   const authHeader = ctx.headers.authorization;
   if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
@@ -415,6 +416,13 @@ async function resolveActor(
       }
       const [revoked] = await revokedTokens.findAll((r) => r.jti === payload.jti);
       if (revoked) throw new TokenError('session has been revoked');
+      // A suspended tenant blocks every token for every one of its users
+      // immediately, not just future logins — otherwise a session issued
+      // before the suspension would keep working for up to its full 12h
+      // TTL, which is exactly the gap mandatory proof point 8 ("suspended
+      // sessions cannot continue accessing protected resources") rules out.
+      const company = await companies.findById(payload.companyId);
+      if (company?.status === 'suspended') throw new TokenError('this company has been suspended');
       return { userId: payload.sub, companyId: payload.companyId, userType: payload.userType, jti: payload.jti, tokenExp: payload.exp };
     } catch {
       throw new TokenError('invalid or expired token');
@@ -692,7 +700,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     trustProxy: options.trustProxy ?? false,
   });
 
-  const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv, repos.revokedTokens);
+  const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv, repos.revokedTokens, repos.companies);
 
   // Fires every event-triggered workflow synchronously (so an automation's
   // side effects, e.g. a created task, are visible by the time the request
