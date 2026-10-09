@@ -2,8 +2,51 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildApplication } from './app.js';
 
+const OWNER_EMAIL = 'owner1@platform.test';
+const OWNER_PASSWORD = 'owner-1-password-123';
+
 async function freshApp() {
-  return buildApplication({ nodeEnv: 'test', tokenSecret: 'test-secret', allowedOrigins: [], seed: true });
+  return buildApplication({
+    nodeEnv: 'test',
+    tokenSecret: 'test-secret',
+    allowedOrigins: [],
+    seed: true,
+    ownerEmail1: OWNER_EMAIL,
+    ownerEmail2: 'owner2@platform.test',
+    ownerPassword1: OWNER_PASSWORD,
+    ownerPassword2: 'owner-2-password-123',
+  });
+}
+
+async function postJson(base: string, path: string, body: unknown, headers: Record<string, string> = {}) {
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let parsed: unknown;
+  try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = text; }
+  return { status: res.status, body: parsed };
+}
+
+/** Creates a brand-new tenant via the owner-gated /api/platform/tenants route
+ * (the only way to do this now that public signup is gone) and returns the
+ * bearer-token headers for its founding user, exactly like the old
+ * self-service signup response did. */
+async function createSecondTenant(base: string, namePrefix: string) {
+  const ownerLogin = await postJson(base, '/api/auth/login', {
+    companyId: '__platform__', email: OWNER_EMAIL, password: OWNER_PASSWORD,
+  });
+  const ownerHeaders = { authorization: `Bearer ${(ownerLogin.body as { token: string }).token}` };
+  const tenant = await postJson(base, '/api/platform/tenants', {
+    companyName: `${namePrefix} ${Date.now()}`,
+    fullName: 'Owner B',
+    email: `${namePrefix.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}@example.com`,
+    password: 'a-real-password-123',
+  }, ownerHeaders);
+  assert.equal(tenant.status, 201);
+  return { authorization: `Bearer ${(tenant.body as { token: string }).token}` };
 }
 
 async function withServer(run: (base: string, app: Awaited<ReturnType<typeof freshApp>>) => Promise<void>) {
@@ -85,20 +128,8 @@ test('project media file download rejects a fileId belonging to a different comp
     const upload = await uploadFile(base, '/api/inventory/files/upload', 'brochure.pdf', 'application/pdf', Buffer.from('%PDF-1.4 fake'), headers);
     const { fileId } = upload.body as { fileId: string };
 
-    // A completely separate real tenant (Tenant B), via self-service signup.
-    const signupRes = await fetch(`${base}/api/auth/signup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        companyName: `File Upload Tenant B ${Date.now()}`,
-        fullName: 'Owner B',
-        email: `file-upload-ownerb-${Date.now()}@example.com`,
-        password: 'a-real-password-123',
-      }),
-    });
-    assert.equal(signupRes.status, 201);
-    const { token } = (await signupRes.json()) as { token: string };
-    const otherHeaders = { authorization: `Bearer ${token}` };
+    // A completely separate real tenant (Tenant B), via owner-gated tenant creation.
+    const otherHeaders = await createSecondTenant(base, 'File Upload Tenant B');
 
     const crossTenant = await getJson(base, `/api/inventory/files/${fileId}`, otherHeaders);
     assert.equal(crossTenant.status, 404);

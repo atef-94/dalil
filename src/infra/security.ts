@@ -1,4 +1,4 @@
-import { randomBytes, scryptSync, timingSafeEqual, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHmac, createHash, createCipheriv, createDecipheriv } from 'node:crypto';
 
 const SCRYPT_KEYLEN = 64;
 // A flat, non-refreshable TTL (no refresh-token flow exists) — long enough
@@ -23,6 +23,22 @@ export function verifyPassword(password: string, stored: string): boolean {
   const expected = Buffer.from(derived, 'hex');
   if (candidate.length !== expected.length) return false;
   return timingSafeEqual(candidate, expected);
+}
+
+// ---- One-way hashing for high-entropy bearer tokens (invitation accept
+// links, password-reset links) — deterministic SHA-256, NOT scrypt. These
+// tokens are already randomBytes(32)-generated, not human passwords, so
+// there's no offline-cracking risk a slow KDF would defend against; using a
+// deterministic hash instead means the accept/reset flow can look a row up
+// BY the token's hash directly (repo.findAll(t => t.tokenHash === hash))
+// instead of scanning and scrypt-verifying every still-pending row. ----
+
+export function hashToken(rawToken: string): string {
+  return createHash('sha256').update(rawToken).digest('hex');
+}
+
+export function generateRawToken(): string {
+  return randomBytes(32).toString('hex');
 }
 
 // ---- HMAC-SHA256-signed tokens (JWT-shaped: header.payload.signature, base64url) ----

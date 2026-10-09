@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { User, UserType } from '../../domain/types.js';
+import type { Company, User, UserType } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { hashPassword, verifyPassword, signToken } from '../../infra/security.js';
 import { ValidationError, TokenError } from '../../infra/errors.js';
@@ -31,6 +31,7 @@ export class AuthService {
   constructor(
     private readonly users: Repository<User>,
     private readonly tokenSecret: string,
+    private readonly companies?: Repository<Company>,
   ) {}
 
   private validateCredentials(email: string, password: string): void {
@@ -81,6 +82,18 @@ export class AuthService {
     const now = Date.now();
     if (user.lockedUntil && Date.parse(user.lockedUntil) > now) {
       throw new TokenError('account locked due to too many failed login attempts, try again later');
+    }
+
+    // Platform-owner-controlled suspension (see platform-admin.service.ts) —
+    // blocks every login for every user in a suspended company without
+    // deleting any data. Checked before the password itself so a suspended
+    // tenant's users get the same generic failure either way (no signal
+    // about whether the password was even right).
+    if (this.companies) {
+      const company = await this.companies.findById(user.companyId);
+      if (company?.status === 'suspended') {
+        throw new TokenError('this company has been suspended');
+      }
     }
 
     const valid = verifyPassword(input.password, user.passwordHash);

@@ -47,12 +47,7 @@ export const STRINGS = {
     logout: 'Log out',
     login_title: 'Welcome back',
     login_subtitle: 'Sign in to your ACTIVE workspace',
-    signup_title: 'Create your organization',
-    signup_subtitle: 'Set up a new ACTIVE workspace in one step',
-    tab_login: 'Log in',
-    tab_signup: 'Sign up',
     submit_login: 'Log in',
-    submit_signup: 'Create workspace',
     // ---- Shared UI chrome (ui.js) — used across virtually every page ----
     common_session_expired: 'Your session expired — please sign in again.',
     common_no_records: 'No records yet.',
@@ -71,8 +66,6 @@ export const STRINGS = {
     field_company_id: 'Company ID',
     field_email: 'Email',
     field_password: 'Password',
-    field_org_name: 'Organization name',
-    field_full_name: 'Your full name',
     generic_error: 'Something went wrong.',
     // ---- Dashboard ----
     dashboard_title: 'Dashboard',
@@ -1511,9 +1504,8 @@ export const STRINGS = {
     audit_col_action: 'Action',
     audit_col_resource: 'Resource',
     audit_empty: 'No audit entries yet.',
-    // ---- Login/Signup (login.js): final sweep gaps ----
+    // ---- Login (login.js): final sweep gaps ----
     login_email_placeholder: 'you@company.com',
-    signup_company_name_placeholder: 'Acme Real Estate',
     // ---- Import Wizard (shared: import-wizard.js) ----
     import_upload_btn: 'Upload & continue',
     import_choose_file_error: 'Choose a file first.',
@@ -1706,12 +1698,7 @@ export const STRINGS = {
     logout: 'تسجيل الخروج',
     login_title: 'مرحبًا بعودتك',
     login_subtitle: 'سجّل الدخول إلى مساحة عمل أكتيف',
-    signup_title: 'أنشئ مؤسستك',
-    signup_subtitle: 'أنشئ مساحة عمل جديدة على أكتيف في خطوة واحدة',
-    tab_login: 'تسجيل الدخول',
-    tab_signup: 'إنشاء حساب',
     submit_login: 'تسجيل الدخول',
-    submit_signup: 'إنشاء مساحة العمل',
     common_session_expired: 'انتهت جلستك — من فضلك سجّل الدخول مرة أخرى.',
     common_no_records: 'لا توجد سجلات بعد.',
     common_nothing_here: 'لا يوجد شيء هنا بعد',
@@ -1729,8 +1716,6 @@ export const STRINGS = {
     field_company_id: 'معرّف الشركة',
     field_email: 'البريد الإلكتروني',
     field_password: 'كلمة المرور',
-    field_org_name: 'اسم المؤسسة',
-    field_full_name: 'الاسم الكامل',
     generic_error: 'حدث خطأ ما.',
     dashboard_title: 'لوحة التحكم',
     dashboard_stat_leads: 'العملاء المحتملون',
@@ -3164,9 +3149,8 @@ export const STRINGS = {
     audit_col_action: 'الإجراء',
     audit_col_resource: 'المورد',
     audit_empty: 'لا توجد إدخالات تدقيق بعد.',
-    // ---- Login/Signup (login.js): final sweep gaps ----
+    // ---- Login (login.js): final sweep gaps ----
     login_email_placeholder: 'you@company.com',
-    signup_company_name_placeholder: 'مثال: شركة النخبة العقارية',
     // ---- Import Wizard (shared: import-wizard.js) ----
     import_upload_btn: 'رفع ومتابعة',
     import_choose_file_error: 'اختر ملفًا أولًا.',

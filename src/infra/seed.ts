@@ -16,6 +16,7 @@ import type { Repository } from './repository.js';
 import { hashPassword } from './security.js';
 import { CrmStageService, DEFAULT_STAGES } from '../modules/crm/crm-stage.service.js';
 import { CrmService } from '../modules/crm/crm.service.js';
+import { PLATFORM_COMPANY_ID } from '../modules/permissions/platform-owner.js';
 
 export interface SeedRepos {
   companies: Repository<Company>;
@@ -81,10 +82,10 @@ const ALL_RESOURCES: ResourceName[] = [
 
 /**
  * Four demo accounts (CEO / Sales Manager / Sales Agent / Finance) used by
- * the manual `x-demo-user` dev header. Real self-service tenants and their
- * own roles are created through POST /api/auth/signup instead (see
- * modules/organization + modules/permissions role-management routes in
- * app.ts) — this seed only ever provisions the fixed demo company.
+ * the manual `x-demo-user` dev header. Real tenants are created only by a
+ * platform owner (POST /api/platform/tenants, see platform-admin.service.ts)
+ * or via an admin-issued invitation (invitation.service.ts) — this seed only
+ * ever provisions the fixed demo company.
  *
  * Idempotent: with persistent storage, main.ts calls this on every boot, so
  * it skips seeding if the demo company already exists on disk.
@@ -382,6 +383,66 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
       { label: 'Finance', userId: financeUser.id, email: financeUser.email },
     ],
   };
+}
+
+export interface PlatformOwnerConfig {
+  ownerEmail1: string;
+  ownerEmail2: string;
+  ownerPassword1: string;
+  ownerPassword2: string;
+}
+
+/**
+ * Bootstraps the two platform-owner accounts from boot-time env config —
+ * never a mutable DB flag (see modules/permissions/platform-owner.ts's own
+ * doc comment for why). Owners live in a real, seeded sentinel Company
+ * (PLATFORM_COMPANY_ID, required by the Company.id === Company.companyId
+ * invariant) so the existing RbacEvaluator hard wall
+ * (target.companyId !== user.companyId -> deny) already blocks them from
+ * every tenant resource with zero new enforcement code. Owners get no
+ * Role/UserRole/PermissionGrant rows at all — the resource/grant system has
+ * no platform concept, and platform routes gate on
+ * isPlatformOwner(actor.email) directly instead.
+ *
+ * Idempotent, matched by email: never overwrites an existing owner's
+ * password/MFA state on a later boot, so rotating env config without also
+ * clearing the row is a safe no-op rather than a silent credential reset.
+ */
+export async function seedPlatformOwners(
+  repos: Pick<SeedRepos, 'companies' | 'users'>,
+  config: PlatformOwnerConfig,
+): Promise<void> {
+  const existingCompany = await repos.companies.findById(PLATFORM_COMPANY_ID);
+  if (!existingCompany) {
+    await repos.companies.save({
+      id: PLATFORM_COMPANY_ID,
+      companyId: PLATFORM_COMPANY_ID,
+      name: 'ACTIVE Platform',
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  const owners = [
+    { email: config.ownerEmail1, password: config.ownerPassword1 },
+    { email: config.ownerEmail2, password: config.ownerPassword2 },
+  ];
+  for (const owner of owners) {
+    const email = owner.email?.trim().toLowerCase();
+    if (!email || !owner.password) continue;
+    const [existingUser] = await repos.users.findAll((u) => u.companyId === PLATFORM_COMPANY_ID && u.email === email);
+    if (existingUser) continue;
+    const user: User = {
+      id: randomUUID(),
+      companyId: PLATFORM_COMPANY_ID,
+      email,
+      passwordHash: hashPassword(owner.password),
+      userType: 'employee_user',
+      locale: 'en',
+      failedLoginCount: 0,
+      createdAt: new Date().toISOString(),
+    };
+    await repos.users.save(user);
+  }
 }
 
 /**

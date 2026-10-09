@@ -15,6 +15,7 @@ import type {
   DocumentExtractionRun,
   IntegrationConnection,
   IntegrationEvent,
+  Invitation,
   AuditLogEntry,
   Branch,
   BrokerCompany,
@@ -95,7 +96,7 @@ import { runImport, SkipRow } from './infra/csv-import.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
-import { seedDemoData, lockDemoData } from './infra/seed.js';
+import { seedDemoData, lockDemoData, seedPlatformOwners } from './infra/seed.js';
 import { EventBus, type DomainEvent } from './infra/event-bus.js';
 import { FileStorageService } from './infra/file-storage.js';
 
@@ -117,6 +118,9 @@ import { SalesCommissionService } from './modules/commissions/sales-commission.s
 import { ApprovalEngineService } from './modules/approvals/approval-engine.service.js';
 import { RoleManagementService } from './modules/permissions/role-management.service.js';
 import { OnboardingService } from './modules/onboarding/onboarding.service.js';
+import { InvitationService } from './modules/organization/invitation.service.js';
+import { PlatformAdminService } from './modules/platform/platform-admin.service.js';
+import { isPlatformOwner } from './modules/permissions/platform-owner.js';
 import { HrService } from './modules/hr/hr.service.js';
 import { OperationsService } from './modules/operations/operations.service.js';
 import { LegalService } from './modules/legal/legal.service.js';
@@ -194,6 +198,19 @@ export interface AppOptions {
    * passes a real path on the same persistent volume the SQLite file
    * itself lives on. */
   fileStorageDir?: string;
+  /** The two, and only two, platform-owner email addresses (see
+   * modules/permissions/platform-owner.ts). Never hardcoded, never
+   * frontend-exposed — read from OWNER_EMAIL_1/OWNER_EMAIL_2 by main.ts.
+   * Omit (as most tests do) to skip bootstrapping owner accounts entirely;
+   * required in production (see assertProductionSafety below). */
+  ownerEmail1?: string;
+  ownerEmail2?: string;
+  /** Initial passwords for the two owner accounts, used only the first
+   * time each account is bootstrapped (seedPlatformOwners never overwrites
+   * an existing owner's password on a later boot). Never logged, never
+   * returned by any route. */
+  ownerPassword1?: string;
+  ownerPassword2?: string;
 }
 
 export interface Application {
@@ -224,6 +241,8 @@ export interface Application {
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
+    invitations: InvitationService;
+    platformAdmin: PlatformAdminService;
     hr: HrService;
     operations: OperationsService;
     legal: LegalService;
@@ -344,6 +363,7 @@ function buildRepos(db?: DatabaseSync) {
     aiWorkflowRuns: repo<AiWorkflowRun>('ai_workflow_runs'),
     aiWorkflowStepRuns: repo<AiWorkflowStepRun>('ai_workflow_step_runs'),
     signatureEnvelopes: repo<SignatureEnvelope>('signature_envelopes'),
+    invitations: repo<Invitation>('invitations'),
   };
 }
 
@@ -396,6 +416,15 @@ export async function assertProductionSafety(options: AppOptions): Promise<void>
     if (!options.tokenSecret || options.tokenSecret === 'dev-secret') {
       throw new Error('refusing to boot in production without a real TOKEN_SECRET');
     }
+    if (!options.ownerEmail1 || !options.ownerEmail2) {
+      throw new Error('refusing to boot in production without OWNER_EMAIL_1 and OWNER_EMAIL_2 configured');
+    }
+    if (options.ownerEmail1.trim().toLowerCase() === options.ownerEmail2.trim().toLowerCase()) {
+      throw new Error('OWNER_EMAIL_1 and OWNER_EMAIL_2 must be distinct');
+    }
+    if (!options.ownerPassword1 || !options.ownerPassword2) {
+      throw new Error('refusing to boot in production without OWNER_PASSWORD_1 and OWNER_PASSWORD_2 configured');
+    }
     if (!options.db) {
       process.stderr.write('WARNING: no persistent database configured — data will not survive a restart.\n');
     } else if (!process.env.DATABASE_URL) {
@@ -419,7 +448,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
   const auditLog = new AuditLog(repos.auditEntries);
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
-  const auth = new AuthService(repos.users, options.tokenSecret);
+  const auth = new AuthService(repos.users, options.tokenSecret, repos.companies);
   const crmStages = new CrmStageService(repos.crmStages);
   const crm = new CrmService(repos.leads, crmStages);
   const importSessions = new ImportSessionService(repos.importSessions);
@@ -463,6 +492,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
   const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
   const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
+  const invitations = new InvitationService(repos.invitations, repos.roles, organization, auth, roleManagement);
+  const platformAdmin = new PlatformAdminService(onboarding, repos.companies, auditLog);
+  const ownerEmails: [string, string] = [options.ownerEmail1 ?? '', options.ownerEmail2 ?? ''];
   const hr = new HrService(repos.leaveRequests, repos.employees);
   const operations = new OperationsService(repos.maintenanceTickets, repos.units);
   const legal = new LegalService(repos.legalDocuments, repos.contracts);
@@ -600,6 +632,22 @@ export async function buildApplication(options: AppOptions): Promise<Application
     // have a persisted demo login from before — lock it out rather than
     // leaving the old, publicly-documented password live. See lockDemoData.
     await lockDemoData({ users: repos.users });
+  }
+
+  // Platform-owner bootstrap — additive and independent of demo seeding
+  // above. Only runs when both owner emails are configured (most tests omit
+  // them entirely); production refuses to boot without them, enforced by
+  // assertProductionSafety above.
+  if (options.ownerEmail1 && options.ownerEmail2 && options.ownerPassword1 && options.ownerPassword2) {
+    await seedPlatformOwners(
+      { companies: repos.companies, users: repos.users },
+      {
+        ownerEmail1: options.ownerEmail1,
+        ownerEmail2: options.ownerEmail2,
+        ownerPassword1: options.ownerPassword1,
+        ownerPassword2: options.ownerPassword2,
+      },
+    );
   }
 
   const globalRateLimiter = new SlidingWindowRateLimiter(options.rateLimitWindowMs ?? 60_000, options.rateLimitMax ?? 300);
@@ -869,13 +917,85 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: { success: true } };
   });
 
-  // Self-service tenant signup: creates the company, the founding employee,
-  // the user account, and an unrestricted "Owner" role for that user in one
-  // step — the real-users onboarding path (as opposed to the four fixed
-  // demo accounts and low-level /api/auth/register + /api/organization/*).
-  httpServer.post('/api/auth/signup', async (ctx) => {
+  // ---- Invitations: the only way (besides platform-owner-initiated tenant
+  // creation below) a new account can be created now that public
+  // self-service signup is gone. See invitation.service.ts's own doc
+  // comment — this never duplicates the create-employee/register/
+  // assign-role chain, only adds a token layer on top of it. ----
+  httpServer.post('/api/organization/invitations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'employee'))) {
+      throw new ForbiddenError('missing create:employee permission');
+    }
+    if (!(await rbac.can(actor.userId, 'assign', 'role'))) {
+      throw new ForbiddenError('missing assign:role permission');
+    }
+    const body = parseJsonBody<{ email: string; roleId: string }>(ctx.body);
+    const { invitation, rawToken } = await invitations.createInvitation({
+      companyId: actor.companyId,
+      email: body.email,
+      roleId: body.roleId,
+      createdByUserId: actor.userId,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'employee', resourceId: invitation.id, metadata: { invitation: true, email: invitation.email } });
+    // The raw token is only ever returned here, to the admin who created the
+    // invitation — this app has no real email/SMS provider wired in (see the
+    // security-overhaul deliverables report), so the admin is responsible
+    // for sharing the accept link out-of-band until one is configured.
+    return { status: 201, body: { id: invitation.id, email: invitation.email, expiresAt: invitation.expiresAt, token: rawToken } };
+  });
+
+  httpServer.get('/api/organization/invitations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'employee'))) {
+      throw new ForbiddenError('missing view:employee permission');
+    }
+    const list = await invitations.listInvitations(actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.delete('/api/organization/invitations/:id', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'employee'))) {
+      throw new ForbiddenError('missing create:employee permission');
+    }
+    await invitations.revokeInvitation(actor.companyId, ctx.params.id!);
+    return { status: 200, body: { success: true } };
+  });
+
+  // Public, token-gated — the accept-page UI's "who is this invite for"
+  // lookup. Never exposes companyId/roleId, only what the UI needs to show.
+  httpServer.get('/api/auth/invitations/:token', async (ctx) => {
+    const result = await invitations.getInvitationByToken(ctx.params.token!);
+    if (!result) throw new NotFoundError('invitation not found, expired, or already used');
+    return { status: 200, body: result };
+  });
+
+  httpServer.post('/api/auth/invitations/:token/accept', async (ctx) => {
+    const body = parseJsonBody<{ fullName: string; password: string; locale?: 'en' | 'ar' }>(ctx.body);
+    const result = await invitations.acceptInvitation({ token: ctx.params.token!, fullName: body.fullName, password: body.password, locale: body.locale });
+    return { status: 201, body: { token: result.token, userId: result.user.id, userType: result.user.userType, companyId: result.user.companyId } };
+  });
+
+  // ---- Platform administration: gated on isPlatformOwner(actor.email)
+  // directly, never through rbac.can() — the tenant-scoped grant system has
+  // no platform concept at all (see platform-owner.ts's own doc comment).
+  // Replaces the old public POST /api/auth/signup and
+  // POST /api/organization/companies as the only way a brand-new tenant
+  // gets created. ----
+  const requirePlatformOwner = async (ctx: RequestContext): Promise<Actor & { email: string }> => {
+    const actor = await actorOf(ctx);
+    const user = await repos.users.findById(actor.userId);
+    if (!user || !isPlatformOwner(user.email, ownerEmails)) {
+      throw new ForbiddenError('platform-owner access required');
+    }
+    return { ...actor, email: user.email };
+  };
+
+  httpServer.post('/api/platform/tenants', async (ctx) => {
+    const owner = await requirePlatformOwner(ctx);
     const body = parseJsonBody<{ companyName: string; fullName: string; email: string; password: string; locale?: 'en' | 'ar' }>(ctx.body);
-    const result = await onboarding.signupNewCompany(body);
+    const result = await platformAdmin.createTenant(body, owner.userId);
     return {
       status: 201,
       body: {
@@ -888,15 +1008,31 @@ export async function buildApplication(options: AppOptions): Promise<Application
     };
   });
 
-  // ---- Organization ----
-  httpServer.post('/api/organization/companies', async (ctx) => {
-    // Intentionally public: creating a company is tenant signup — there is
-    // no user or role to gate it behind before the first company exists.
-    const body = parseJsonBody<{ name: string }>(ctx.body);
-    const company = await organization.createCompany({ name: body.name });
-    return { status: 201, body: company };
+  httpServer.get('/api/platform/tenants', async (ctx) => {
+    await requirePlatformOwner(ctx);
+    const tenants = await platformAdmin.listTenants();
+    return { status: 200, body: paginate(tenants, ctx.query) };
   });
 
+  httpServer.post('/api/platform/tenants/:id/suspend', async (ctx) => {
+    const owner = await requirePlatformOwner(ctx);
+    const company = await platformAdmin.setTenantStatus(ctx.params.id!, 'suspended', owner.userId);
+    return { status: 200, body: company };
+  });
+
+  httpServer.post('/api/platform/tenants/:id/reactivate', async (ctx) => {
+    const owner = await requirePlatformOwner(ctx);
+    const company = await platformAdmin.setTenantStatus(ctx.params.id!, 'active', owner.userId);
+    return { status: 200, body: company };
+  });
+
+  httpServer.get('/api/platform/audit-log', async (ctx) => {
+    await requirePlatformOwner(ctx);
+    const entries = await platformAdmin.listPlatformAuditTrail();
+    return { status: 200, body: paginate(entries, ctx.query) };
+  });
+
+  // ---- Organization ----
   httpServer.post('/api/organization/employees', async (ctx) => {
     const actor = await actorOf(ctx);
     // Fixed gap: this previously required only a valid token, never
@@ -4906,7 +5042,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding, invitations, platformAdmin,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
       tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,

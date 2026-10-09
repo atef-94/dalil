@@ -3,71 +3,43 @@ import { api, setToken, saveCompanyId, getSavedCompanyId } from '../api.js';
 import { t } from '../i18n.js';
 import { getLocale, setLocale } from '../state.js';
 
-export function renderLogin(container, { onSuccess }, initialMode = 'login') {
+// Public self-service registration has been removed platform-wide (accounts
+// are created only by a platform owner or via an admin-issued invitation —
+// see InvitationService / PlatformAdminService on the backend). This page
+// therefore renders only the Login form; there is no Sign Up tab to switch
+// to and no 'signup' mode.
+export function renderLogin(container, { onSuccess }) {
   clear(container);
   let locale = getLocale();
-  let mode = initialMode;
 
   const errorSlot = el('div');
 
   const companyId = el('input', { type: 'text', placeholder: t(locale, 'field_company_id'), value: getSavedCompanyId() });
   const email = el('input', { type: 'email', placeholder: t(locale, 'login_email_placeholder') });
   const password = el('input', { type: 'password', placeholder: '••••••••' });
-  const companyName = el('input', { type: 'text', placeholder: t(locale, 'signup_company_name_placeholder') });
-  const fullName = el('input', { type: 'text', placeholder: t(locale, 'field_full_name') });
 
-  const companyIdLabel = el('label', {}, t(locale, 'field_company_id'));
-  const emailLabel1 = el('label', {}, t(locale, 'field_email'));
-  const passwordLabel1 = el('label', {}, t(locale, 'field_password'));
-  const loginFields = el('div', {}, [
-    companyIdLabel,
+  const body = el('div', {}, [
+    el('label', {}, t(locale, 'field_company_id')),
     companyId,
-    emailLabel1,
+    el('label', {}, t(locale, 'field_email')),
     email,
-    passwordLabel1,
+    el('label', {}, t(locale, 'field_password')),
     password,
   ]);
 
-  const signupEmail = el('input', { type: 'email', placeholder: t(locale, 'login_email_placeholder') });
-  const signupPassword = el('input', { type: 'password', placeholder: t(locale, 'crm_portal_password_placeholder') });
-  const orgNameLabel = el('label', {}, t(locale, 'field_org_name'));
-  const fullNameLabel = el('label', {}, t(locale, 'field_full_name'));
-  const emailLabel2 = el('label', {}, t(locale, 'field_email'));
-  const passwordLabel2 = el('label', {}, t(locale, 'field_password'));
-  const signupFields = el('div', {}, [
-    orgNameLabel, companyName,
-    fullNameLabel, fullName,
-    emailLabel2, signupEmail,
-    passwordLabel2, signupPassword,
-  ]);
-
-  const submitBtn = el('button', { id: 'auth-submit', class: 'primary', style: 'width:100%;margin-top:16px' }, t(locale, mode === 'login' ? 'submit_login' : 'submit_signup'));
-
-  const body = el('div', {}, [mode === 'login' ? loginFields : signupFields]);
+  const submitBtn = el('button', { id: 'auth-submit', class: 'primary', style: 'width:100%;margin-top:16px' }, t(locale, 'submit_login'));
 
   async function submit() {
     clear(errorSlot);
     submitBtn.disabled = true;
     try {
-      if (mode === 'login') {
-        const result = await api.post('/api/auth/login', {
-          companyId: companyId.value.trim(),
-          email: email.value.trim(),
-          password: password.value,
-        });
-        setToken(result.token);
-        saveCompanyId(result.companyId);
-      } else {
-        const result = await api.post('/api/auth/signup', {
-          companyName: companyName.value.trim(),
-          fullName: fullName.value.trim(),
-          email: signupEmail.value.trim(),
-          password: signupPassword.value,
-          locale,
-        });
-        setToken(result.token);
-        saveCompanyId(result.companyId);
-      }
+      const result = await api.post('/api/auth/login', {
+        companyId: companyId.value.trim(),
+        email: email.value.trim(),
+        password: password.value,
+      });
+      setToken(result.token);
+      saveCompanyId(result.companyId);
       onSuccess();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message || t(locale, 'generic_error')));
@@ -77,38 +49,11 @@ export function renderLogin(container, { onSuccess }, initialMode = 'login') {
   }
 
   submitBtn.addEventListener('click', submit);
-  [companyId, email, password, companyName, fullName, signupEmail, signupPassword].forEach((input) => {
+  [companyId, email, password].forEach((input) => {
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submit();
     });
   });
-
-  const tabLogin = el('button', { id: 'auth-tab-login', class: mode === 'login' ? 'active' : '' }, t(locale, 'tab_login'));
-  const tabSignup = el('button', { id: 'auth-tab-signup', class: mode === 'signup' ? 'active' : '' }, t(locale, 'tab_signup'));
-  const title = el('h1', {}, t(locale, mode === 'login' ? 'login_title' : 'signup_title'));
-  const subtitle = el('p', { class: 'subtitle' }, t(locale, mode === 'login' ? 'login_subtitle' : 'signup_subtitle'));
-
-  function setMode(next) {
-    mode = next;
-    clear(body);
-    if (next === 'login') {
-      tabLogin.classList.add('active');
-      tabSignup.classList.remove('active');
-      title.textContent = t(locale, 'login_title');
-      subtitle.textContent = t(locale, 'login_subtitle');
-      submitBtn.textContent = t(locale, 'submit_login');
-      body.appendChild(loginFields);
-    } else {
-      tabSignup.classList.add('active');
-      tabLogin.classList.remove('active');
-      title.textContent = t(locale, 'signup_title');
-      subtitle.textContent = t(locale, 'signup_subtitle');
-      submitBtn.textContent = t(locale, 'submit_signup');
-      body.appendChild(signupFields);
-    }
-  }
-  tabLogin.addEventListener('click', () => setMode('login'));
-  tabSignup.addEventListener('click', () => setMode('signup'));
 
   // The main app-shell locale toggle only exists once signed in — this lets
   // a user pick Arabic/English before they even have an account or session.
@@ -119,14 +64,13 @@ export function renderLogin(container, { onSuccess }, initialMode = 'login') {
   localeToggle.value = locale;
   localeToggle.addEventListener('change', () => {
     setLocale(localeToggle.value);
-    renderLogin(container, { onSuccess }, mode);
+    renderLogin(container, { onSuccess });
   });
 
   const card = el('div', { class: 'auth-card' }, [
     localeToggle,
-    title,
-    subtitle,
-    el('div', { class: 'auth-tabs' }, [tabLogin, tabSignup]),
+    el('h1', {}, t(locale, 'login_title')),
+    el('p', { class: 'subtitle' }, t(locale, 'login_subtitle')),
     errorSlot,
     body,
     submitBtn,

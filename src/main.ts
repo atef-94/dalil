@@ -19,6 +19,14 @@ async function main(): Promise<void> {
   // but an operator running a public production instance may want it gone.
   // Defaults to on (unchanged behavior) so this is opt-out, not opt-in.
   const seedDemo = process.env.SEED_DEMO_DATA !== 'false';
+  // The two, and only two, platform-owner identities — see
+  // modules/permissions/platform-owner.ts. Required in production
+  // (assertProductionSafety refuses to boot without them); optional in
+  // dev/test so the existing demo-only workflow keeps working unchanged.
+  const ownerEmail1 = process.env.OWNER_EMAIL_1;
+  const ownerEmail2 = process.env.OWNER_EMAIL_2;
+  const ownerPassword1 = process.env.OWNER_PASSWORD_1;
+  const ownerPassword2 = process.env.OWNER_PASSWORD_2;
 
   const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -40,6 +48,10 @@ async function main(): Promise<void> {
     db,
     seed: seedDemo,
     fileStorageDir,
+    ownerEmail1,
+    ownerEmail2,
+    ownerPassword1,
+    ownerPassword2,
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS ? Number(process.env.RATE_LIMIT_WINDOW_MS) : undefined,
     rateLimitMax: process.env.RATE_LIMIT_MAX ? Number(process.env.RATE_LIMIT_MAX) : undefined,
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,

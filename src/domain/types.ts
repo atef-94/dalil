@@ -7,6 +7,32 @@ export interface Company {
   companyId: string; // self-referencing: companyId === id
   name: string;
   createdAt: string;
+  /** Platform-owner-controlled (see platform-admin.service.ts). Absent or
+   * 'active' means normal operation; 'suspended' blocks every login for
+   * every user in this company (checked in auth.service.ts) without
+   * deleting any data. */
+  status?: 'active' | 'suspended';
+}
+
+/** A pending, single-use invitation to join an existing company with a
+ * specific role — the only way (besides platform-owner-initiated tenant
+ * creation) a new account can be created, now that public self-service
+ * signup is gone. `tokenHash` is a deterministic SHA-256 of the raw token
+ * (see infra/security.ts's hashToken) — not scrypt, since the raw token is
+ * already high-entropy random bytes, not a human password, and the accept
+ * flow needs to look the row up BY the token, which a salted KDF can't do
+ * without scanning + verifying every pending invitation. */
+export interface Invitation {
+  id: string;
+  companyId: string;
+  email: string;
+  roleId: string;
+  tokenHash: string;
+  expiresAt: string;
+  createdByUserId: string;
+  createdAt: string;
+  acceptedAt?: string;
+  revokedAt?: string;
 }
 
 export interface Branch {

@@ -3,8 +3,39 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { buildApplication } from './app.js';
 
+const OWNER_EMAIL = 'owner1@platform.test';
+const OWNER_PASSWORD = 'owner-1-password-123';
+
 async function freshApp() {
-  return buildApplication({ nodeEnv: 'test', tokenSecret: 'test-secret', allowedOrigins: [], seed: true });
+  return buildApplication({
+    nodeEnv: 'test',
+    tokenSecret: 'test-secret',
+    allowedOrigins: [],
+    seed: true,
+    ownerEmail1: OWNER_EMAIL,
+    ownerEmail2: 'owner2@platform.test',
+    ownerPassword1: OWNER_PASSWORD,
+    ownerPassword2: 'owner-2-password-123',
+  });
+}
+
+/** Creates a brand-new tenant via the owner-gated /api/platform/tenants route
+ * (the only way to do this now that public signup is gone) and returns the
+ * bearer-token headers for its founding user, exactly like the old
+ * self-service signup response did. */
+async function createSecondTenant(base: string, namePrefix: string) {
+  const ownerLogin = await call(base, 'POST', '/api/auth/login', {
+    companyId: '__platform__', email: OWNER_EMAIL, password: OWNER_PASSWORD,
+  });
+  const ownerHeaders = { authorization: `Bearer ${(ownerLogin.body as { token: string }).token}` };
+  const tenant = await call(base, 'POST', '/api/platform/tenants', {
+    companyName: `${namePrefix} ${Date.now()}`,
+    fullName: 'Owner B',
+    email: `${namePrefix.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}@example.com`,
+    password: 'a-real-password-123',
+  }, ownerHeaders);
+  assert.equal(tenant.status, 201);
+  return { authorization: `Bearer ${(tenant.body as { token: string }).token}` };
 }
 
 async function withServer(run: (base: string, app: Awaited<ReturnType<typeof freshApp>>) => Promise<void>) {
@@ -122,11 +153,7 @@ test('POST /api/sales/contracts/:id/signature-envelopes rejects a Sales Agent la
       credentials: { api_key: 'key-demo', webhook_secret: 'whsec-demo' },
     }, ceoHeaders);
 
-    const signupB = await call(base, 'POST', '/api/auth/signup', {
-      companyName: `Sig Tenant B ${Date.now()}`, fullName: 'Owner B',
-      email: `sig-ownerb-${Date.now()}@example.com`, password: 'a-real-password-123',
-    });
-    const tenantBHeaders = { authorization: `Bearer ${(signupB.body as { token: string }).token}` };
+    const tenantBHeaders = await createSecondTenant(base, 'Sig Tenant B');
 
     const crossTenant = await call(base, 'POST', `/api/sales/contracts/${contractId}/signature-envelopes`, {
       signerEmail: 'buyer@example.com', documentUrl: 'https://docs.example.com/contract.pdf',

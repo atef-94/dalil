@@ -23,12 +23,17 @@ export interface SignupResult {
 }
 
 /**
- * The self-service "create your organization" flow. This is what connects a
- * real, self-registered user to real, working RBAC: it creates the company,
- * the founding employee, the user account, an unrestricted company-scoped
- * "Owner" role, and assigns it — all in one step, so the very first account
- * for a new company can immediately create employees, invite teammates, and
- * grant/limit their permissions through the role-management API.
+ * Creates a brand-new tenant in one step: the company, the founding
+ * employee, the user account, an unrestricted company-scoped "Owner" role,
+ * and assigns it — so the founding account can immediately create
+ * employees, issue invitations, and grant/limit their permissions through
+ * the role-management API.
+ *
+ * No longer reachable as public self-service signup (that endpoint has been
+ * removed — registration is invitation-only, per the platform's tenant-
+ * isolation requirements). The sole caller now is PlatformAdminService.
+ * createTenant(), itself gated on isPlatformOwner(); this service's own
+ * logic is unchanged and still a plain, unprivileged building block.
  */
 export class OnboardingService {
   constructor(
