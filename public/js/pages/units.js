@@ -8,6 +8,48 @@ import { api } from '../api.js';
 import { can, getLocale } from '../state.js';
 import { openImportWizard } from '../import-wizard.js';
 
+/** Project media fields (coverImageUrl/masterPlanImageUrl/brochureUrl/
+ * imageUrls) hold either our own real uploaded file's URL
+ * (`/api/inventory/files/:fileId` — JSON, not raw bytes, see api.js's
+ * getFileBlobUrl) or, for data imported before this feature existed, an
+ * already-hosted external URL — this resolves either into something an
+ * <img>/<a> can actually use directly. */
+async function resolveMediaUrl(url) {
+  if (!url) return undefined;
+  const match = /^\/api\/inventory\/files\/([^/?#]+)/.exec(url);
+  if (!match) return url;
+  try {
+    return await api.getFileBlobUrl(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Opens the native file picker, uploads the chosen file through the
+ * shared Project media upload route, and returns the created FileAsset's
+ * URL — or undefined if the user cancelled. */
+function pickAndUploadFile(accept) {
+  return new Promise((resolve) => {
+    const input = el('input', { type: 'file', accept, style: 'display:none' });
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return resolve(undefined);
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const result = await api.upload('/api/inventory/files/upload', formData);
+        resolve(result.url);
+      } catch (err) {
+        toast(err.message, 'error');
+        resolve(undefined);
+      }
+    });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
 export async function renderUnits(container) {
   clear(container);
   const locale = getLocale();
@@ -526,15 +568,35 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
     clear(body);
     const { project: p, developer, phases, launches, facilities, engineeringConsultant, projectManagement, salesPhoneNumbers } = details;
 
+    let developerOptions = [];
+    let engineeringConsultantOptions = [];
+    let projectManagementOptions = [];
+    try {
+      const [developersPage, engineeringPage, pmPage] = await Promise.all([
+        api.get('/api/inventory/developers', { limit: 100 }),
+        api.get('/api/inventory/consultants', { role: 'engineering', limit: 100 }),
+        api.get('/api/inventory/consultants', { role: 'project_management', limit: 100 }),
+      ]);
+      developerOptions = developersPage.items.map((d) => ({ value: d.id, label: d.name }));
+      engineeringConsultantOptions = engineeringPage.items.map((c) => ({ value: c.id, label: c.name }));
+      projectManagementOptions = pmPage.items.map((c) => ({ value: c.id, label: c.name }));
+    } catch {
+      // view:project absent for this role — the edit form still works, just
+      // without the dropdown options populated.
+    }
+    const noneOption = { value: '', label: t(locale, 'units_project_field_none') };
+
     const editBtn = el('button', {}, t(locale, 'units_project_edit_details_btn'));
     editBtn.addEventListener('click', async () => {
       const values = await formModal({
         title: t(locale, 'units_project_edit_title'),
         fields: [
           { key: 'destination', label: t(locale, 'units_project_field_destination'), value: p.destination || '' },
+          { key: 'developerId', label: t(locale, 'units_project_field_developer'), type: 'select', options: [noneOption, ...developerOptions], value: p.developerId || '' },
           { key: 'address', label: t(locale, 'units_project_field_address'), value: p.address || '' },
-          { key: 'coverImageUrl', label: t(locale, 'units_project_field_cover_image'), value: p.coverImageUrl || '' },
           { key: 'locationMapUrl', label: t(locale, 'units_project_field_location_map'), value: p.locationMapUrl || '' },
+          { key: 'engineeringConsultantId', label: t(locale, 'units_project_field_engineering_consultant'), type: 'select', options: [noneOption, ...engineeringConsultantOptions], value: p.engineeringConsultantId || '' },
+          { key: 'projectManagementId', label: t(locale, 'units_project_field_project_management'), type: 'select', options: [noneOption, ...projectManagementOptions], value: p.projectManagementId || '' },
           { key: 'finishingType', label: t(locale, 'units_project_field_finishing_type'), value: p.finishingType || '' },
           { key: 'projectAreaSqm', label: t(locale, 'units_project_field_area'), type: 'number', value: p.projectAreaSqm ?? '' },
           { key: 'priceFrom', label: t(locale, 'units_project_field_price_from'), type: 'number', value: p.priceFrom ?? '' },
@@ -548,9 +610,11 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
       try {
         await api.patch(`/api/inventory/projects/${project.id}`, {
           destination: values.destination || undefined,
+          developerId: values.developerId || undefined,
           address: values.address || undefined,
-          coverImageUrl: values.coverImageUrl || undefined,
           locationMapUrl: values.locationMapUrl || undefined,
+          engineeringConsultantId: values.engineeringConsultantId || undefined,
+          projectManagementId: values.projectManagementId || undefined,
           finishingType: values.finishingType || undefined,
           projectAreaSqm: values.projectAreaSqm ? Number(values.projectAreaSqm) : undefined,
           priceFrom: values.priceFrom ? Number(values.priceFrom) : undefined,
@@ -589,6 +653,146 @@ async function openProjectDetailModal(project, { locale, onSaved } = {}) {
       ]),
     ]);
     body.appendChild(summary);
+
+    // ---- Project Media (real uploaded files: cover, master plan, brochure,
+    // gallery) — the one place in this app where a media field is backed by
+    // real stored bytes rather than a pasted URL. locationMapUrl stays a
+    // plain link (edited above), by design.
+    function mediaSlot(labelKey, url, accept, onUpload, { isLink = false } = {}) {
+      const slot = el('div', { class: 'project-media-slot' });
+      const preview = el('div', { class: 'project-media-preview' });
+      slot.appendChild(el('div', { class: 'project-media-label' }, t(locale, labelKey)));
+      slot.appendChild(preview);
+      if (url) {
+        resolveMediaUrl(url).then((resolved) => {
+          if (!resolved) return;
+          clear(preview);
+          if (isLink) {
+            preview.appendChild(el('a', { href: resolved, target: '_blank', rel: 'noopener' }, t(locale, 'units_project_view_brochure')));
+          } else {
+            preview.appendChild(el('img', { src: resolved, class: 'project-media-thumb' }));
+          }
+        });
+      } else {
+        preview.appendChild(el('span', { class: 'muted' }, t(locale, 'units_project_none_yet')));
+      }
+      const uploadBtn = el('button', { class: 'ghost' }, t(locale, 'units_project_upload_btn'));
+      uploadBtn.addEventListener('click', async () => {
+        const uploadedUrl = await pickAndUploadFile(accept);
+        if (!uploadedUrl) return;
+        try {
+          await onUpload(uploadedUrl);
+          toast(t(locale, 'units_project_saved_toast'), 'success');
+          await refresh();
+        } catch (err) {
+          body.prepend(errorBanner(err.message));
+        }
+      });
+      slot.appendChild(uploadBtn);
+      return slot;
+    }
+
+    const galleryGrid = el('div', { class: 'project-media-gallery' });
+    (p.imageUrls || []).forEach((url, idx) => {
+      const thumb = el('div', { class: 'project-media-gallery-item' });
+      resolveMediaUrl(url).then((resolved) => {
+        if (resolved) thumb.appendChild(el('img', { src: resolved, class: 'project-media-thumb' }));
+      });
+      const removeBtn = el('button', { class: 'ghost icon-btn' }, '×');
+      removeBtn.addEventListener('click', async () => {
+        try {
+          const nextUrls = (p.imageUrls || []).filter((_, i) => i !== idx);
+          await api.patch(`/api/inventory/projects/${project.id}`, { imageUrls: nextUrls });
+          await refresh();
+        } catch (err) {
+          body.prepend(errorBanner(err.message));
+        }
+      });
+      thumb.appendChild(removeBtn);
+      galleryGrid.appendChild(thumb);
+    });
+    const addGalleryBtn = el('button', { class: 'ghost' }, t(locale, 'units_project_add_image_btn'));
+    addGalleryBtn.addEventListener('click', async () => {
+      const uploadedUrl = await pickAndUploadFile('image/*');
+      if (!uploadedUrl) return;
+      try {
+        await api.patch(`/api/inventory/projects/${project.id}`, { imageUrls: [...(p.imageUrls || []), uploadedUrl] });
+        toast(t(locale, 'units_project_saved_toast'), 'success');
+        await refresh();
+      } catch (err) {
+        body.prepend(errorBanner(err.message));
+      }
+    });
+
+    body.appendChild(el('div', { class: 'card', style: 'margin-bottom:12px' }, [
+      el('h4', { style: 'margin:0 0 8px' }, t(locale, 'units_project_media_title')),
+      el('div', { class: 'project-media-grid' }, [
+        mediaSlot('units_project_field_cover_image', p.coverImageUrl, 'image/*', (url) => api.patch(`/api/inventory/projects/${project.id}`, { coverImageUrl: url })),
+        mediaSlot('units_project_field_master_plan', p.masterPlanImageUrl, 'image/*', (url) => api.patch(`/api/inventory/projects/${project.id}`, { masterPlanImageUrl: url })),
+        mediaSlot('units_project_field_brochure', p.brochureUrl, 'application/pdf', (url) => api.patch(`/api/inventory/projects/${project.id}`, { brochureUrl: url }), { isLink: true }),
+      ]),
+      el('div', { style: 'margin-top:12px' }, [
+        el('div', { class: 'project-media-label' }, t(locale, 'units_project_gallery_title')),
+        galleryGrid,
+        addGalleryBtn,
+      ]),
+    ]));
+
+    // ---- Interactive Catalog / Viewer (read-only) — the client-facing
+    // exploration view: master plan with clickable unit highlights, a
+    // phases browser, and the brochure. Reachable from both here (the
+    // Manage tab's Details button) and the Catalog tab's project card.
+    const viewerBody = el('div');
+    body.appendChild(collapsible(t(locale, 'units_project_viewer_title'), viewerBody, { defaultOpen: false }));
+    (async () => {
+      let unitsWithPositions = [];
+      try {
+        const allUnits = await api.get('/api/inventory/units', { projectId: project.id, status: 'any', limit: 500 });
+        unitsWithPositions = allUnits.items.filter((u) => u.masterPlanPosition);
+      } catch {
+        // view:unit may be absent for this role.
+      }
+
+      if (p.masterPlanImageUrl) {
+        const mapWrap = el('div', { class: 'master-plan-viewer' });
+        viewerBody.appendChild(mapWrap);
+        resolveMediaUrl(p.masterPlanImageUrl).then((resolved) => {
+          if (!resolved) return;
+          clear(mapWrap);
+          mapWrap.appendChild(el('img', { src: resolved, class: 'master-plan-viewer-img' }));
+          for (const u of unitsWithPositions) {
+            const pos = u.masterPlanPosition;
+            const box = el('div', {
+              class: 'master-plan-unit-box',
+              style: `left:${pos.x}%;top:${pos.y}%;width:${pos.width}%;height:${pos.height}%`,
+              title: `${u.code} — ${u.unitType} — ${Number(u.listPrice).toLocaleString()}`,
+            });
+            box.addEventListener('click', () => {
+              toast(`${u.code} · ${u.unitType} · ${u.status}`, 'info');
+            });
+            mapWrap.appendChild(box);
+          }
+        });
+      } else {
+        viewerBody.appendChild(el('div', { class: 'muted' }, t(locale, 'units_project_no_master_plan')));
+      }
+
+      if (phases.length) {
+        viewerBody.appendChild(el('div', { style: 'margin-top:12px' }, [
+          el('div', { class: 'project-media-label' }, t(locale, 'units_project_phases_browser_title')),
+          el('div', { class: 'chip-grid' }, phases.map((ph) => badge(ph.name))),
+        ]));
+      }
+
+      if (p.brochureUrl) {
+        const brochureBtn = el('button', { style: 'margin-top:12px' }, t(locale, 'units_project_open_brochure_btn'));
+        brochureBtn.addEventListener('click', async () => {
+          const resolved = await resolveMediaUrl(p.brochureUrl);
+          if (resolved) window.open(resolved, '_blank', 'noopener');
+        });
+        viewerBody.appendChild(brochureBtn);
+      }
+    })();
 
     // Facilities
     const addFacilityBtn = el('button', {}, t(locale, 'units_project_add_facility_btn'));
@@ -922,6 +1126,7 @@ async function renderManageTab(container, locale) {
   const viewInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_view_placeholder') });
   const buildingInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_building_placeholder') });
   const gardenAreaInput = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_garden_area_placeholder') });
+  const landAreaInput = el('input', { type: 'number', min: '0', placeholder: t(locale, 'units_manage_land_area_placeholder') });
   const finishingInput = el('input', { type: 'text', placeholder: t(locale, 'units_manage_finishing_placeholder') });
   const maintenanceFeeInput = el('input', { type: 'number', min: '0', max: '100', placeholder: t(locale, 'units_manage_maintenance_fee_placeholder') });
   const parkingIncludedSelect = selectInput([
@@ -953,13 +1158,14 @@ async function renderManageTab(container, locale) {
         view: viewInput.value.trim() ? viewInput.value.split(',').map((v) => v.trim()).filter(Boolean) : undefined,
         buildingLabel: buildingInput.value.trim() || undefined,
         gardenAreaSqm: gardenAreaInput.value ? Number(gardenAreaInput.value) : undefined,
+        landAreaSqm: landAreaInput.value ? Number(landAreaInput.value) : undefined,
         finishingType: finishingInput.value.trim() || undefined,
         maintenanceFeePercentOverride: maintenanceFeeInput.value ? Number(maintenanceFeeInput.value) : undefined,
         parkingIncluded: parkingIncludedSelect.value ? parkingIncludedSelect.value === 'true' : undefined,
         parkingSpaces: parkingSpacesInput.value ? Number(parkingSpacesInput.value) : undefined,
         parkingPrice: parkingPriceInput.value ? Number(parkingPriceInput.value) : undefined,
       });
-      [codeInput, typeInput, areaInput, priceInput, bedroomsInput, floorInput, designTypeInput, viewInput, buildingInput, gardenAreaInput, finishingInput, maintenanceFeeInput, parkingSpacesInput, parkingPriceInput].forEach((i) => (i.value = ''));
+      [codeInput, typeInput, areaInput, priceInput, bedroomsInput, floorInput, designTypeInput, viewInput, buildingInput, gardenAreaInput, landAreaInput, finishingInput, maintenanceFeeInput, parkingSpacesInput, parkingPriceInput].forEach((i) => (i.value = ''));
       parkingIncludedSelect.value = '';
       toast(t(locale, 'units_manage_unit_added_toast'), 'success');
       await load();
@@ -984,6 +1190,7 @@ async function renderManageTab(container, locale) {
       el('div', {}, [el('label', {}, t(locale, 'units_manage_view_field')), viewInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_building_field')), buildingInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_garden_area_field')), gardenAreaInput]),
+      el('div', {}, [el('label', {}, t(locale, 'units_manage_land_area_field')), landAreaInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_finishing_field')), finishingInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_maintenance_fee_field')), maintenanceFeeInput]),
       el('div', {}, [el('label', {}, t(locale, 'units_manage_parking_included_field')), parkingIncludedSelect]),
@@ -1107,6 +1314,7 @@ async function renderManageTab(container, locale) {
         { key: 'view', label: t(locale, 'units_manage_view_field'), value: (unit.view || []).join(', ') },
         { key: 'buildingLabel', label: t(locale, 'units_manage_building_field'), value: unit.buildingLabel ?? '' },
         { key: 'gardenAreaSqm', label: t(locale, 'units_manage_garden_area_field'), type: 'number', value: unit.gardenAreaSqm ?? '' },
+        { key: 'landAreaSqm', label: t(locale, 'units_manage_land_area_field'), type: 'number', value: unit.landAreaSqm ?? '' },
         { key: 'finishingType', label: t(locale, 'units_manage_finishing_field'), value: unit.finishingType ?? '' },
         { key: 'pricePerMeterOverride', label: t(locale, 'units_manage_price_per_meter_override_field'), type: 'number', value: unit.pricePerMeterOverride ?? '' },
         { key: 'floorPlanImageUrl', label: t(locale, 'units_manage_floor_plan_url_field'), value: unit.floorPlanImageUrl ?? '' },
@@ -1139,6 +1347,7 @@ async function renderManageTab(container, locale) {
         view: result.view.trim() ? result.view.split(',').map((v) => v.trim()).filter(Boolean) : undefined,
         buildingLabel: result.buildingLabel.trim() || undefined,
         gardenAreaSqm: result.gardenAreaSqm !== '' ? Number(result.gardenAreaSqm) : undefined,
+        landAreaSqm: result.landAreaSqm !== '' ? Number(result.landAreaSqm) : undefined,
         finishingType: result.finishingType.trim() || undefined,
         pricePerMeterOverride: result.pricePerMeterOverride !== '' ? Number(result.pricePerMeterOverride) : undefined,
         floorPlanImageUrl: result.floorPlanImageUrl.trim() || undefined,

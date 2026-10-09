@@ -160,7 +160,13 @@ export class HttpServer {
       // stays a narrow, image-only relaxation. style-src/font-src name the
       // two Google Fonts hosts specifically (not a broad https:) for the
       // Inter webfont <link> in index.html — same narrow-allowlist pattern.
-      "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:",
+      // blob: is also allowed for img-src only — real uploaded Project
+      // media (see infra/file-storage.ts) is served back as base64 JSON,
+      // never raw bytes, so the frontend decodes it into a same-origin
+      // Blob and renders that via a blob: object URL; blob: cannot be used
+      // to load a remote image, so this doesn't reopen the restriction
+      // img-src https: already represents.
+      "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:",
     );
     if (this.options.nodeEnv === 'production') {
       res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
