@@ -186,6 +186,7 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   };
   const salesManagerUser: User = {
     id: 'user-sales-manager',
@@ -197,6 +198,7 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   };
   const salesAgentUser: User = {
     id: 'user-sales-agent',
@@ -208,6 +210,7 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   };
   const financeUser: User = {
     id: 'user-finance',
@@ -219,6 +222,7 @@ export async function seedDemoData(repos: SeedRepos): Promise<SeedResult> {
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   };
 
   for (const user of [ceoUser, salesManagerUser, salesAgentUser, financeUser]) {
@@ -440,6 +444,7 @@ export async function seedPlatformOwners(
       locale: 'en',
       failedLoginCount: 0,
       createdAt: new Date().toISOString(),
+      totpEnabled: false,
     };
     await repos.users.save(user);
   }

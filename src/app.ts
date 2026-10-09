@@ -448,7 +448,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
   const auditLog = new AuditLog(repos.auditEntries);
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
-  const auth = new AuthService(repos.users, options.tokenSecret, repos.companies);
+  const auth = new AuthService(repos.users, options.tokenSecret, repos.companies, options.secretStoreKey ?? options.tokenSecret);
   const crmStages = new CrmStageService(repos.crmStages);
   const crm = new CrmService(repos.leads, crmStages);
   const importSessions = new ImportSessionService(repos.importSessions);
@@ -897,23 +897,70 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
 
   httpServer.post('/api/auth/login', async (ctx) => {
-    const body = parseJsonBody<{ companyId: string; email: string; password: string }>(ctx.body);
+    const body = parseJsonBody<{ companyId: string; email: string; password: string; totpCode?: string }>(ctx.body);
     if (!body.companyId?.trim()) throw new ValidationError('companyId is required');
-    const { token, user } = await auth.login({ companyId: body.companyId, email: body.email, password: body.password });
-    return { status: 200, body: { token, userId: user.id, userType: user.userType, companyId: user.companyId } };
+    // When the account has MFA enabled and no code was sent, auth.login()
+    // throws TokenError('mfa_required') — the body serializes to exactly
+    // {"error":"mfa_required"}, which the client re-submits this same call
+    // against, with totpCode filled in.
+    const { token, user } = await auth.login({ companyId: body.companyId, email: body.email, password: body.password, totpCode: body.totpCode });
+    // Soft nudge, not a hard gate: an owner in production who hasn't
+    // enrolled MFA yet still gets a token (blocking it here would mean no
+    // owner could ever complete first-time enrollment, since enrollment
+    // itself requires a valid bearer token — an unrecoverable bootstrap
+    // problem with no out-of-band channel in this codebase). The real
+    // enforcement point is that /api/me/mfa/disable refuses to turn MFA
+    // back off for an owner once nodeEnv==='production' (see that route) —
+    // this flag just tells the frontend to steer them to enrollment
+    // immediately rather than leaving it undiscoverable.
+    const mfaSetupRequired = options.nodeEnv === 'production' && isPlatformOwner(user.email, ownerEmails) && !user.totpEnabled;
+    return { status: 200, body: { token, userId: user.id, userType: user.userType, companyId: user.companyId, mfaSetupRequired } };
   });
 
-  // Auth tokens are stateless, short-lived (15-minute TTL) HMAC-signed
-  // strings with no server-side session store, so there is no session row
-  // to delete here — nothing was silently faking revocation before this
-  // route existed, there simply was no server round-trip on logout at all
-  // (the frontend only cleared its local token). This route gives logout a
-  // real server-side effect within that architecture: it requires a still-
-  // valid token, audit-logs the end of the session, and returns success;
-  // the frontend calls it before discarding its local token.
+  // Auth tokens are stateless, 12-hour-TTL HMAC-signed strings with no
+  // server-side session store, so there is no session row to delete here —
+  // nothing was silently faking revocation before this route existed, there
+  // simply was no server round-trip on logout at all (the frontend only
+  // cleared its local token). This route gives logout a real server-side
+  // effect within that architecture: it requires a still-valid token,
+  // audit-logs the end of the session, and returns success; the frontend
+  // calls it before discarding its local token.
   httpServer.post('/api/auth/logout', async (ctx) => {
     const actor = await actorOf(ctx);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'logout', resource: 'session', resourceId: actor.userId, metadata: {} });
+    return { status: 200, body: { success: true } };
+  });
+
+  // ---- MFA (TOTP) self-service — any authenticated user manages only their
+  // own account here; there is no admin-on-behalf-of-another-user path. ----
+  httpServer.post('/api/me/mfa/enroll', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const result = await auth.enrollTotp(actor.userId);
+    return { status: 200, body: result };
+  });
+
+  httpServer.post('/api/me/mfa/verify', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const body = parseJsonBody<{ code: string }>(ctx.body);
+    const result = await auth.confirmTotpEnrollment(actor.userId, body.code);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'session', resourceId: actor.userId, metadata: { securityAlert: true, event: 'mfa_enabled' } });
+    return { status: 200, body: result };
+  });
+
+  httpServer.post('/api/me/mfa/recovery-codes', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const recoveryCodes = await auth.regenerateRecoveryCodes(actor.userId);
+    return { status: 200, body: { recoveryCodes } };
+  });
+
+  httpServer.post('/api/me/mfa/disable', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const user = await repos.users.findById(actor.userId);
+    if (options.nodeEnv === 'production' && user && isPlatformOwner(user.email, ownerEmails)) {
+      throw new ForbiddenError('platform owners cannot disable MFA in production');
+    }
+    await auth.disableTotp(actor.userId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'session', resourceId: actor.userId, metadata: { securityAlert: true, event: 'mfa_disabled' } });
     return { status: 200, body: { success: true } };
   });
 

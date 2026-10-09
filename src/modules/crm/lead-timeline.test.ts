@@ -135,7 +135,7 @@ test('createLead persists custom fields set at creation time', async () => {
 test('getTimeline resolves an actor id to the real employee name, not the raw user id', async () => {
   const h = await freshHarness();
   const lead = await h.crm.createLead({ companyId: 'c1', fullName: 'A', phone: '01' });
-  await h.users.save({ id: 'u1', companyId: 'c1', email: 'atef@c.com', passwordHash: 'x', userType: 'employee_user', employeeId: 'emp1', locale: 'en', failedLoginCount: 0, createdAt: new Date().toISOString() });
+  await h.users.save({ id: 'u1', companyId: 'c1', email: 'atef@c.com', passwordHash: 'x', userType: 'employee_user', employeeId: 'emp1', locale: 'en', failedLoginCount: 0, createdAt: new Date().toISOString(), totpEnabled: false });
   await h.employees.save({ id: 'emp1', companyId: 'c1', fullName: 'Atef Al Tarifi', email: 'atef@c.com', title: 'Agent', status: 'active', createdAt: new Date().toISOString() });
   await h.messages.save({ id: 'm1', companyId: 'c1', relatedResource: 'lead', relatedResourceId: lead.id, fromUserId: 'u1', subject: 'Note', body: 'Client requested a 3BR', channel: 'note', status: 'sent', createdAt: new Date().toISOString() });
 

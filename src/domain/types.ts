@@ -94,6 +94,21 @@ export interface User {
   failedLoginCount: number;
   lockedUntil?: string;
   createdAt: string;
+  /** TOTP MFA. totpSecretEncrypted is set as soon as enrollment starts (AES-
+   * 256-GCM, infra/security.ts encryptSecret) but totpEnabled only flips to
+   * true once the user proves they can generate a real code with it — see
+   * auth.service.ts enrollTotp/confirmTotpEnrollment. recoveryCodesHashed are
+   * one-time, scrypt-hashed (same one-way pattern as passwordHash); each is
+   * removed from the array the moment it's used. */
+  totpSecretEncrypted?: { encryptedValue: string; iv: string; authTag: string };
+  totpEnabled: boolean;
+  recoveryCodesHashed?: string[];
+  /** Forces every outstanding token for this user to be treated as revoked
+   * (checked against the token's iat) regardless of its own TTL — a single-
+   * field way to kill every session at once (password change, suspected
+   * compromise, migration cleanup) without enumerating jtis. See
+   * app.ts resolveActor. */
+  sessionsRevokedBefore?: string;
 }
 
 export type ResourceName =

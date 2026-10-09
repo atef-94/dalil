@@ -34,6 +34,7 @@ async function makeUserWithRole(
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   });
   const role = await app.repos.roles.save({ id: randomUUID(), companyId, name: 'test-role', isSystem: false });
   for (const g of grants) {
@@ -167,6 +168,7 @@ test('broker hard-wall: a broker_user is never broader than broker_own, even wit
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   });
   const role = await app.repos.roles.save({ id: randomUUID(), companyId: 'company-1', name: 'misconfigured-broker', isSystem: false });
   // Deliberately misconfigured: a company-wide scope grant.

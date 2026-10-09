@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Company, User, UserType } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
-import { hashPassword, verifyPassword, signToken } from '../../infra/security.js';
-import { ValidationError, TokenError } from '../../infra/errors.js';
+import { hashPassword, verifyPassword, signToken, encryptSecret, decryptSecret } from '../../infra/security.js';
+import { generateTotpSecret, verifyTotpCode, buildTotpUri, generateRecoveryCodes } from '../../infra/totp.js';
+import { ValidationError, TokenError, NotFoundError } from '../../infra/errors.js';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
@@ -25,6 +26,11 @@ export interface LoginInput {
   companyId: string;
   email: string;
   password: string;
+  /** Required on this same endpoint (re-submit the identical call with this
+   * filled in) whenever the account has totpEnabled — see login()'s
+   * 'mfa_required' branch below. Accepts either a live 6-digit TOTP code or
+   * one of the user's one-time recovery codes. */
+  totpCode?: string;
 }
 
 export class AuthService {
@@ -32,7 +38,15 @@ export class AuthService {
     private readonly users: Repository<User>,
     private readonly tokenSecret: string,
     private readonly companies?: Repository<Company>,
+    /** Key for encrypting totpSecretEncrypted at rest (infra/security.ts
+     * encryptSecret). Falls back to tokenSecret when unset, same convention
+     * as AutomationService's secretStoreKey (see app.ts). */
+    private readonly encryptionSecret?: string,
   ) {}
+
+  private get secretKey(): string {
+    return this.encryptionSecret ?? this.tokenSecret;
+  }
 
   private validateCredentials(email: string, password: string): void {
     if (!EMAIL_PATTERN.test(email)) {
@@ -66,6 +80,7 @@ export class AuthService {
       locale: input.locale,
       failedLoginCount: 0,
       createdAt: new Date().toISOString(),
+      totpEnabled: false,
     };
     return this.users.save(user);
   }
@@ -109,8 +124,46 @@ export class AuthService {
       throw new TokenError('invalid email or password');
     }
 
+    // MFA, checked only after the password is already confirmed correct —
+    // same single-endpoint retry shape as the rest of login(): a missing
+    // code gets a distinct 'mfa_required' response so the client knows to
+    // re-submit this exact call with totpCode filled in, rather than a
+    // second pending-token type with its own TTL/verify function. A wrong
+    // code (or a wrong recovery code) increments the same failedLoginCount/
+    // lockout counter as a wrong password — deliberately reusing it instead
+    // of a parallel MFA-attempt counter.
+    let recoveryCodesAfterLogin = user.recoveryCodesHashed;
+    if (user.totpEnabled) {
+      if (!input.totpCode) {
+        throw new TokenError('mfa_required');
+      }
+      const secret = user.totpSecretEncrypted ? decryptSecret(user.totpSecretEncrypted, this.secretKey) : undefined;
+      const totpValid = secret ? verifyTotpCode(secret, input.totpCode) : false;
+      const recoveryCodeIndex = !totpValid
+        ? (user.recoveryCodesHashed ?? []).findIndex((hashed) => verifyPassword(input.totpCode!, hashed))
+        : -1;
+      if (!totpValid && recoveryCodeIndex === -1) {
+        const failedLoginCount = user.failedLoginCount + 1;
+        const locked = failedLoginCount >= MAX_FAILED_ATTEMPTS;
+        await this.users.save({
+          ...user,
+          failedLoginCount: locked ? 0 : failedLoginCount,
+          lockedUntil: locked ? new Date(now + LOCKOUT_WINDOW_MS).toISOString() : user.lockedUntil,
+        });
+        throw new TokenError('invalid authentication code');
+      }
+      if (recoveryCodeIndex !== -1) {
+        recoveryCodesAfterLogin = (user.recoveryCodesHashed ?? []).filter((_, i) => i !== recoveryCodeIndex);
+      }
+    }
+
     // Reset on success.
-    const updated: User = { ...user, failedLoginCount: 0, lockedUntil: undefined };
+    const updated: User = {
+      ...user,
+      failedLoginCount: 0,
+      lockedUntil: undefined,
+      recoveryCodesHashed: recoveryCodesAfterLogin,
+    };
     await this.users.save(updated);
 
     const token = signToken(
@@ -125,5 +178,55 @@ export class AuthService {
    * without a separate login round-trip. */
   issueTokenForUser(user: User): string {
     return signToken({ sub: user.id, companyId: user.companyId, userType: user.userType }, this.tokenSecret);
+  }
+
+  // ---- MFA (TOTP) self-service enrollment ----
+  //
+  // Two-step on purpose: starting enrollment only stores a *pending* secret
+  // (totpEnabled stays false) so a user who never finishes setup — closes
+  // the tab after scanning the QR code, say — hasn't silently locked
+  // themselves into needing a code login() will then demand. totpEnabled
+  // only flips to true once confirmTotpEnrollment proves the user can
+  // actually generate a real code from what they saved.
+
+  async enrollTotp(userId: string): Promise<{ secret: string; otpauthUri: string }> {
+    const user = await this.users.findById(userId);
+    if (!user) throw new NotFoundError('user not found');
+    const secret = generateTotpSecret();
+    const encrypted = encryptSecret(secret, this.secretKey);
+    await this.users.save({ ...user, totpSecretEncrypted: encrypted, totpEnabled: false });
+    return { secret, otpauthUri: buildTotpUri(secret, user.email) };
+  }
+
+  async confirmTotpEnrollment(userId: string, code: string): Promise<{ recoveryCodes: string[] }> {
+    const user = await this.users.findById(userId);
+    if (!user) throw new NotFoundError('user not found');
+    if (!user.totpSecretEncrypted) throw new ValidationError('call enrollTotp first');
+    const secret = decryptSecret(user.totpSecretEncrypted, this.secretKey);
+    if (!verifyTotpCode(secret, code)) {
+      throw new ValidationError('invalid authentication code');
+    }
+    const recoveryCodes = generateRecoveryCodes();
+    await this.users.save({
+      ...user,
+      totpEnabled: true,
+      recoveryCodesHashed: recoveryCodes.map((c) => hashPassword(c)),
+    });
+    return { recoveryCodes };
+  }
+
+  async disableTotp(userId: string): Promise<void> {
+    const user = await this.users.findById(userId);
+    if (!user) throw new NotFoundError('user not found');
+    await this.users.save({ ...user, totpEnabled: false, totpSecretEncrypted: undefined, recoveryCodesHashed: undefined });
+  }
+
+  async regenerateRecoveryCodes(userId: string): Promise<string[]> {
+    const user = await this.users.findById(userId);
+    if (!user) throw new NotFoundError('user not found');
+    if (!user.totpEnabled) throw new ValidationError('MFA is not enabled for this account');
+    const recoveryCodes = generateRecoveryCodes();
+    await this.users.save({ ...user, recoveryCodesHashed: recoveryCodes.map((c) => hashPassword(c)) });
+    return recoveryCodes;
   }
 }
