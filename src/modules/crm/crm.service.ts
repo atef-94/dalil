@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import type { Lead } from '../../domain/types.js';
+import type { Lead, LeadSourceChannel, LeadInterestType } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import { ValidationError, ConflictError, NotFoundError } from '../../infra/errors.js';
 import type { ListScope } from '../permissions/rbac.evaluator.js';
 import { filterByListScope, type ScopeOwnerKeys } from '../permissions/scope-filter.js';
 import type { CrmStageService } from './crm-stage.service.js';
 import { KeyedMutex } from '../../infra/keyed-mutex.js';
+import { normalizePhone } from '../../infra/phone.js';
+
+const LEAD_SOURCE_CHANNELS: LeadSourceChannel[] = ['facebook', 'google', 'referral', 'whatsapp', 'instagram', 'tiktok', 'other'];
+const LEAD_INTEREST_TYPES: LeadInterestType[] = ['project', 'unit', 'product', 'service', 'other'];
 
 export interface LeadCustomFields {
   propertyTypeWanted?: string;
@@ -18,6 +22,10 @@ export interface LeadCustomFields {
   maxInstallment?: number;
   preferredTenorMonths?: number;
   preferredTransferMethod?: string;
+  interestedInType?: LeadInterestType;
+  interestedInLabel?: string;
+  budgetMin?: number;
+  budgetMax?: number;
 }
 
 export interface CreateLeadInput extends LeadCustomFields {
@@ -27,6 +35,7 @@ export interface CreateLeadInput extends LeadCustomFields {
   email?: string;
   nationalId?: string;
   sourceId?: string;
+  source?: LeadSourceChannel;
   /** Explicit initial stage — omit to land in the company's default
    * (Fresh Leads) stage, which is the normal case. */
   stageId?: string;
@@ -35,6 +44,27 @@ export interface CreateLeadInput extends LeadCustomFields {
   ownerEmployeeUserId?: string;
   requiredSkill?: string;
   firstContactSlaDueAt?: string;
+}
+
+/** The fields the redesigned Lead form's "Edit Lead" surface can change —
+ * LeadCustomFields' qualifying details plus the small set of core fields
+ * that previously had no edit path at all (fullName/phone/source). */
+export interface UpdateLeadFieldsInput extends LeadCustomFields {
+  fullName?: string;
+  phone?: string;
+  source?: LeadSourceChannel;
+}
+
+function sanitizeSourceChannel(value: LeadSourceChannel | undefined): LeadSourceChannel | undefined {
+  if (value === undefined) return undefined;
+  if (!LEAD_SOURCE_CHANNELS.includes(value)) throw new ValidationError(`"source" must be one of: ${LEAD_SOURCE_CHANNELS.join(', ')}`);
+  return value;
+}
+
+function sanitizeInterestType(value: LeadInterestType | undefined): LeadInterestType | undefined {
+  if (value === undefined) return undefined;
+  if (!LEAD_INTEREST_TYPES.includes(value)) throw new ValidationError(`"interestedInType" must be one of: ${LEAD_INTEREST_TYPES.join(', ')}`);
+  return value;
 }
 
 const LEAD_OWNERSHIP_PROTECTION_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
@@ -63,9 +93,16 @@ function sanitizeCustomFields(input: LeadCustomFields): LeadCustomFields {
     maxDownPayment: sanitizeNumber(input.maxDownPayment, 'maxDownPayment'),
     maxInstallment: sanitizeNumber(input.maxInstallment, 'maxInstallment'),
     preferredTenorMonths: sanitizeNumber(input.preferredTenorMonths, 'preferredTenorMonths'),
+    interestedInType: sanitizeInterestType(input.interestedInType),
+    interestedInLabel: sanitizeString(input.interestedInLabel),
+    budgetMin: sanitizeNumber(input.budgetMin, 'budgetMin'),
+    budgetMax: sanitizeNumber(input.budgetMax, 'budgetMax'),
   };
   if (out.minAreaSqm !== undefined && out.maxAreaSqm !== undefined && out.minAreaSqm > out.maxAreaSqm) {
     throw new ValidationError('"minAreaSqm" cannot be greater than "maxAreaSqm"');
+  }
+  if (out.budgetMin !== undefined && out.budgetMax !== undefined && out.budgetMin > out.budgetMax) {
+    throw new ValidationError('"budgetMin" cannot be greater than "budgetMax"');
   }
   for (const key of Object.keys(out) as (keyof LeadCustomFields)[]) {
     if (out[key] === undefined) delete out[key];
@@ -115,37 +152,50 @@ export class CrmService {
     return migrated;
   }
 
-  /** Matches on phone, email, OR national ID — any one shared field is
-   * treated as the same real person, since a phone or email can be
-   * swapped out to dodge dedup but a national ID can't. This block is
-   * permanent (not time-boxed): the system should never hold two Lead
-   * rows for the same person, no matter how old the first one is. */
-  private async findDuplicate(companyId: string, phone: string, email?: string, nationalId?: string): Promise<Lead | undefined> {
+  /** Phone (normalized to a canonical form — see normalizePhone) is the
+   * sole duplicate-detection identifier, as requested by the redesigned
+   * Lead form: a national ID is no longer collected on the form, so it's
+   * no longer trustworthy as a dedup signal for leads created going
+   * forward. Email is still matched too where present, since it costs
+   * nothing and catches genuine dupes from older/imported rows that do
+   * have one. This block is permanent (not time-boxed): the system
+   * should never hold two Lead rows for the same person, no matter how
+   * old the first one is. */
+  private async findDuplicate(companyId: string, normalizedPhone: string, email?: string): Promise<Lead | undefined> {
     const candidates = await this.leads.findAll((l) => l.companyId === companyId);
     return candidates.find((l) =>
-      l.phone === phone ||
-      (!!email && !!l.email && l.email === email) ||
-      (!!nationalId && !!l.nationalId && l.nationalId === nationalId),
+      normalizePhone(l.phone) === normalizedPhone ||
+      (!!email && !!l.email && l.email === email),
     );
   }
 
+  /** Public, read-only duplicate pre-check the Lead form calls before
+   * submitting a new lead, so the sales rep sees a warning — and can open
+   * the existing lead — before creation is even attempted, rather than
+   * just getting a rejected request. */
+  async checkDuplicateByPhone(companyId: string, phone: string): Promise<Lead | undefined> {
+    if (!phone?.trim()) return undefined;
+    return this.findDuplicate(companyId, normalizePhone(phone));
+  }
+
   /** Locked on the company (not on a per-field key, since the duplicate
-   * check itself matches on any of phone/email/nationalId — see
-   * findDuplicate) so two concurrent createLead calls for the same
-   * company can never both pass the dedup check before either one has
-   * written its row. Lead creation isn't hot enough for per-company
-   * serialization to matter; correctness here matters more than
-   * throughput. */
+   * check itself matches on phone or email — see findDuplicate) so two
+   * concurrent createLead calls for the same company can never both pass
+   * the dedup check before either one has written its row. Lead creation
+   * isn't hot enough for per-company serialization to matter; correctness
+   * here matters more than throughput. */
   async createLead(input: CreateLeadInput): Promise<Lead> {
     if (!input.fullName?.trim()) throw new ValidationError('fullName is required');
     if (!input.phone?.trim()) throw new ValidationError('phone is required');
 
     return this.mutex.runExclusive(input.companyId, async () => {
       const nationalId = sanitizeString(input.nationalId);
-      const duplicate = await this.findDuplicate(input.companyId, input.phone.trim(), input.email?.trim(), nationalId);
+      const normalizedPhone = normalizePhone(input.phone);
+      const duplicate = await this.findDuplicate(input.companyId, normalizedPhone, input.email?.trim());
       if (duplicate) {
-        throw new ConflictError('a lead with this phone, email, or national ID already exists');
+        throw new ConflictError('a lead with this phone number already exists');
       }
+      const source = sanitizeSourceChannel(input.source);
 
       let stageId = input.stageId;
       if (stageId) {
@@ -159,10 +209,11 @@ export class CrmService {
         id: randomUUID(),
         companyId: input.companyId,
         fullName: input.fullName.trim(),
-        phone: input.phone.trim(),
+        phone: normalizedPhone,
         email: input.email?.trim(),
         nationalId,
         sourceId: input.sourceId,
+        source,
         stageId,
         tags: input.tags?.map((t) => t.trim()).filter(Boolean),
         priority: input.priority,
@@ -200,10 +251,12 @@ export class CrmService {
     return lead.ownerEmployeeUserId;
   }
 
-  /** Merges in whatever custom fields the caller passes — a real estate
-   * agent fills these in progressively, not all at once at creation.
-   * Locked on leadId — same lost-update race as moveToStage. */
-  async updateCustomFields(leadId: string, companyId: string, input: LeadCustomFields): Promise<Lead> {
+  /** Merges in whatever fields the caller passes — a real estate agent
+   * fills these in progressively, not all at once at creation. Also the
+   * "Edit Lead" surface's only write path for fullName/phone/source
+   * (previously uneditable after creation). Locked on leadId — same
+   * lost-update race as moveToStage. */
+  async updateCustomFields(leadId: string, companyId: string, input: UpdateLeadFieldsInput): Promise<Lead> {
     return this.mutex.runExclusive(leadId, async () => {
       const lead = await this.leads.findById(leadId);
       if (!lead || lead.companyId !== companyId) throw new NotFoundError('lead not found');
@@ -218,8 +271,21 @@ export class CrmService {
         preferredLocation: input.preferredLocation ?? lead.preferredLocation,
         expectedDeliveryTimeline: input.expectedDeliveryTimeline ?? lead.expectedDeliveryTimeline,
         preferredTransferMethod: input.preferredTransferMethod ?? lead.preferredTransferMethod,
+        interestedInType: input.interestedInType ?? lead.interestedInType,
+        interestedInLabel: input.interestedInLabel ?? lead.interestedInLabel,
+        budgetMin: input.budgetMin ?? lead.budgetMin,
+        budgetMax: input.budgetMax ?? lead.budgetMax,
       });
-      return this.leads.save({ ...lead, ...sanitized });
+      if (input.fullName !== undefined && !input.fullName.trim()) {
+        throw new ValidationError('fullName cannot be empty');
+      }
+      if (input.phone !== undefined && !input.phone.trim()) {
+        throw new ValidationError('phone cannot be empty');
+      }
+      const fullName = input.fullName !== undefined ? input.fullName.trim() : lead.fullName;
+      const phone = input.phone !== undefined ? normalizePhone(input.phone) : lead.phone;
+      const source = input.source !== undefined ? sanitizeSourceChannel(input.source) : lead.source;
+      return this.leads.save({ ...lead, ...sanitized, fullName, phone, source });
     });
   }
 

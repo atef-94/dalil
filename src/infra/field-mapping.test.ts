@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { suggestMapping, type ImportFieldDef } from './field-mapping.js';
+import { suggestMapping, classifySheet, type ImportFieldDef } from './field-mapping.js';
+import { CATALOG_IMPORT_FIELDS, AVAILABILITY_IMPORT_FIELDS, CATALOG_ANCHOR_KEYS, AVAILABILITY_ANCHOR_KEYS } from '../modules/inventory/inventory-import.service.js';
 
 const LEAD_FIELDS: ImportFieldDef[] = [
   { key: 'fullName', label: 'Full Name', aliases: ['name', 'client name'] },
@@ -91,4 +92,41 @@ test('suggestMapping handles a mixed Arabic/English header file, matching each i
 test('suggestMapping leaves an unrecognized Arabic header unmapped rather than guessing', () => {
   const mapping = suggestMapping(['لون مفضل'], INVENTORY_FIELDS);
   assert.equal(mapping['لون مفضل'], null);
+});
+
+// ---- classifySheet (sheet-kind detection for the canonical import engine) ----
+
+function classify(headers: string[]) {
+  return classifySheet(headers, CATALOG_IMPORT_FIELDS, AVAILABILITY_IMPORT_FIELDS, CATALOG_ANCHOR_KEYS, AVAILABILITY_ANCHOR_KEYS);
+}
+
+test('classifySheet recognizes a live-availability sheet (Code/Floor/Unit Type/Price/Status)', () => {
+  assert.equal(classify(['Code', 'Type', 'Building', 'Floor', 'Flat', 'Rooms', 'Area', 'Garden', 'Price', 'Status']), 'availability');
+});
+
+test('classifySheet recognizes a project-catalog sheet (Developer/Project/Phase/BUA From-To/Price From-To)', () => {
+  assert.equal(
+    classify(['Developer', 'Project', 'Phase', 'Unit Type', 'Bedrooms', 'BUA From', 'BUA To', 'Price From', 'Price To', 'Finishing', 'Delivery']),
+    'catalog',
+  );
+});
+
+test('classifySheet recognizes the same live-availability shape under CONNECT 4-style headers (Floor/In Door/Out Door/Price per Meter/Final Price)', () => {
+  assert.equal(classify(['Code', 'Floor', 'Unit Type', 'In Door', 'Out Door', 'Price Per Meter', 'Final Price', 'Status']), 'availability');
+});
+
+test('classifySheet flags a Fact Sheet / summary table (Type, Quantity, Min/Max SQM, Min/Max Price) as summary, never as catalog or availability', () => {
+  const kind = classify(['Type', 'Quantity', 'Min SQM', 'Max SQM', 'Min Unit Price', 'Max Unit Price']);
+  assert.notEqual(kind, 'catalog');
+  assert.notEqual(kind, 'availability');
+});
+
+test('classifySheet returns unknown for headers with no real overlap with either dictionary', () => {
+  assert.equal(classify(['Notes', 'Generated On', 'Confidential']), 'unknown');
+});
+
+test('classifySheet never lets a stray field-name overlap alone claim a sheet without its anchor (Unit Type/Bedrooms alone, no Code and no Project/Developer)', () => {
+  const kind = classify(['Unit Type', 'Bedrooms', 'Finishing']);
+  assert.notEqual(kind, 'availability');
+  assert.notEqual(kind, 'catalog');
 });

@@ -235,7 +235,19 @@ export class IntegrationService {
       throw new AutomationError(`rate limit exceeded for ${provider} — try again shortly`, 429);
     }
 
-    const credentials = await this.resolveCredentials(companyId, connection);
+    let credentials: Record<string, string>;
+    try {
+      credentials = await this.resolveCredentials(companyId, connection);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.recordEvent(companyId, connection.id, provider, action, 'failed', params, 0, message);
+      await this.repos.connections.save({ ...connection, status: 'error', lastError: message, updatedAt: new Date().toISOString() });
+      // A 4xx (not 5xx) status so the real reason reaches the caller even in
+      // production, where the router redacts 5xx messages to a generic
+      // "internal server error" — this is a correctable connection problem
+      // (reconnect the integration), not a server defect.
+      throw new AutomationError(`could not read stored credentials for ${provider}: ${message} — try reconnecting the integration`, 422);
+    }
 
     let attempts = 0;
     let lastError: string | undefined;
@@ -287,7 +299,12 @@ export class IntegrationService {
       companyId, actorUserId: userId, action: 'execute', resource: 'integration_connection', resourceId: connection.id,
       metadata: { provider, integrationAction: action, attempts, failed: true, error: lastError },
     });
-    throw new AutomationError(`${provider} ${action} failed after ${attempts} attempt(s): ${lastError}`, 502);
+    // 422, not 502: this is the provider rejecting the request (bad/expired
+    // token, wrong phone number id, etc.), correctable by reconnecting —
+    // not a server defect. Kept below 500 so the real reason reaches the
+    // caller even in production, where the router redacts every 5xx
+    // message to a generic "internal server error".
+    throw new AutomationError(`${provider} ${action} failed after ${attempts} attempt(s): ${lastError}`, 422);
   }
 
   private async resolveCredentials(companyId: string, connection: IntegrationConnection): Promise<Record<string, string>> {

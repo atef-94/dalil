@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { CrmService } from './crm.service.js';
 import { CrmStageService } from './crm-stage.service.js';
+import { normalizePhone } from '../../infra/phone.js';
 import type { CrmStage, Lead } from '../../domain/types.js';
 
 async function freshService(companyIds: string[] = ['c1', 'c2']) {
@@ -44,7 +45,7 @@ test('dedup is scoped per company: the same phone is allowed in a different comp
   const { svc } = await freshService();
   await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
   const second = await svc.createLead({ companyId: 'c2', fullName: 'Client B', phone: '0100' });
-  assert.equal(second.phone, '0100');
+  assert.equal(second.phone, normalizePhone('0100'));
 });
 
 test('moveToStage moves a lead into a different CRM stage, keeping the same lead id (never duplicated)', async () => {
@@ -120,17 +121,79 @@ test('assignOwner rejects a lead belonging to a different company (cross-tenant)
   await assert.rejects(() => svc.assignOwner(lead.id, 'c2', 'emp-2'));
 });
 
-test('creating a lead with a duplicate national ID is rejected even when phone and email differ', async () => {
+// The Lead Form Redesign explicitly dropped National ID from duplicate
+// detection — a duplicate phone or email is still rejected, but a shared
+// nationalId alone (with distinct phone/email) is no longer a match. The
+// field itself is preserved on already-existing historical rows (still
+// settable/settled on creation) — it's only excluded from the dedup check.
+test('a shared national ID with distinct phone and email is no longer treated as a duplicate', async () => {
   const { svc } = await freshService();
   await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100', email: 'a@x.com', nationalId: 'NID-1' });
-  await assert.rejects(() => svc.createLead({ companyId: 'c1', fullName: 'Client B (same person, fake details)', phone: '0999', email: 'fake@x.com', nationalId: 'NID-1' }));
+  const second = await svc.createLead({ companyId: 'c1', fullName: 'Client B', phone: '0999', email: 'fake@x.com', nationalId: 'NID-1' });
+  assert.equal(second.nationalId, 'NID-1');
 });
 
-test('national ID dedup is scoped per company, like phone/email', async () => {
+test('checkDuplicateByPhone finds an existing lead by normalized phone only, ignoring national ID', async () => {
   const { svc } = await freshService();
-  await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100', nationalId: 'NID-1' });
-  const second = await svc.createLead({ companyId: 'c2', fullName: 'Client B', phone: '0200', nationalId: 'NID-1' });
-  assert.equal(second.nationalId, 'NID-1');
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '01012345678' });
+  const found = await svc.checkDuplicateByPhone('c1', '010-1234-5678');
+  assert.equal(found?.id, lead.id);
+  const notFound = await svc.checkDuplicateByPhone('c1', '01099999999');
+  assert.equal(notFound, undefined);
+});
+
+test('createLead rejects an unrecognized source channel', async () => {
+  const { svc } = await freshService();
+  await assert.rejects(() => svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100', source: 'carrier-pigeon' as never }));
+});
+
+test('createLead accepts a valid source channel and stores it', async () => {
+  const { svc } = await freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100', source: 'facebook' });
+  assert.equal(lead.source, 'facebook');
+});
+
+test('updateCustomFields rejects an unrecognized interestedInType', async () => {
+  const { svc } = await freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  await assert.rejects(() => svc.updateCustomFields(lead.id, 'c1', { interestedInType: 'spaceship' as never }));
+});
+
+test('updateCustomFields rejects budgetMin greater than budgetMax', async () => {
+  const { svc } = await freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  await assert.rejects(() => svc.updateCustomFields(lead.id, 'c1', { budgetMin: 5_000_000, budgetMax: 1_000_000 }));
+});
+
+test('updateCustomFields accepts and stores interestedInType/interestedInLabel/budgetMin/budgetMax', async () => {
+  const { svc } = await freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  const updated = await svc.updateCustomFields(lead.id, 'c1', {
+    interestedInType: 'unit',
+    interestedInLabel: '3-bedroom apartment',
+    budgetMin: 1_000_000,
+    budgetMax: 3_000_000,
+  });
+  assert.equal(updated.interestedInType, 'unit');
+  assert.equal(updated.interestedInLabel, '3-bedroom apartment');
+  assert.equal(updated.budgetMin, 1_000_000);
+  assert.equal(updated.budgetMax, 3_000_000);
+});
+
+test('updateCustomFields can edit fullName, phone (normalizing it), and source', async () => {
+  const { svc } = await freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100', source: 'google' });
+  const updated = await svc.updateCustomFields(lead.id, 'c1', { fullName: 'Client A (updated)', phone: '01012345678', source: 'referral' });
+  assert.equal(updated.fullName, 'Client A (updated)');
+  assert.equal(updated.phone, normalizePhone('01012345678'));
+  assert.equal(updated.source, 'referral');
+});
+
+test('updateCustomFields rejects an empty fullName or phone', async () => {
+  const { svc } = await freshService();
+  const lead = await svc.createLead({ companyId: 'c1', fullName: 'Client A', phone: '0100' });
+  await assert.rejects(() => svc.updateCustomFields(lead.id, 'c1', { fullName: '   ' }));
+  await assert.rejects(() => svc.updateCustomFields(lead.id, 'c1', { phone: '   ' }));
 });
 
 test('resolveCommissionOwner returns the original owner within the 60-day protection window, even after reassignment', async () => {
@@ -178,7 +241,7 @@ test('10 concurrent createLead calls with the same phone number produce exactly 
   const succeeded = results.filter((r) => r.status === 'fulfilled');
   assert.equal(succeeded.length, 1, 'exactly one of the 10 concurrent same-phone creates should win');
   const all = await svc.listForScope({ kind: 'company', companyId: 'c1' }, async () => ({}));
-  assert.equal(all.filter((l) => l.phone === '0100-same').length, 1);
+  assert.equal(all.filter((l) => l.phone === normalizePhone('0100-same')).length, 1);
 });
 
 test('10 concurrent createLead calls with the same email (different phones) produce exactly one lead', async () => {

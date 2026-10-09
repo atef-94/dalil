@@ -1,7 +1,12 @@
-import { randomBytes, scryptSync, timingSafeEqual, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHmac, createHash, createCipheriv, createDecipheriv } from 'node:crypto';
 
 const SCRYPT_KEYLEN = 64;
-const TOKEN_TTL_SECONDS = 15 * 60; // 15-minute token TTL
+// A flat, non-refreshable TTL (no refresh-token flow exists) — long enough
+// to cover a normal work session without forcing a re-login mid-task. The
+// previous 15-minute value silently broke every screen after a short idle
+// gap: the frontend clears the token on any 401 but had no re-auth prompt,
+// so a mid-session expiry looked like random features "not working".
+const TOKEN_TTL_SECONDS = 12 * 60 * 60; // 12-hour token TTL
 
 // ---- Password hashing (scrypt, Node's built-in KDF) ----
 
@@ -20,6 +25,22 @@ export function verifyPassword(password: string, stored: string): boolean {
   return timingSafeEqual(candidate, expected);
 }
 
+// ---- One-way hashing for high-entropy bearer tokens (invitation accept
+// links, password-reset links) — deterministic SHA-256, NOT scrypt. These
+// tokens are already randomBytes(32)-generated, not human passwords, so
+// there's no offline-cracking risk a slow KDF would defend against; using a
+// deterministic hash instead means the accept/reset flow can look a row up
+// BY the token's hash directly (repo.findAll(t => t.tokenHash === hash))
+// instead of scanning and scrypt-verifying every still-pending row. ----
+
+export function hashToken(rawToken: string): string {
+  return createHash('sha256').update(rawToken).digest('hex');
+}
+
+export function generateRawToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
 // ---- HMAC-SHA256-signed tokens (JWT-shaped: header.payload.signature, base64url) ----
 
 export interface TokenPayload {
@@ -28,16 +49,20 @@ export interface TokenPayload {
   userType: string;
   iat: number;
   exp: number;
+  /** Unique per issued token (not per user) — lets a single still-valid
+   * token be revoked individually (see RevokedToken, app.ts resolveActor/
+   * logout) without affecting any other session the same user holds. */
+  jti: string;
 }
 
 function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64url');
 }
 
-export function signToken(payload: Omit<TokenPayload, 'iat' | 'exp'>, secret: string): string {
+export function signToken(payload: Omit<TokenPayload, 'iat' | 'exp' | 'jti'>, secret: string): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const now = Math.floor(Date.now() / 1000);
-  const fullPayload: TokenPayload = { ...payload, iat: now, exp: now + TOKEN_TTL_SECONDS };
+  const fullPayload: TokenPayload = { ...payload, iat: now, exp: now + TOKEN_TTL_SECONDS, jti: randomUUID() };
   const encodedHeader = base64url(JSON.stringify(header));
   const encodedPayload = base64url(JSON.stringify(fullPayload));
   const signature = createHmac('sha256', secret)

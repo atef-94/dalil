@@ -3,7 +3,10 @@
 // repository-layer replacement, not a service-layer rewrite.
 export interface Repository<T extends { id: string }> {
   findById(id: string): Promise<T | undefined>;
-  findAll(predicate?: (item: T) => boolean): Promise<T[]>;
+  /** `companyId` is optional, additive defense-in-depth (see
+   * SqliteRepository's own doc comment on its findAll) — existing callers
+   * that omit it see no change in behavior. */
+  findAll(predicate?: (item: T) => boolean, companyId?: string): Promise<T[]>;
   save(item: T): Promise<T>;
   deleteById(id: string): Promise<boolean>;
 }
@@ -16,8 +19,9 @@ export class InMemoryRepository<T extends { id: string }> implements Repository<
     return this.store.get(id);
   }
 
-  async findAll(predicate?: (item: T) => boolean): Promise<T[]> {
-    const all = Array.from(this.store.values());
+  async findAll(predicate?: (item: T) => boolean, companyId?: string): Promise<T[]> {
+    let all = Array.from(this.store.values());
+    if (companyId) all = all.filter((item) => (item as Record<string, unknown>).companyId === companyId);
     return predicate ? all.filter(predicate) : all;
   }
 

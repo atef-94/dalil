@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { InventoryService } from './inventory.service.js';
-import { InventoryImportService, INVENTORY_IMPORT_FIELDS } from './inventory-import.service.js';
+import { InventoryImportService, INVENTORY_IMPORT_FIELDS, CATALOG_IMPORT_FIELDS, AVAILABILITY_IMPORT_FIELDS } from './inventory-import.service.js';
 import { suggestMapping } from '../../infra/field-mapping.js';
-import type { Consultant, Developer, Facility, Launch, Project, ProjectPhase, Reservation, SalesPhoneNumber, Unit, UnitHold } from '../../domain/types.js';
+import type { Consultant, Developer, Facility, Launch, Project, ProjectPhase, ProjectUnitSpec, Reservation, SalesPhoneNumber, Unit, UnitHold } from '../../domain/types.js';
 
 function setup() {
   const inventory = new InventoryService(
@@ -32,6 +32,7 @@ function setupFull() {
     new InMemoryRepository<Facility>(),
     new InMemoryRepository<Consultant>(),
     new InMemoryRepository<SalesPhoneNumber>(),
+    new InMemoryRepository<ProjectUnitSpec>(),
   );
   const svc = new InventoryImportService(inventory);
   return { inventory, svc };
@@ -191,6 +192,10 @@ test('importRows writes bedrooms/view/finishing/garden area/floor/design/buildin
         buildingLabel: 'B3',
         deliveryDate: 'Q2 2028',
         pricePerMeter: '12500',
+        landAreaSqm: '250',
+        parkingIncluded: 'Yes',
+        parkingSpaces: '2',
+        parkingPrice: '50000',
       },
     ],
     async (unit) => {
@@ -208,6 +213,10 @@ test('importRows writes bedrooms/view/finishing/garden area/floor/design/buildin
   assert.equal(written!.buildingLabel, 'B3');
   assert.deepEqual(written!.delivery, { quarter: 2, year: 2028 });
   assert.equal(written!.pricePerMeterOverride, 12500);
+  assert.equal(written!.landAreaSqm, 250);
+  assert.equal(written!.parkingIncluded, true);
+  assert.equal(written!.parkingSpaces, 2);
+  assert.equal(written!.parkingPrice, 50000);
 });
 
 test('importRows resolves a Phase name to a real ProjectPhase, creating it once and reusing it on later rows', async () => {
@@ -530,5 +539,253 @@ test('a representative batch of common English/Arabic real-estate export headers
   for (const [header, expectedKey] of cases) {
     const mapping = suggestMapping([header], INVENTORY_IMPORT_FIELDS);
     assert.equal(mapping[header], expectedKey, `expected "${header}" to map to ${expectedKey}, got ${mapping[header]}`);
+  }
+});
+
+// ---- Availability status: import + normalization ----
+
+test('importRows sets an initial status on a newly created unit when the source row has a recognized status', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Marina Towers' });
+  const result = await svc.importRows(
+    'c1',
+    [{ projectName: project.name, unitCode: 'A-101', unitType: 'apartment', areaSqm: '120', listPrice: '1500000', availabilityStatus: 'Sold' }],
+    async () => {},
+  );
+  assert.equal(result.succeeded, 1);
+  const [unit] = await inventory.listUnits('c1');
+  assert.equal(unit!.status, 'contracted');
+  assert.equal(unit!.sourceStatus, 'Sold');
+});
+
+test('importRows updates an existing available unit\'s status when a re-import reports a new recognized status (Available -> Hold)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Marina Towers' });
+  const row = { projectName: project.name, unitCode: 'A-101', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' };
+  await svc.importRows('c1', [row], async () => {});
+  const [before] = await inventory.listUnits('c1');
+  assert.equal(before!.status, 'available');
+
+  const result = await svc.importRows('c1', [{ ...row, availabilityStatus: 'hold' }], async () => {});
+  assert.equal(result.succeeded, 1);
+  const [after] = await inventory.listUnits('c1');
+  assert.equal(after!.status, 'held');
+  assert.equal(after!.sourceStatus, 'hold');
+});
+
+test('an unrecognized status value is flagged as informational and never silently defaults to available', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Marina Towers' });
+  const preview = await svc.buildPreview('c1', [
+    { projectName: project.name, unitCode: 'A-101', unitType: 'apartment', areaSqm: '120', listPrice: '1500000', availabilityStatus: 'Under Offer' },
+  ]);
+  assert.equal(preview.validCount, 1, 'an unrecognized status is a warning, not a blocking error');
+  assert.match(preview.rows[0]!.issues.join(';'), /"Status" value "Under Offer" is not recognized/);
+
+  const result = await svc.importRows(
+    'c1',
+    [{ projectName: project.name, unitCode: 'A-101', unitType: 'apartment', areaSqm: '120', listPrice: '1500000', availabilityStatus: 'Under Offer' }],
+    async () => {},
+  );
+  assert.equal(result.succeeded, 1);
+  const [unit] = await inventory.listUnits('c1');
+  assert.equal(unit!.status, 'available', 'an unrecognized status is never silently defaulted to available (it just never overwrote the create default)');
+  assert.equal(unit!.sourceStatus, undefined);
+});
+
+test('importRows never touches status on an unrelated commercial-field-only re-import (no status column present)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Marina Towers' });
+  await svc.importRows('c1', [{ projectName: project.name, unitCode: 'A-101', unitType: 'apartment', areaSqm: '120', listPrice: '1500000' }], async () => {});
+  await svc.importRows('c1', [{ projectName: project.name, unitCode: 'A-101', unitType: 'apartment', areaSqm: '125', listPrice: '1600000' }], async () => {});
+  const [unit] = await inventory.listUnits('c1');
+  assert.equal(unit!.status, 'available');
+  assert.equal(unit!.areaSqm, 125, 'the commercial refresh itself still applies');
+});
+
+// ---- Project Catalog import (ProjectUnitSpec rows, never a physical Unit) ----
+
+test('buildProjectUnitSpecPreview validates a catalog row and never requires a unit code', async () => {
+  const { inventory, svc } = setupFull();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Vye' });
+  const preview = await svc.buildProjectUnitSpecPreview('c1', [
+    { projectName: project.name, unitType: 'Apartment', bedrooms: '2', projectBuaFrom: '120', projectBuaTo: '135', projectPriceFrom: '8000000', projectPriceTo: '10000000' },
+  ]);
+  assert.equal(preview.validCount, 1);
+  assert.equal(preview.rows[0]!.resolved!.unitType, 'Apartment');
+});
+
+test('importProjectUnitSpecRows creates a ProjectUnitSpec and never creates a physical Unit — a catalog row has no unit identity', async () => {
+  const { inventory, svc } = setupFull();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Vye' });
+  const result = await svc.importProjectUnitSpecRows('c1', [
+    { projectName: project.name, unitType: 'Apartment', bedrooms: '2', projectBuaFrom: '120', projectBuaTo: '135', projectPriceFrom: '8000000', projectPriceTo: '10000000' },
+    { projectName: project.name, unitType: 'Villa', bedrooms: '3', projectBuaFrom: '250', projectBuaTo: '300' },
+  ]);
+  assert.equal(result.succeeded, 2);
+  const specs = await inventory.listProjectUnitSpecs('c1', project.id);
+  assert.equal(specs.length, 2);
+  const units = await inventory.listUnits('c1');
+  assert.equal(units.length, 0, 'importing a Project Catalog file must never fabricate a physical Unit from a range row');
+});
+
+test('re-importing the same Project Catalog file updates the existing spec in place, never duplicating it', async () => {
+  const { inventory, svc } = setupFull();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Vye' });
+  const row = { projectName: project.name, unitType: 'Apartment', bedrooms: '2', projectBuaFrom: '120', projectBuaTo: '135' };
+  await svc.importProjectUnitSpecRows('c1', [row]);
+  const result = await svc.importProjectUnitSpecRows('c1', [{ ...row, projectBuaFrom: '125', projectBuaTo: '140' }]);
+  assert.equal(result.results[0]!.status, 'updated');
+  const specs = await inventory.listProjectUnitSpecs('c1', project.id);
+  assert.equal(specs.length, 1, 'no duplicate spec was created');
+  assert.equal(specs[0]!.buaFromSqm, 125, 'the range was refreshed');
+});
+
+test('a catalog row targeting an unknown project is invalid unless autoCreateMissingProjects is set, matching the availability path\'s own behavior', async () => {
+  const { svc, inventory } = setupFull();
+  const invalidPreview = await svc.buildProjectUnitSpecPreview('c1', [{ projectName: 'Brand New Compound', unitType: 'Apartment' }]);
+  assert.equal(invalidPreview.invalidCount, 1);
+
+  const result = await svc.importProjectUnitSpecRows('c1', [{ projectName: 'Brand New Compound', unitType: 'Apartment' }], { autoCreateMissingProjects: true });
+  assert.equal(result.succeeded, 1);
+  const projects = await inventory.listProjects('c1');
+  assert.ok(projects.some((p) => p.name === 'Brand New Compound'));
+});
+
+// ---- Cross-format proof: the same canonical Unit model results from
+// differently-named columns, mapped through the one shared alias engine —
+// simulating two developers' real availability exports (e.g. a STAY'N-style
+// "Code/Type/Building/Floor/Flat/Rooms/Area/Garden/Price/Status" sheet vs a
+// CONNECT-4-style "Code/Floor/Unit Type/Price Per Meter/Final Price/Status"
+// sheet) never producing two different data shapes. ----
+
+test('two differently-worded availability header sets both resolve, through suggestMapping, onto the exact same canonical Unit after import', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Portfolio Co' });
+
+  const formatA = { Code: 'A-1', Type: 'Apartment', Area: '120', Price: '3000000', Status: 'Available' };
+  const formatB = { 'Unit No': 'B-1', 'Property Type': 'Apartment', 'Total Area': '120', 'Selling Price': '3000000', Availability: 'Available' };
+
+  for (const raw of [formatA, formatB]) {
+    const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+    const mapped: Record<string, string> = { projectName: project.name };
+    for (const [col, fieldKey] of Object.entries(mapping)) {
+      if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+    }
+    const result = await svc.importRows('c1', [mapped], async () => {});
+    assert.equal(result.succeeded, 1, `format failed to import: ${JSON.stringify(raw)}`);
+  }
+
+  const units = await inventory.listUnits('c1', project.id);
+  assert.equal(units.length, 2);
+  for (const u of units) {
+    assert.equal(u.unitType, 'Apartment');
+    assert.equal(u.areaSqm, 120);
+    assert.equal(u.listPrice, 3_000_000);
+    assert.equal(u.status, 'available');
+  }
+});
+
+test('a real "Code/FLOOR/Unit Type/In Door/Out Door/Price per Meter/Final Price" retail export (In Door is the real area, Final Price the real total, not Price/Meter) maps and imports correctly', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Shadows' });
+
+  const raw = { Code: 'B47', FLOOR: 'Basement', 'Unit Type': 'Shop', 'In Door': '73', 'Out Door': '0', 'Price / Meter': '173040', 'Final Price': '12631920', Status: 'Available' };
+  const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+  assert.equal(mapping['In Door'], 'areaSqm');
+  assert.equal(mapping['Out Door'], 'unitGardenAreaSqm');
+  assert.equal(mapping['Price / Meter'], 'pricePerMeter');
+  assert.equal(mapping['Final Price'], 'listPrice');
+
+  const mapped: Record<string, string> = { projectName: project.name };
+  for (const [col, fieldKey] of Object.entries(mapping)) {
+    if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+  }
+  const result = await svc.importRows('c1', [mapped], async () => {});
+  assert.equal(result.succeeded, 1);
+  const [unit] = await inventory.listUnits('c1', project.id);
+  assert.equal(unit!.areaSqm, 73);
+  assert.equal(unit!.listPrice, 12_631_920);
+});
+
+test('"total price before discount" maps to List Price, not left ambiguous against Cash Discount\'s own "discount" alias', async () => {
+  const mapping = suggestMapping(['total price before discount'], INVENTORY_IMPORT_FIELDS);
+  assert.equal(mapping['total price before discount'], 'listPrice');
+});
+
+test('importRows recovers the real unit type from Bedrooms when Type holds a bare building/zone code (a real "code/Type/Building/.../Rooms" export)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: "Stay'n" });
+
+  const rows = [
+    { code: 'A1-02', Type: 'A', Building: 'A1', Rooms: '3 BR', Area: '109', 'total price before discount': '5916928', 'availability status': 'Available' },
+    { code: 'B2-01', Type: 'B', Building: 'B2', Rooms: 'Twin Studio', Area: '62', 'total price before discount': '3342334', 'availability status': 'Available' },
+  ];
+  for (const raw of rows) {
+    const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+    assert.equal(mapping.Type, 'unitType');
+    assert.equal(mapping.Rooms, 'bedrooms');
+    const mapped: Record<string, string> = { projectName: project.name };
+    for (const [col, fieldKey] of Object.entries(mapping)) {
+      if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+    }
+    const result = await svc.importRows('c1', [mapped], async () => {});
+    assert.equal(result.succeeded, 1, `row failed: ${JSON.stringify(raw)}`);
+  }
+
+  const units = await inventory.listUnits('c1', project.id);
+  const a1 = units.find((u) => u.code === 'A1-02')!;
+  const b2 = units.find((u) => u.code === 'B2-01')!;
+  assert.equal(a1.unitType, '3 BR');
+  assert.equal(a1.bedrooms, 3);
+  assert.equal(b2.unitType, 'Twin Studio');
+  assert.equal(b2.bedrooms, undefined);
+});
+
+test('importRows recovers Unit Type from Bedrooms when the sheet has no Type column at all (the "Jiran" shape: Code/Block/Floor/Beds B/Area/.../Status)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Jiran' });
+
+  // A real sheet reported by a user: no "Type"/"Unit Type" column exists at
+  // all — the only type-like signal is "Beds B", holding codes like "3B".
+  const raw = { Code: 'A1-02', Block: 'A1', Floor: 'Ground', 'Beds B': '3B', Area: '139', 'Total Price': '5716752', Status: 'Available' };
+  const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+  assert.equal(mapping.Type ?? null, null, 'no Type column exists in this fixture');
+  assert.equal(mapping['Beds B'], 'bedrooms');
+  const mapped: Record<string, string> = { projectName: project.name };
+  for (const [col, fieldKey] of Object.entries(mapping)) {
+    if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+  }
+
+  const result = await svc.importRows('c1', [mapped], async () => {});
+  assert.equal(result.succeeded, 1, `row failed: ${JSON.stringify(result.results)}`);
+  const [unit] = await inventory.listUnits('c1', project.id);
+  assert.equal(unit!.unitType, '3B');
+  assert.equal(unit!.bedrooms, 3);
+});
+
+test('importRows leaves an ordinary numeric Bedrooms value and a real descriptive Unit Type alone (the swap heuristic never fires on a normal file)', async () => {
+  const { inventory, svc } = setup();
+  const project = await inventory.createProject({ companyId: 'c1', name: 'Portfolio Co' });
+
+  const raw = { Code: 'A-1', 'Unit Type': 'Apartment', Bedrooms: '2', Area: '120', Price: '3000000', Status: 'Available' };
+  const mapping = suggestMapping(Object.keys(raw), AVAILABILITY_IMPORT_FIELDS);
+  const mapped: Record<string, string> = { projectName: project.name };
+  for (const [col, fieldKey] of Object.entries(mapping)) {
+    if (fieldKey) mapped[fieldKey] = (raw as Record<string, string>)[col]!;
+  }
+  const result = await svc.importRows('c1', [mapped], async () => {});
+  assert.equal(result.succeeded, 1);
+  const [unit] = await inventory.listUnits('c1', project.id);
+  assert.equal(unit!.unitType, 'Apartment');
+  assert.equal(unit!.bedrooms, 2);
+});
+
+test('CATALOG_IMPORT_FIELDS and AVAILABILITY_IMPORT_FIELDS are both non-empty subsets of the one shared INVENTORY_IMPORT_FIELDS dictionary (one mapping engine, not two)', () => {
+  const allKeys = new Set(INVENTORY_IMPORT_FIELDS.map((f) => f.key));
+  assert.ok(CATALOG_IMPORT_FIELDS.length > 0);
+  assert.ok(AVAILABILITY_IMPORT_FIELDS.length > 0);
+  for (const f of [...CATALOG_IMPORT_FIELDS, ...AVAILABILITY_IMPORT_FIELDS]) {
+    assert.ok(allKeys.has(f.key), `${f.key} should come from the one shared dictionary`);
   }
 });

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { buildApplication } from './app.js';
 import { openDatabase } from './infra/sqlite-repository.js';
+import { runBackup } from './infra/backup.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -13,11 +14,30 @@ async function main(): Promise<void> {
   const secretStoreKey = process.env.SECRET_STORE_KEY ?? tokenSecret;
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const trustProxy = process.env.TRUST_PROXY === 'true';
+  // The demo company (ceo@demo.local etc.) ships with a hardcoded,
+  // publicly-documented password (see infra/seed.ts) — fine for local/dev,
+  // but an operator running a public production instance may want it gone.
+  // Defaults to on (unchanged behavior) so this is opt-out, not opt-in.
+  const seedDemo = process.env.SEED_DEMO_DATA !== 'false';
+  // The two, and only two, platform-owner identities — see
+  // modules/permissions/platform-owner.ts. Required in production
+  // (assertProductionSafety refuses to boot without them); optional in
+  // dev/test so the existing demo-only workflow keeps working unchanged.
+  const ownerEmail1 = process.env.OWNER_EMAIL_1;
+  const ownerEmail2 = process.env.OWNER_EMAIL_2;
+  const ownerPassword1 = process.env.OWNER_PASSWORD_1;
+  const ownerPassword2 = process.env.OWNER_PASSWORD_2;
 
   const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = openDatabase(dbPath);
   process.stdout.write(`persistent storage: ${dbPath}\n`);
+
+  // Uploaded project media (cover image, master plan, gallery, brochure)
+  // lives alongside the SQLite file on the same persistent volume — zero
+  // additional Railway configuration needed.
+  const fileStorageDir = join(dirname(dbPath), 'uploads');
+  mkdirSync(fileStorageDir, { recursive: true });
 
   const { httpServer, services } = await buildApplication({
     nodeEnv,
@@ -26,6 +46,12 @@ async function main(): Promise<void> {
     allowedOrigins,
     staticDir: join(__dirname, '..', 'public'),
     db,
+    seed: seedDemo,
+    fileStorageDir,
+    ownerEmail1,
+    ownerEmail2,
+    ownerPassword1,
+    ownerPassword2,
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS ? Number(process.env.RATE_LIMIT_WINDOW_MS) : undefined,
     rateLimitMax: process.env.RATE_LIMIT_MAX ? Number(process.env.RATE_LIMIT_MAX) : undefined,
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
@@ -93,6 +119,27 @@ async function main(): Promise<void> {
   }, 60_000);
   memorySweepInterval.unref();
 
+  // Prunes RevokedToken rows past their own expiresAt — pure storage
+  // hygiene (an expired token could never be replayed anyway), so a slower
+  // cadence than the correctness-sensitive ticks above is fine.
+  const revokedTokenSweepInterval = setInterval(() => {
+    void services.sweepExpiredRevokedTokens();
+  }, 10 * 60_000);
+  revokedTokenSweepInterval.unref();
+
+  // Same-volume SQLite backup (node:sqlite's online backup API — safe under
+  // WAL, not a raw file copy) on boot and every 24h after. Protects against
+  // corruption or a bad write, not against losing the volume itself; see
+  // infra/backup.ts for what this does and doesn't cover.
+  const doBackup = () => {
+    void runBackup({ dbPath, db })
+      .then((path) => process.stdout.write(`backup created: ${path}\n`))
+      .catch((err) => process.stderr.write(`backup failed: ${err instanceof Error ? err.message : String(err)}\n`));
+  };
+  doBackup();
+  const backupInterval = setInterval(doBackup, 24 * 60 * 60 * 1000);
+  backupInterval.unref();
+
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
@@ -104,6 +151,8 @@ async function main(): Promise<void> {
     clearInterval(aiWorkflowSweepInterval);
     clearInterval(reservationSweepInterval);
     clearInterval(memorySweepInterval);
+    clearInterval(revokedTokenSweepInterval);
+    clearInterval(backupInterval);
     const forceExit = setTimeout(() => {
       process.stdout.write('graceful shutdown timed out after 10s, forcing exit\n');
       process.exit(1);

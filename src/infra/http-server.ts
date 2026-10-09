@@ -151,7 +151,22 @@ export class HttpServer {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      // img-src allows https: (not just 'self'/data:) because several
+      // fields (Developer.logoUrl, Project.imageUrls/coverImageUrl/
+      // masterPlanImageUrl, Unit.floorPlanImageUrl) are documented as
+      // "paste an already-hosted URL" — this system has no object-storage
+      // upload pipeline, so those images live on whatever external host
+      // the developer already uses. img-src can't execute script, so this
+      // stays a narrow, image-only relaxation. style-src/font-src name the
+      // two Google Fonts hosts specifically (not a broad https:) for the
+      // Inter webfont <link> in index.html — same narrow-allowlist pattern.
+      // blob: is also allowed for img-src only — real uploaded Project
+      // media (see infra/file-storage.ts) is served back as base64 JSON,
+      // never raw bytes, so the frontend decodes it into a same-origin
+      // Blob and renders that via a blob: object URL; blob: cannot be used
+      // to load a remote image, so this doesn't reopen the restriction
+      // img-src https: already represents.
+      "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:",
     );
     if (this.options.nodeEnv === 'production') {
       res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
@@ -192,6 +207,11 @@ export class HttpServer {
       const contents = await readFile(filePath);
       const contentType = CONTENT_TYPES[extname(filePath)] ?? 'application/octet-stream';
       res.setHeader('Content-Type', contentType);
+      // Asset filenames carry no content hash/version, so a "cached" response
+      // here is indistinguishable from a stale one after a deploy — always
+      // revalidate rather than let a browser (mobile Safari especially) keep
+      // serving yesterday's JS/CSS indefinitely.
+      res.setHeader('Cache-Control', 'no-cache');
       res.writeHead(200);
       res.end(contents);
       return true;

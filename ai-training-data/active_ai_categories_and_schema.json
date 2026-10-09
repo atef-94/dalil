@@ -1,0 +1,70 @@
+{
+  "_meta": {
+    "description": "Category distribution plan and the exact per-entry JSON/JSONL schema used across active_ai_language_dataset.jsonl and active_ai_evaluation_set.jsonl. This file is a design artifact (not itself a training-data deliverable) produced as part of Phase 1 taxonomy design; the 7 required deliverables are produced in later tasks and will conform exactly to `entry_schema` below.",
+    "target_size": "20000+ (no artificial cap; expand further if category coverage gaps remain, per the user's explicit instruction)"
+  },
+  "category_distribution": {
+    "note": "Approximate share of the >=20,000 core dataset (active_ai_language_dataset.jsonl). Percentages are targets for generation balance, not a claim about real-world message frequency.",
+    "categories": [
+      { "category": "single_word_vocabulary", "share_pct": 4, "description": "Isolated real-estate/CRM terms across MSA/Egyptian/Franco/English (e.g. 'مقدم', 'down payment', 'تشطيب', 'view', 'مساحة')." },
+      { "category": "short_expressions", "share_pct": 8, "description": "2-5 word phrases: 'فيه فيو بحر؟', 'available units', 'كام قسط؟'." },
+      { "category": "natural_sentences_informational", "share_pct": 10, "description": "Full sentences asking about price/availability/location/payment/delivery, no action requested." },
+      { "category": "natural_sentences_search_filter", "share_pct": 8, "description": "'عايز شقة في التجمع تحت 3 مليون' style search/filter requests, mapped to search_units/search_projects intents." },
+      { "category": "financial_payment_language", "share_pct": 8, "description": "Down payment, installment plans, cash discount, maintenance fee, currency questions and statements." },
+      { "category": "sales_negotiation_language", "share_pct": 6, "description": "Bargaining, asking for discount, comparing offers, urgency-creation, closing language." },
+      { "category": "customer_objections", "share_pct": 7, "description": "Price/location/timing/trust/competitor objections and hesitation language, spanning the enumerated objection intents." },
+      { "category": "active_ai_action_language", "share_pct": 9, "description": "Natural-language commands mapped to the 22 real system_action intents grounded in TOOL_REGISTRY, each fully annotated (intent/entities/params/risk/approval/confirmation)." },
+      { "category": "franco_arabic_variants", "share_pct": 5, "description": "Franco-Arabic/Arabizi renderings of entries from other categories (spelling-variant expansion of the same underlying utterances, not novel content)." },
+      { "category": "mixed_arabic_english", "share_pct": 5, "description": "Code-switched sentences typical of Egyptian real-estate sales chat." },
+      { "category": "whatsapp_short_messages", "share_pct": 5, "description": "Ultra-short, typo-prone, abbreviation-heavy real chat style ('متاح ؟', 'كام سعره', 'ok tmam')." },
+      { "category": "typing_errors_and_keyboard_switch", "share_pct": 4, "description": "Same-intent entries with realistic Arabic/English keyboard-switch typos and common misspellings layered on top." },
+      { "category": "multi_turn_conversations", "share_pct": 5, "description": "2-6 turn dialogues carrying context across turns (hand-authored, task #261)." },
+      { "category": "ambiguity_and_clarification", "share_pct": 4, "description": "Underspecified requests that should trigger a clarifying question rather than an assumed action/entity (hand-authored, task #261)." },
+      { "category": "investment_language", "share_pct": 4, "description": "ROI, rental yield, resale value, investor-focused questions." },
+      { "category": "broker_language", "share_pct": 3, "description": "B2B broker/agent commission, co-broke, deal-registration phrasing." },
+      { "category": "crm_internal_language", "share_pct": 3, "description": "Internal team language: stage moves, follow-up scheduling, lead assignment discussed in natural language (distinct from the direct action-language category, this is descriptive/reporting phrasing)." },
+      { "category": "synonyms_and_equivalent_expressions", "share_pct": 1, "description": "Explicit synonym-cluster entries (same intent/entities, deliberately varied phrasing) used for paraphrase robustness." },
+      { "category": "polysemous_contextual_words", "share_pct": 1, "description": "Entries built around words whose meaning depends on context (حجز، استلام، السعر) with the disambiguating context included." }
+    ],
+    "sum_check": "Percentages sum to 100."
+  },
+  "evaluation_set": {
+    "size": "1000+ entries, held out, not sampled from the same generation batches as the core dataset",
+    "composition_note": "Skews toward adversarial/ambiguous/edge-case content relative to the core dataset's distribution, per spec Section 26.",
+    "required_slices": [
+      "adversarial phrasing designed to look actionable but should NOT trigger an action (e.g. hypothetical/past-tense/third-party framing)",
+      "ambiguous entity references requiring clarification",
+      "heavy Franco-Arabic with non-standard spelling",
+      "mixed-language sentences with embedded numbers/currency ambiguity",
+      "multi-turn context where the action-relevant entity was stated 2+ turns earlier",
+      "objections phrased as questions rather than statements",
+      "financially-significant action requests that must require confirmation/approval"
+    ]
+  },
+  "entry_schema": {
+    "description": "Exact field set for every record in active_ai_language_dataset.jsonl and active_ai_evaluation_set.jsonl. active_ai_language_dataset.csv is a flattened export of the same fields (entities/context serialized as JSON strings in CSV cells).",
+    "fields": {
+      "id": { "type": "string", "required": true, "description": "Stable unique id, e.g. 'act-000123'." },
+      "text": { "type": "string", "required": true, "description": "The raw utterance/message exactly as a user would type or say it." },
+      "language": {
+        "type": "string", "required": true, "enum": ["msa", "egyptian_arabic", "franco", "mixed_ar_en", "whatsapp_short"],
+        "description": "Primary linguistic register of `text`."
+      },
+      "normalized_text": { "type": "string", "required": true, "description": "Canonicalized Arabic-script rendering of `text` (Franco/mixed converted to Arabic script) used as a normalization training signal." },
+      "franco_variant": { "type": ["string", "null"], "required": true, "description": "If `text` itself is Franco-Arabic, this is null (text IS the variant); if `text` is Arabic/MSA and this record is paired with a Franco rendering elsewhere in the dataset, this holds that paired variant's id. Null when not applicable." },
+      "english_mix": { "type": ["string", "null"], "required": true, "description": "The English-language substring(s) embedded in a mixed_ar_en entry, else null." },
+      "intent": { "type": "string", "required": true, "description": "One `intent` key from active_ai_intents.json." },
+      "entities": { "type": "object", "required": true, "description": "Map of entity-type (from active_ai_entities.json `entity` keys) to extracted value(s). Empty object {} when none apply — never omitted." },
+      "category": { "type": "string", "required": true, "description": "One `category` key from category_distribution.categories above." },
+      "context": { "type": ["array", "null"], "required": true, "description": "For multi_turn_conversations: an array of prior {speaker, text} turns preceding this entry. Null for single-turn entries." },
+      "confidence": { "type": "string", "required": true, "enum": ["verified_common_usage", "reasonable_linguistic_variation", "generated_synthetic"], "description": "Honesty/provenance tag per spec Section 25 — never claims verified real-world usage unless it genuinely reflects an attested, commonly-seen pattern." },
+      "actionable": { "type": "boolean", "required": true, "description": "True only if `intent` is a system_action intent AND this specific utterance should trigger it (not merely mentions the topic)." },
+      "action": { "type": ["string", "null"], "required": true, "description": "Real actionType token from active_ai_intents.json when actionable=true, else null. Never fabricated — must exist in TOOL_REGISTRY." },
+      "permission_required": { "type": ["string", "null"], "required": true, "description": "requiredPermission action:resource string when actionable=true, else null." },
+      "risk_level": { "type": ["string", "null"], "required": true, "enum": ["low", "medium", "high", null], "description": "Copied from the matched intent's risk_level when actionable, else null." },
+      "requires_approval": { "type": "boolean", "required": true, "description": "False for non-actionable entries." },
+      "requires_confirmation": { "type": "boolean", "required": true, "description": "False for non-actionable entries." },
+      "read_only": { "type": ["boolean", "null"], "required": true, "description": "Copied from the matched intent when actionable, else null." }
+    }
+  }
+}

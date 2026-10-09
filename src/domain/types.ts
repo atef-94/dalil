@@ -7,6 +7,58 @@ export interface Company {
   companyId: string; // self-referencing: companyId === id
   name: string;
   createdAt: string;
+  /** Platform-owner-controlled (see platform-admin.service.ts). Absent or
+   * 'active' means normal operation; 'suspended' blocks every login for
+   * every user in this company (checked in auth.service.ts) without
+   * deleting any data. */
+  status?: 'active' | 'suspended';
+}
+
+/** A pending, single-use invitation to join an existing company with a
+ * specific role — the only way (besides platform-owner-initiated tenant
+ * creation) a new account can be created, now that public self-service
+ * signup is gone. `tokenHash` is a deterministic SHA-256 of the raw token
+ * (see infra/security.ts's hashToken) — not scrypt, since the raw token is
+ * already high-entropy random bytes, not a human password, and the accept
+ * flow needs to look the row up BY the token, which a salted KDF can't do
+ * without scanning + verifying every pending invitation. */
+export interface Invitation {
+  id: string;
+  companyId: string;
+  email: string;
+  roleId: string;
+  tokenHash: string;
+  expiresAt: string;
+  createdByUserId: string;
+  createdAt: string;
+  acceptedAt?: string;
+  revokedAt?: string;
+}
+
+/** One revoked bearer token, keyed by its jti (see security.ts signToken).
+ * Rows are pruned by expiresAt, since a token past its own 12h TTL can never
+ * be replayed anyway regardless of this table — see app.ts's periodic sweep.
+ * Lets real POST /api/auth/logout kill the one specific token that called
+ * it, as opposed to User.sessionsRevokedBefore, which kills every token for
+ * a user at once (see that field's own doc comment). */
+export interface RevokedToken {
+  id: string;
+  jti: string;
+  expiresAt: string;
+}
+
+/** A password-reset link, same single-use/expiring/hashed-token shape as
+ * Invitation — see that type's doc comment for why tokenHash is SHA-256,
+ * not scrypt. Requesting a reset never reveals whether the email exists
+ * (see auth.service.ts requestPasswordReset); this row is simply never
+ * created for an unknown email. */
+export interface PasswordResetToken {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  createdAt: string;
+  usedAt?: string;
 }
 
 export interface Branch {
@@ -68,6 +120,21 @@ export interface User {
   failedLoginCount: number;
   lockedUntil?: string;
   createdAt: string;
+  /** TOTP MFA. totpSecretEncrypted is set as soon as enrollment starts (AES-
+   * 256-GCM, infra/security.ts encryptSecret) but totpEnabled only flips to
+   * true once the user proves they can generate a real code with it — see
+   * auth.service.ts enrollTotp/confirmTotpEnrollment. recoveryCodesHashed are
+   * one-time, scrypt-hashed (same one-way pattern as passwordHash); each is
+   * removed from the array the moment it's used. */
+  totpSecretEncrypted?: { encryptedValue: string; iv: string; authTag: string };
+  totpEnabled: boolean;
+  recoveryCodesHashed?: string[];
+  /** Forces every outstanding token for this user to be treated as revoked
+   * (checked against the token's iat) regardless of its own TTL — a single-
+   * field way to kill every session at once (password change, suspected
+   * compromise, migration cleanup) without enumerating jtis. See
+   * app.ts resolveActor. */
+  sessionsRevokedBefore?: string;
 }
 
 export type ResourceName =
@@ -176,6 +243,33 @@ export interface PaymentPlanFeeLine {
   dueMonthOffset: number;
 }
 
+/** A user-picked, one-off payment with its own exact due date — independent
+ * of the recurring-installment cadence entirely (a scheduled payment can
+ * fall between two installments, before the first one, or share a date with
+ * another scheduled payment; schedule-generator.ts sorts the final unified
+ * schedule chronologically rather than relying on insertion order). Only
+ * used when `PaymentPlanTemplate.paymentMethod === 'installments_plus_scheduled'`. */
+export interface PaymentPlanScheduledPayment {
+  id: string;
+  amount: number;
+  dueDate: string;
+  label?: string;
+}
+
+/** Two ways of distributing the same payable amount inside the same
+ * Payment Plan entity — deliberately not two separate template "types":
+ * 'equal_installments' is today's original behavior (recurring installments
+ * sized to exactly sum the remaining amount, optionally escalation-
+ * weighted); 'installments_plus_scheduled' keeps a recurring installment
+ * (either the same auto-calculated amount, or a manually fixed
+ * `recurringInstallmentAmount`) and lets the user add arbitrary one-off
+ * `scheduledPayments` with independent exact dates on top.
+ * Named `PaymentPlanMethod` (not `PaymentMethod`) to avoid colliding with
+ * the existing `PaymentMethod` type in the Finance section below (cash/
+ * transfer/card/cheque — how a real Payment was actually settled, an
+ * unrelated concept). */
+export type PaymentPlanMethod = 'equal_installments' | 'installments_plus_scheduled';
+
 export interface PaymentPlanTemplate {
   id: string;
   companyId: string;
@@ -188,16 +282,52 @@ export interface PaymentPlanTemplate {
   customMonthInterval?: number;
   termMonths: number;
   fees: PaymentPlanFeeLine[];
-  /** Interest/payment-free period before the first installment is due —
-   * distinct from termMonths (the installment schedule's own length). */
+  /** Optional so every existing PaymentPlanTemplate (and every existing
+   * object literal across the codebase's services/tests that constructs
+   * one) keeps compiling and behaving unchanged: undefined is always
+   * treated as 'equal_installments' at read time (schedule-generator.ts,
+   * payment-plans.service.ts) — the same default a real migration would
+   * backfill, applied at the point of use instead of requiring a write to
+   * every persisted row. */
+  paymentMethod?: PaymentPlanMethod;
+  /** Only meaningful when paymentMethod === 'installments_plus_scheduled'.
+   * When set, every recurring installment uses this exact amount instead of
+   * the auto-calculated equal share (the spec's example: a normal
+   * auto-calculated installment might be 100,000/quarter, but the user
+   * wants 50,000/quarter with the rest paid via scheduledPayments). When
+   * unset in this mode, the recurring installment falls back to the same
+   * auto-calculated amount 'equal_installments' would use. */
+  recurringInstallmentAmount?: number;
+  /** Only meaningful when paymentMethod === 'installments_plus_scheduled'. */
+  scheduledPayments?: PaymentPlanScheduledPayment[];
+  /** True for a template created inline from a single Quotation's own
+   * one-off payment terms (QuotationService.generate() with `inlineTerms`)
+   * rather than authored as a reusable company/project template. Still the
+   * same PaymentPlanTemplate entity — never a parallel type — just excluded
+   * from the reusable-template picker/list so ad-hoc, single-use terms
+   * don't clutter it. A sales user creating a Quotation with inline terms
+   * never needs `create:payment_plan_template` RBAC for this: it's gated
+   * on `create:quotation` instead, since the ad-hoc template is never
+   * independently reusable or listed. */
+  adHoc?: boolean;
+  /** DEAD FIELD, audited and confirmed unreachable (Section 7): neither
+   * CreateTemplateInput nor UpdateTemplateInput (Partial<CreateTemplateInput>)
+   * expose this, no route accepts it, and schedule-generator.ts never reads
+   * it — a template can never actually carry a value here despite the
+   * optional type allowing one. Was presumably real before the payment-plan
+   * redesign (see the 'PPR' commits) rewrote schedule-generator.ts around
+   * the current two payment methods; the grace-period concept was dropped
+   * there without removing this field. Left in place (not deleted) pending
+   * a product decision on whether to properly wire a real grace-period rule
+   * into schedule-generator.ts or remove this field outright. */
   gracePeriodMonths?: number;
-  /** % of total price due at handover, on top of the regular installment
-   * schedule — schedule-generator.ts adds this as its own schedule line
-   * when set. */
+  /** DEAD FIELD — see gracePeriodMonths's comment; same audit finding, same
+   * unreachable status (not in CreateTemplateInput/UpdateTemplateInput, not
+   * read by schedule-generator.ts despite this field's name suggesting a
+   * handover-time schedule line). */
   deliveryPaymentPercent?: number;
-  /** How many months of installments continue after delivery (a "payment
-   * after delivery" plan) — 0/undefined means the plan fully settles
-   * before or at delivery. */
+  /** DEAD FIELD — see gracePeriodMonths's comment; same audit finding, same
+   * unreachable status. */
   paymentAfterDeliveryMonths?: number;
   /** The cash-discount percentage that applied when this template version
    * was created — a snapshot, not a live value: updateTemplate() bumps
@@ -212,6 +342,15 @@ export interface PaymentPlanTemplate {
 
 export type PaymentScheduleLineStatus = 'upcoming' | 'due' | 'overdue' | 'paid';
 
+/** What kind of line this is, for the unified schedule table's "Payment
+ * Type" column — distinct from `label`, which is free display text.
+ * Optional/undefined on lines generated before this field existed (older
+ * persisted PaymentScheduleLine rows and old Quotation.scheduleSnapshot
+ * entries): renderers fall back to inferring from `label` in that case,
+ * exactly as they did before this field existed, so nothing already
+ * generated needs a migration. */
+export type PaymentScheduleLineKind = 'down_payment' | 'installment' | 'scheduled_payment' | 'fee';
+
 export interface PaymentScheduleLine {
   id: string;
   companyId: string;
@@ -220,6 +359,7 @@ export interface PaymentScheduleLine {
   sourceTemplateVersion: number;
   sequence: number;
   label: string;
+  kind?: PaymentScheduleLineKind;
   dueDate: string;
   amount: number;
   amountPaid: number;
@@ -236,6 +376,38 @@ export interface PaymentScheduleLine {
 
 export type QuotationStatus = 'draft' | 'generated' | 'sent' | 'accepted' | 'expired' | 'cancelled';
 
+/** A deep, point-in-time copy of the unit's financial/physical attributes
+ * at the moment a Quotation was generated — closes a gap the original
+ * "deep snapshot" design left open: `scheduleSnapshot` already freezes the
+ * payment numbers, but the unit's own attributes (area, finishing, view,
+ * price/meter, maintenance, parking) were always re-read live from the
+ * `Unit` row, so a re-downloaded PDF for an old quotation could silently
+ * show today's unit data instead of what existed at generation time. Also
+ * the only representation used when the quotation has no real `unitId` at
+ * all (a manually-entered unit, never in Inventory — section 2B of the
+ * spec this was built for): in that case this snapshot IS the unit, there
+ * is nothing else to fall back to. */
+export interface QuotationUnitSnapshot {
+  code: string;
+  unitType: string;
+  areaSqm: number;
+  buildingLabel?: string;
+  floorLabel?: string;
+  bedrooms?: number;
+  view?: string[];
+  gardenAreaSqm?: number;
+  finishingType?: string;
+  /** listPrice/areaSqm at snapshot time, or the manually-entered total
+   * unit price divided by area — never recomputed later. */
+  pricePerMeter: number;
+  totalUnitPrice: number;
+  maintenanceFeePercent?: number;
+  maintenanceFeeAmount?: number;
+  parkingIncluded?: boolean;
+  parkingSpaces?: number;
+  parkingPrice?: number;
+}
+
 export interface Quotation {
   id: string;
   companyId: string;
@@ -246,9 +418,22 @@ export interface Quotation {
    * quotation for the same unit/client is always a new version, never an
    * overwrite of a prior one. */
   version: number;
-  unitId: string;
-  projectId: string;
+  /** Absent when this quotation was built from a manually-entered unit
+   * (section 2B: "Payment Plan not connected to an existing Inventory
+   * Unit") rather than a real Inventory `Unit` — `unitSnapshot` is then the
+   * only source of unit data, and always present in that case. */
+  unitId?: string;
+  /** Optional for the same reason as unitId: a manually-entered unit may
+   * still be associated with a known Project (the user picks one) or may
+   * have none at all — never fabricated. */
+  projectId?: string;
   leadId?: string;
+  /** A deep, point-in-time copy of the unit's attributes — see
+   * QuotationUnitSnapshot's own comment. Always populated for a quotation
+   * generated after this field existed; absent on older persisted
+   * quotations (renderers fall back to a live Unit fetch in that case,
+   * same as before this field existed). */
+  unitSnapshot?: QuotationUnitSnapshot;
   paymentPlanTemplateId: string;
   /** The template's own `version` at the moment this quotation/offer was
    * generated — captured alongside scheduleSnapshot below purely for
@@ -274,10 +459,23 @@ export interface Quotation {
   scheduleSnapshot: Array<{
     sequence: number;
     label: string;
+    kind?: PaymentScheduleLineKind;
     dueDate: string;
     amount: number;
     status: PaymentScheduleLineStatus;
   }>;
+  /** The financial reconciliation computed alongside scheduleSnapshot at
+   * generate() time (see schedule-generator.ts's `validateSchedule`) —
+   * frozen the same way scheduleSnapshot is, never recomputed on read.
+   * Absent on quotations generated before this field existed; equal-
+   * installments plans always reconcile exactly by construction, so this
+   * is primarily meaningful for installments_plus_scheduled plans. */
+  validation?: {
+    totalPayable: number;
+    remainingBalance: number;
+    isValid: boolean;
+    overpayment: number;
+  };
   createdByUserId: string;
   createdAt: string;
   updatedAt: string;
@@ -438,6 +636,44 @@ export interface Project {
   /** The project's master-plan image URL — a Unit highlights itself on
    * this image via its own masterPlanPosition. */
   masterPlanImageUrl?: string;
+  /** The single image shown on a project card in the catalog browser —
+   * same "paste a URL" convention as imageUrls; falls back to
+   * imageUrls[0] at the presentation layer when unset, never required. */
+  coverImageUrl?: string;
+  /** The project's sales brochure — a URL pointing at a real uploaded file
+   * (see FileAsset/FileStorageService), not an externally-hosted link like
+   * the fields above; this is the one media field with a real upload path
+   * in this app. */
+  brochureUrl?: string;
+  createdAt: string;
+}
+
+/** A real uploaded file (project media: cover image, master plan, gallery
+ * image, brochure) — the one place in this app where a "file" field is
+ * backed by actual stored bytes rather than a pasted external URL. Scoped
+ * to a company the same way every other entity is; `storagePath` is
+ * relative to the server's configured upload directory, never an absolute
+ * path, so the storage root can move without invalidating existing rows. */
+export interface FileAsset {
+  id: string;
+  companyId: string;
+  originalName: string;
+  contentType: string;
+  sizeBytes: number;
+  storagePath: string;
+  uploadedByUserId: string;
+  createdAt: string;
+}
+
+/** A staff user's personal bookmark on a Project — purely a UI convenience
+ * (quick access from the catalog browser's "favorites" filter), scoped to
+ * the user who set it, not a shared/team concept. Gated on the same
+ * view:project permission as browsing itself; no dedicated RBAC resource. */
+export interface ProjectFavorite {
+  id: string;
+  companyId: string;
+  userId: string;
+  projectId: string;
   createdAt: string;
 }
 
@@ -467,6 +703,10 @@ export interface Unit {
   areaSqm: number;
   listPrice: number;
   status: UnitStatus;
+  /** The raw status text a source file last used (e.g. "Available", "HOLD",
+   * "Booked") before normalization to `status` — kept for audit only; never
+   * read by business logic, which always uses the normalized `status`. */
+  sourceStatus?: string;
   floorLabel?: string;
   bedrooms?: number;
   /** Layout/model type (e.g. "Type A", "Garden", "Corner") — configurable
@@ -475,11 +715,30 @@ export interface Unit {
   /** Multiple views are allowed (e.g. ["Garden", "Pool"]). */
   view?: string[];
   gardenAreaSqm?: number;
+  /** Plot/land area for villa-style units — distinct from areaSqm (the
+   * built-up/BUA area) and gardenAreaSqm (uncovered garden only). */
+  landAreaSqm?: number;
   buildingLabel?: string;
   /** Overrides Project.finishingType when this specific unit differs. */
   finishingType?: string;
   /** Overrides Project.delivery when this specific unit differs. */
   delivery?: DeliveryInfo;
+  /** Overrides Project.maintenanceFeePercent when this specific unit
+   * differs — same override convention as finishingType/delivery above.
+   * Maintenance itself stays company/project-level policy by default;
+   * this only exists for the (real, business-legitimate) case where one
+   * unit's maintenance differs from its project's norm. */
+  maintenanceFeePercentOverride?: number;
+  /** Parking was not previously modeled anywhere in the domain (not on
+   * Project, Unit, or ProjectUnitSpec) — added here at the Unit level,
+   * matching the granularity every other per-unit charge (price,
+   * maintenance) already carries. `parkingIncluded` distinguishes "this
+   * unit's price already covers parking" from "not included" so a Payment
+   * Plan can correctly decide whether `parkingPrice` is an additional
+   * charge on top of listPrice or purely informational. */
+  parkingIncluded?: boolean;
+  parkingSpaces?: number;
+  parkingPrice?: number;
   /** An explicit, developer-supplied price-per-meter — otherwise this is
    * computed on read as listPrice/areaSqm, never stored (and so never
    * goes stale relative to listPrice/areaSqm edits). */
@@ -490,7 +749,58 @@ export interface Unit {
   floorPlanImageUrl?: string;
   /** Where this unit highlights on its project's masterPlanImageUrl. */
   masterPlanPosition?: MasterPlanPosition;
+  /** Import provenance — which import created/last updated this unit, and
+   * where in the source file. Optional: manually-created units have none. */
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
   createdAt: string;
+}
+
+/**
+ * A "Unit Specification / Product Range" — what a project catalog/market
+ * sheet describes (e.g. "Apartment, 2 Bedrooms, BUA 120-135, Price 8M-10M")
+ * as opposed to a real, individually-coded `Unit`. Deliberately its own
+ * entity rather than a Unit with fuzzy/range fields: a catalog row has no
+ * stable physical identity (no unit code, no single floor/building), so
+ * importing one must never fabricate a fake Unit row. Scoped one level
+ * finer than Project's own single land/BUA/garden/price range (which can
+ * only hold one range project-wide) — a project commonly markets several
+ * distinct unit-type/bedroom combinations, each with its own range, at the
+ * same time. Gated on the existing 'project' RBAC resource, matching every
+ * other project-master-data entity in this file (see the module comment
+ * above Developer). */
+export interface ProjectUnitSpec {
+  id: string;
+  companyId: string;
+  projectId: string;
+  phaseId?: string;
+  /** Free string, matching Unit.unitType's convention — never a hard enum. */
+  unitType: string;
+  bedrooms?: number;
+  landAreaFromSqm?: number;
+  landAreaToSqm?: number;
+  buaFromSqm?: number;
+  buaToSqm?: number;
+  gardenAreaFromSqm?: number;
+  gardenAreaToSqm?: number;
+  priceFrom?: number;
+  priceTo?: number;
+  pricePerMeter?: number;
+  /** Overrides Project.finishingType for this specific spec, same override
+   * convention as Unit.finishingType. */
+  finishingType?: string;
+  delivery?: DeliveryInfo;
+  paymentPlanTemplateIds?: string[];
+  cashDiscountPercent?: number;
+  maintenanceFeePercent?: number;
+  /** Import provenance — which import produced/last touched this spec, and
+   * where in the source file. Optional: manually-created specs have none. */
+  sourceImportId?: string;
+  sourceSheet?: string;
+  sourceRow?: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface UnitHold {
@@ -563,16 +873,43 @@ export interface CrmStage {
   updatedAt: string;
 }
 
+/** Fixed acquisition-channel list for the Lead form's "Source" dropdown —
+ * distinct from sourceId (a link to a real Marketing Campaign, a separate,
+ * richer attribution concept used by the funnel/campaign-performance
+ * views). This is the simple "where did this lead come from" tag a sales
+ * rep picks at a glance. */
+export type LeadSourceChannel = 'facebook' | 'google' | 'referral' | 'whatsapp' | 'instagram' | 'tiktok' | 'other';
+
+/** What the lead is interested in. No fixed catalog is forced for
+ * product/service (none exists in this real-estate-focused domain) — see
+ * interestedInLabel, following the same free-text-where-no-catalog-exists
+ * convention as propertyTypeWanted below. */
+export type LeadInterestType = 'project' | 'unit' | 'product' | 'service' | 'other';
+
 export interface Lead {
   id: string;
   companyId: string;
   fullName: string;
   phone: string;
+  /** @deprecated no longer captured by the Lead form (removed per the
+   * simplified-form redesign) — left in place so historical rows with an
+   * email keep it. Still used for portal-access email defaults. */
   email?: string;
-  /** National ID / civil ID — the strongest identity signal for duplicate
-   * detection, since a phone or email can be swapped out but this can't. */
+  /** National ID / civil ID.
+   * @deprecated no longer captured by the Lead form or used for duplicate
+   * detection (phone is now the sole dedup signal) — left in place so
+   * historical/imported rows keep their value. */
   nationalId?: string;
   sourceId?: string;
+  /** The simple acquisition channel picked on the Lead form — see
+   * LeadSourceChannel. */
+  source?: LeadSourceChannel;
+  interestedInType?: LeadInterestType;
+  /** Free-text detail for interestedInType — a project name, unit code,
+   * or a description of the product/service/other interest. */
+  interestedInLabel?: string;
+  budgetMin?: number;
+  budgetMax?: number;
   /** The lead's real classification — see CrmStage. Always set (defaults
    * to the company's isDefault stage on creation). */
   stageId: string;
@@ -834,6 +1171,11 @@ export interface AuditLogEntry {
   resourceId: string;
   metadata?: Record<string, unknown>;
   createdAt: string;
+  /** Who actually initiated this: a human user (the default, and the only
+   * value every pre-existing entry implicitly has) or the AI Agent acting
+   * autonomously via AutomationService.executeActionDirect(). Optional so
+   * every audit call site written before this existed stays valid. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- HR ----
@@ -959,6 +1301,10 @@ export interface Message {
   status: MessageStatus;
   createdAt: string;
   readAt?: string;
+  /** Set when this message/comment/log was created by the AI Agent
+   * executing a chosen action rather than a human typing it in — see
+   * AuditLogEntry.actorType for the same distinction on audit rows. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- Customer Portal ----
@@ -990,6 +1336,12 @@ export interface Task {
   createdByUserId: string;
   createdAt: string;
   completedAt?: string;
+  /** Who actually completed/cancelled it — distinct from createdByUserId,
+   * since a follow-up is very often completed by someone other than
+   * whoever scheduled it. Set alongside completedAt. */
+  completedByUserId?: string;
+  /** See Message.actorType — set when the AI Agent created this task. */
+  actorType?: 'user' | 'ai_agent';
 }
 
 // ---- File Import Pipeline ----
@@ -1034,6 +1386,24 @@ export interface ImportSession {
    * unchanged at confirm time so the two steps never resolve a row
    * differently. */
   importOptions?: Record<string, unknown>;
+  /** Formula-error cells (e.g. "#REF!", "#DIV/0!") found while parsing an
+   * .xlsx/.xls file — each entry names the row, column, and error text.
+   * These cells are always read as blank in rawRows (never treated as real
+   * data), but reported here rather than silently discarded, so the
+   * frontend can flag the affected rows to the user before they import
+   * data next to a broken formula without knowing it. Always undefined for
+   * CSV/PDF imports, which have no formula concept. */
+  formulaErrors?: string[];
+  /** Multi-sheet .xlsx import only (sheetNameAsColumn): one entry per sheet
+   * whose own columns don't cover every required target field, even though
+   * `suggestedMapping` (built from the union of every sheet's headers) may
+   * show that field as mapped because a DIFFERENT sheet supplied it — e.g.
+   * a 7-tab portfolio export where 6 sheets have a real "Type" column and
+   * one doesn't still looks "fully mapped" file-wide, so that one sheet's
+   * rows would otherwise sail straight through to Preview and fail there
+   * with no warning beforehand. Undefined/empty means every sheet's own
+   * columns cover every required field. */
+  sheetGaps?: { sheetName: string; missingRequiredFieldKeys: string[] }[];
   createdAt: string;
   expiresAt: string;
 }

@@ -134,10 +134,10 @@ async function freshHarness(companyIds: string[] = ['c1', 'c2']) {
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
-  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, new InMemoryRepository<Project>(), paymentPlans);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
   const legal = new LegalService(legalDocuments, contracts);
-  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm);
+  const brokers = new BrokersService(brokerCompanies, brokerLeads, commissionRules, commissions, crm, contracts, reservations);
   const analytics = new AnalyticsService(leads, opportunities, contracts, scheduleLines, units, commissions, auditLogRepo, campaigns, crmStages);
 
   const automation = new AutomationService(
@@ -266,6 +266,7 @@ async function seedUserWithGrants(
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   });
   const role: Role = { id: `role-${userId}`, companyId, name: 'Test Role', isSystem: false };
   await h.roles.save(role);

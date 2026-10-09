@@ -12,6 +12,7 @@ export interface CreateTaskInput {
   relatedResource?: MessageRelatedResource;
   relatedResourceId?: string;
   createdByUserId: string;
+  actorType?: 'user' | 'ai_agent';
 }
 
 export class TaskService {
@@ -31,6 +32,7 @@ export class TaskService {
       status: 'open',
       createdByUserId: input.createdByUserId,
       createdAt: new Date().toISOString(),
+      actorType: input.actorType,
     };
     return this.tasks.save(task);
   }
@@ -47,17 +49,17 @@ export class TaskService {
     return this.tasks.findById(id);
   }
 
-  async completeTask(id: string, companyId: string): Promise<Task> {
+  async completeTask(id: string, companyId: string, completedByUserId?: string): Promise<Task> {
     const task = await this.tasks.findById(id);
     if (!task || task.companyId !== companyId) throw new NotFoundError('task not found');
     if (task.status !== 'open') throw new AutomationError(`only an open task can be completed (current status: ${task.status})`);
-    return this.tasks.save({ ...task, status: 'done', completedAt: new Date().toISOString() });
+    return this.tasks.save({ ...task, status: 'done', completedAt: new Date().toISOString(), completedByUserId });
   }
 
-  async cancelTask(id: string, companyId: string): Promise<Task> {
+  async cancelTask(id: string, companyId: string, completedByUserId?: string): Promise<Task> {
     const task = await this.tasks.findById(id);
     if (!task || task.companyId !== companyId) throw new NotFoundError('task not found');
     if (task.status !== 'open') throw new AutomationError(`only an open task can be cancelled (current status: ${task.status})`);
-    return this.tasks.save({ ...task, status: 'cancelled' });
+    return this.tasks.save({ ...task, status: 'cancelled', completedByUserId });
   }
 }

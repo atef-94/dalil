@@ -93,7 +93,7 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
-  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, new InMemoryRepository<Project>(), paymentPlans);
   const leadScoring = new LeadScoringService(leads, crmStages);
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);

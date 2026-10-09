@@ -230,6 +230,181 @@ test('createSession with sheetNameAsColumn merges every sheet, injecting the she
   assert.equal(session.rawRows[1]!['Unit Type'], 'Duplex');
 });
 
+// ---- Real bug reported by a user: a 7-sheet portfolio export where most
+// sheets have a real "Unit Type" column but one ("Jiran") only has a
+// "Beds B" column (bedroom-count codes like "3B", not a type) — the
+// file-wide suggestedMapping (built from the UNION of every sheet's
+// headers) still showed Unit Type as "mapped" because OTHER sheets had it,
+// so the whole file sailed straight past the Mapping step with no warning,
+// and every one of that one sheet's rows silently failed validation at
+// Preview with no indication why. sheetGaps is computed per sheet instead,
+// so this case is now caught and surfaced before Preview. ----
+
+test('createSession with sheetNameAsColumn flags a sheet whose own columns are missing a required field, even though another sheet supplies it', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type', 'Area (sqm) — From']);
+  stayn.addRow(['Apartment', '150']);
+  const jiran = wb.addWorksheet('Jiran');
+  jiran.addRow(['Code', 'Beds B']);
+  jiran.addRow(['A1-02', '3B']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  // File-wide, Unit Type looks mapped (Stayn supplies it) — exactly the
+  // masking behavior that let this slip through before.
+  assert.equal(session.suggestedMapping['Unit Type'], 'unitType');
+  // But sheetGaps must still call out Jiran specifically.
+  assert.ok(session.sheetGaps, 'expected sheetGaps to be populated');
+  assert.equal(session.sheetGaps!.length, 1);
+  assert.equal(session.sheetGaps![0]!.sheetName, 'Jiran');
+  assert.deepEqual(session.sheetGaps![0]!.missingRequiredFieldKeys, ['unitType']);
+});
+
+test('createSession with sheetNameAsColumn leaves sheetGaps undefined when every sheet covers every required field', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type', 'Area (sqm) — From']);
+  stayn.addRow(['Apartment', '150']);
+  const connect4 = wb.addWorksheet('Connect4');
+  connect4.addRow(['Unit Type', 'Area (sqm) — From']);
+  connect4.addRow(['Duplex', '220']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.equal(session.sheetGaps, undefined);
+});
+
+test('createSession with sheetNameAsColumn never flags a required field that has a real fallback, even when a sheet has no column for it', async () => {
+  const fieldsWithFallback: ImportFieldDef[] = [
+    ...INVENTORY_LIKE_FIELDS,
+    { key: 'unitCode', label: 'Unit Code', aliases: ['code'], required: true, autoFallbackOptionKey: 'autoGenerateUnitCode' },
+  ];
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Code', 'Unit Type', 'Area (sqm) — From']);
+  stayn.addRow(['A-101', 'Apartment', '150']);
+  const jiran = wb.addWorksheet('Jiran');
+  jiran.addRow(['Unit Type', 'Area (sqm) — From']); // no Code column at all
+  jiran.addRow(['Apartment', '150']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: fieldsWithFallback,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.equal(session.sheetGaps, undefined);
+});
+
+// ---- Section 5 fix: formula-error cells detected by the xlsx parser must
+// survive into the ImportSession, not be silently discarded ----
+
+test('createSession surfaces formulaErrors from a single-sheet .xlsx onto the session', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet('Units');
+  sheet.addRow(['Unit Type', 'Area (sqm) — From']);
+  const row = sheet.addRow(['Apartment', null]);
+  row.getCell(2).value = { formula: 'A1/0', result: { error: '#DIV/0!' } } as unknown as ExcelJS.CellValue;
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'units.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+  });
+
+  assert.ok(session.formulaErrors, 'expected formulaErrors to be populated');
+  assert.equal(session.formulaErrors!.length, 1);
+  assert.match(session.formulaErrors![0]!, /#DIV\/0!/);
+  // The broken cell itself still reads as blank, never fabricated data.
+  assert.equal(session.rawRows[0]!['Area (sqm) — From'], '');
+});
+
+test('createSession leaves formulaErrors undefined for a clean .xlsx (no error cells)', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet('Units');
+  sheet.addRow(['Unit Type', 'Area (sqm) — From']);
+  sheet.addRow(['Apartment', '150']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'units.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+  });
+
+  assert.equal(session.formulaErrors, undefined);
+});
+
+test('createSession with sheetNameAsColumn collects formulaErrors across sheets, each prefixed with its sheet name', async () => {
+  const svc = service();
+  const wb = new ExcelJS.Workbook();
+  const stayn = wb.addWorksheet('Stayn');
+  stayn.addRow(['Unit Type', 'Area (sqm) — From']);
+  const staynRow = stayn.addRow(['Apartment', null]);
+  staynRow.getCell(2).value = { formula: 'X', result: { error: '#REF!' } } as unknown as ExcelJS.CellValue;
+
+  const connect4 = wb.addWorksheet('Connect4');
+  connect4.addRow(['Unit Type', 'Area (sqm) — From']);
+  connect4.addRow(['Duplex', '220']);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'portfolio.xlsx',
+    fileBuffer: buf,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fields: INVENTORY_LIKE_FIELDS,
+    sheetNameAsColumn: 'Project',
+  });
+
+  assert.ok(session.formulaErrors, 'expected formulaErrors to be populated');
+  assert.equal(session.formulaErrors!.length, 1);
+  assert.match(session.formulaErrors![0]!, /sheet "Stayn".*#REF!/);
+});
+
 test('createSession with sheetNameAsColumn leaves a row alone when it already has a real value in that column', async () => {
   const svc = service();
   const wb = new ExcelJS.Workbook();
@@ -321,4 +496,52 @@ test('createSession with sheetNameAsColumn canonicalizes differently-spelled hea
     ['Apartment', 'Duplex'],
   );
   assert.equal(session.suggestedMapping.Type, 'unitType');
+});
+
+// ---- Hierarchy-aware fill-down: a blank cell in a merged-cell export means
+// "same as the value above" only for genuinely hierarchical columns
+// (Project/Developer/Phase) — a blank numeric cell (Area/Price/etc.) means
+// "not supplied", and must never silently inherit the row above it. ----
+
+test('fillDownBlankCells with hierarchicalFieldKeys only fills the hierarchical column, leaving a blank numeric column blank', async () => {
+  const svc = service();
+  const csv = Buffer.from(
+    'Project,Unit Type,Area (sqm) — From\n' +
+      'SODIC,Apartment,120\n' +
+      ',Apartment,\n' +
+      ',Villa,250\n',
+  );
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'inventory_unit',
+    fileName: 'catalog.csv',
+    fileBuffer: csv,
+    contentType: 'text/csv',
+    fields: INVENTORY_LIKE_FIELDS,
+    fillDownBlankCells: true,
+    hierarchicalFieldKeys: ['projectName'],
+  });
+  assert.equal(session.rawRows[0]!.Project, 'SODIC');
+  assert.equal(session.rawRows[1]!.Project, 'SODIC', 'a blank Project cell inherits the hierarchical value above it');
+  assert.equal(session.rawRows[1]!['Area (sqm) — From'], '', 'a blank numeric cell is never filled, even with fillDownBlankCells on');
+  assert.equal(session.rawRows[2]!.Project, 'SODIC');
+  assert.equal(session.rawRows[2]!['Area (sqm) — From'], '250', "a row's own real value is never overwritten");
+});
+
+test('fillDownBlankCells without hierarchicalFieldKeys fills every column, unchanged default behavior', async () => {
+  const svc = service();
+  const csv = Buffer.from('Full Name,Phone,Email\nAhmed Ali,0100000000,ahmed@example.com\n,,sara@example.com\n');
+  const session = await svc.createSession({
+    companyId: 'c1',
+    createdByUserId: 'u1',
+    targetType: 'lead',
+    fileName: 'leads.csv',
+    fileBuffer: csv,
+    contentType: 'text/csv',
+    fields: LEAD_FIELDS,
+    fillDownBlankCells: true,
+  });
+  assert.equal(session.rawRows[1]!['Full Name'], 'Ahmed Ali', 'no hierarchicalFieldKeys means every column still fills down, as before');
+  assert.equal(session.rawRows[1]!.Phone, '0100000000');
 });

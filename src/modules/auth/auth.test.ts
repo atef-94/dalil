@@ -5,6 +5,7 @@ import { AuthService } from './auth.service.js';
 import type { User } from '../../domain/types.js';
 import { createHmac } from 'node:crypto';
 import { hashPassword, verifyPassword, signToken, verifyToken } from '../../infra/security.js';
+import { generateTotpCode } from '../../infra/totp.js';
 
 function freshService() {
   const users = new InMemoryRepository<User>();
@@ -81,6 +82,64 @@ test('a successful login resets the failure counter', async () => {
   await assert.rejects(() => svc.login({ companyId: 'c1', email: 'a@b.com', password: 'wrong' }));
   const { token: secondToken } = await svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1' });
   assert.ok(secondToken);
+});
+
+test('login with MFA enabled requires a totpCode, and accepts a valid one', async () => {
+  const { svc } = freshService();
+  const user = await svc.register({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', userType: 'employee_user', locale: 'en' });
+  const { secret } = await svc.enrollTotp(user.id);
+  await svc.confirmTotpEnrollment(user.id, generateTotpCode(secret));
+
+  await assert.rejects(
+    () => svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1' }),
+    /mfa_required/,
+  );
+
+  const { token } = await svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', totpCode: generateTotpCode(secret) });
+  assert.ok(token);
+});
+
+test('login with MFA enabled rejects a wrong totpCode and counts it toward the lockout', async () => {
+  const { svc, users } = freshService();
+  const user = await svc.register({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', userType: 'employee_user', locale: 'en' });
+  const { secret } = await svc.enrollTotp(user.id);
+  await svc.confirmTotpEnrollment(user.id, generateTotpCode(secret));
+
+  await assert.rejects(() => svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', totpCode: '000000' }));
+  const stored = await users.findById(user.id);
+  assert.equal(stored!.failedLoginCount, 1);
+});
+
+test('confirmTotpEnrollment rejects a wrong code and leaves MFA disabled (login still works without a code)', async () => {
+  const { svc } = freshService();
+  const user = await svc.register({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', userType: 'employee_user', locale: 'en' });
+  await svc.enrollTotp(user.id);
+  await assert.rejects(() => svc.confirmTotpEnrollment(user.id, '000000'));
+  const { token } = await svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1' });
+  assert.ok(token);
+});
+
+test('a one-time recovery code logs the user in and cannot be reused', async () => {
+  const { svc } = freshService();
+  const user = await svc.register({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', userType: 'employee_user', locale: 'en' });
+  const { secret } = await svc.enrollTotp(user.id);
+  const { recoveryCodes } = await svc.confirmTotpEnrollment(user.id, generateTotpCode(secret));
+  const code = recoveryCodes[0]!;
+
+  const { token } = await svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', totpCode: code });
+  assert.ok(token);
+
+  await assert.rejects(() => svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', totpCode: code }));
+});
+
+test('disableTotp turns MFA off so login no longer requires a code', async () => {
+  const { svc } = freshService();
+  const user = await svc.register({ companyId: 'c1', email: 'a@b.com', password: 'longenough1', userType: 'employee_user', locale: 'en' });
+  const { secret } = await svc.enrollTotp(user.id);
+  await svc.confirmTotpEnrollment(user.id, generateTotpCode(secret));
+  await svc.disableTotp(user.id);
+  const { token } = await svc.login({ companyId: 'c1', email: 'a@b.com', password: 'longenough1' });
+  assert.ok(token);
 });
 
 test('a tampered token signature is rejected', () => {
