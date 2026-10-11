@@ -72,6 +72,7 @@ export const STRINGS = {
     common_cancel: 'Cancel',
     common_remove: 'Remove',
     common_submit: 'Submit',
+    common_field_required: 'This field is required.',
     common_close: 'Close',
     common_prev: '‹ Prev',
     common_next: 'Next ›',
@@ -213,7 +214,6 @@ export const STRINGS = {
     crm_move_lost_reason_field: 'Lost reason (required only when the new stage is Lost-flagged)',
     crm_move_occurred_at_field: 'Date & time this change happened (required)',
     crm_move_note_field: 'Reason / note for this move (required — shown on the Lead Timeline)',
-    crm_move_validation_required: 'The date/time of the change and a note are required.',
     crm_move_toast_prefix: 'Moved to',
     // ---- CRM: Ask AI toasts (crm.js) ----
     crm_ai_confidence_suffix: '% confidence',
@@ -1738,6 +1738,7 @@ export const STRINGS = {
     common_cancel: 'إلغاء',
     common_remove: 'إزالة',
     common_submit: 'إرسال',
+    common_field_required: 'هذا الحقل مطلوب.',
     common_close: 'إغلاق',
     common_prev: '‹ السابق',
     common_next: 'التالي ›',
@@ -1877,7 +1878,6 @@ export const STRINGS = {
     crm_move_lost_reason_field: 'سبب الخسارة (مطلوب فقط عند النقل إلى مرحلة مصنّفة كخسارة)',
     crm_move_occurred_at_field: 'تاريخ ووقت حدوث هذا التغيير (مطلوب)',
     crm_move_note_field: 'سبب / ملاحظة لهذا النقل (مطلوب — يظهر في السجل الزمني للعميل المحتمل)',
-    crm_move_validation_required: 'تاريخ ووقت التغيير والملاحظة مطلوبان.',
     crm_move_toast_prefix: 'تم النقل إلى',
     // ---- CRM: Ask AI toasts (crm.js) ----
     crm_ai_confidence_suffix: '% ثقة',

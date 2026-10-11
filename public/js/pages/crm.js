@@ -818,19 +818,15 @@ export async function renderCrm(container) {
       fields: [
         { key: 'stageId', label: t(locale, 'crm_move_new_stage_field'), type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: lead.stageId },
         { key: 'lostReason', label: t(locale, 'crm_move_lost_reason_field') },
-        { key: 'occurredAt', label: t(locale, 'crm_move_occurred_at_field'), type: 'datetime-local', value: nowForDatetimeInput() },
-        { key: 'note', label: t(locale, 'crm_move_note_field'), type: 'textarea' },
+        { key: 'occurredAt', label: t(locale, 'crm_move_occurred_at_field'), type: 'datetime-local', value: nowForDatetimeInput(), required: true },
+        { key: 'note', label: t(locale, 'crm_move_note_field'), type: 'textarea', required: true },
       ],
       submitLabel: t(locale, 'crm_move_word'),
     });
+    // formModal() itself blocks submission (and keeps the modal open) until
+    // both required fields are filled — result is only ever null (cancelled)
+    // or fully valid, never a half-filled move.
     if (!result) return;
-    // Both the change's actual date/time and a note are mandatory for every
-    // manual stage move — mirrors the same post-formModal required-field
-    // check already used for openAddLeadModal's fullName/phone above.
-    if (!result.occurredAt || !result.note?.trim()) {
-      reportError(new Error(t(locale, 'crm_move_validation_required')));
-      return;
-    }
     try {
       await api.patch(`/api/crm/leads/${lead.id}/stage`, {
         stageId: result.stageId,

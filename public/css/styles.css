@@ -441,6 +441,11 @@ tbody tr.clickable { cursor: pointer; }
 .form-row > div { flex: 1; min-width: 160px; }
 .form-actions { margin-top: 14px; display: flex; gap: 8px; }
 
+/* formModal() required-field validation (ui.js) — blocks submission in
+   place rather than closing the modal and reporting failure afterward. */
+input.invalid, textarea.invalid, select.invalid { border-color: var(--danger-solid); }
+.field-error { color: var(--danger-text); font-size: 12px; margin-top: 4px; }
+
 /* ---- A true responsive 2-column form grid (desktop) / 1-column (mobile) —
    used by forms with many short fields (e.g. Inventory's Add a Unit) where
    .form-row's flex-wrap leaves an uneven, hard-to-scan ragged layout. ---- */

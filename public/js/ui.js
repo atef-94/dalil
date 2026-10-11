@@ -417,11 +417,16 @@ export function confirmModal(message, { confirmLabel = tt('common_confirm'), can
  * {[fieldKey]: value} or null if dismissed/cancelled.
  *
  * fields: { key, label, type: 'text'|'number'|'select'|'textarea',
- *           options?: [{value,label}], placeholder?, value? }[]
+ *           options?: [{value,label}], placeholder?, value?, required? }[]
+ *
+ * A `required: true` field genuinely blocks submission — the modal stays
+ * open with an inline error under the field (never silently closes and
+ * leaves the caller to notice a toast after the fact).
  */
 export function formModal({ title, fields, submitLabel = tt('common_submit'), cancelLabel = tt('common_cancel') }) {
   return new Promise((resolve) => {
     const inputs = {};
+    const errorEls = {};
     const body = el('div', {});
     for (const f of fields) {
       let input;
@@ -435,7 +440,10 @@ export function formModal({ title, fields, submitLabel = tt('common_submit'), ca
         input = el('input', { type: f.type || 'text', placeholder: f.placeholder || '', value: f.value ?? '' });
       }
       inputs[f.key] = input;
-      body.appendChild(field(f.label, input));
+      const errorEl = el('div', { class: 'field-error', style: 'display:none' });
+      errorEls[f.key] = errorEl;
+      input.addEventListener('input', () => { input.classList.remove('invalid'); errorEl.style.display = 'none'; });
+      body.appendChild(field(f.label, el('div', {}, [input, errorEl])));
     }
 
     const { close } = openModalShell(title, body);
@@ -444,7 +452,18 @@ export function formModal({ title, fields, submitLabel = tt('common_submit'), ca
     cancelBtn.addEventListener('click', () => { close(); resolve(null); });
     function submit() {
       const values = {};
-      for (const [key, input] of Object.entries(inputs)) values[key] = input.value;
+      let firstInvalid = null;
+      for (const f of fields) {
+        const input = inputs[f.key];
+        const value = input.value;
+        values[f.key] = value;
+        const missing = f.required && !value.trim();
+        input.classList.toggle('invalid', !!missing);
+        errorEls[f.key].style.display = missing ? '' : 'none';
+        errorEls[f.key].textContent = missing ? tt('common_field_required') : '';
+        if (missing && !firstInvalid) firstInvalid = input;
+      }
+      if (firstInvalid) { firstInvalid.focus(); return; }
       close();
       resolve(values);
     }
