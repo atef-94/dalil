@@ -72,7 +72,12 @@ async function request(path, { method = 'GET', body, query } = {}) {
   }
 
   if (!res.ok) {
-    if (res.status === 401) notifySessionExpired();
+    // Only an authenticated request (one that actually sent a bearer token)
+    // can "expire" — a 401 from an unauthenticated call like /api/auth/login
+    // (wrong password, mfa_required, account locked, ...) is a login
+    // rejection, not a session expiring, and must not force the user back
+    // to a fresh login screen mid-flow.
+    if (res.status === 401 && token) notifySessionExpired();
     const message = (parsed && (parsed.error || parsed.message)) || `Request failed (${res.status})`;
     throw new ApiError(res.status, message);
   }
@@ -97,7 +102,12 @@ async function upload(path, formData) {
     parsed = text;
   }
   if (!res.ok) {
-    if (res.status === 401) notifySessionExpired();
+    // Only an authenticated request (one that actually sent a bearer token)
+    // can "expire" — a 401 from an unauthenticated call like /api/auth/login
+    // (wrong password, mfa_required, account locked, ...) is a login
+    // rejection, not a session expiring, and must not force the user back
+    // to a fresh login screen mid-flow.
+    if (res.status === 401 && token) notifySessionExpired();
     const message = (parsed && (parsed.error || parsed.message)) || `Request failed (${res.status})`;
     throw new ApiError(res.status, message);
   }
