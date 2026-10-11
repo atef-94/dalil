@@ -173,3 +173,38 @@ test('Lead Timeline: the exact user-specified flow produces a complete, correctl
     assert.ok(page1Body.total >= 9);
   });
 });
+
+// Covers the Move Stage modal's new "date/time the change occurred" field
+// (public/js/pages/crm.js's openMoveStageModal): a caller-supplied
+// occurredAt is accepted and surfaced on the timeline entry's detail, an
+// invalid one is rejected, and — critically — it never substitutes for the
+// entry's own `at`/createdAt, which stays the real audit-insertion time
+// LeadTimelineService's timeInPreviousStageMs and AnalyticsService's
+// duration metrics both depend on.
+test('PATCH .../stage accepts a caller-supplied occurredAt, surfaces it on the timeline without affecting entry ordering/duration, and rejects an invalid one', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const ceoHeaders = { 'x-demo-user': ceoUserId };
+
+    const leadRes = await call(base, 'POST', '/api/crm/leads', { fullName: 'Occurred-At Client', phone: `01${Date.now()}` }, ceoHeaders);
+    const leadId = (leadRes.body as { id: string }).id;
+
+    const stagesRes = await call(base, 'GET', '/api/crm/stages', undefined, ceoHeaders);
+    const stages = stagesRes.body as { id: string; key: string }[];
+    const meeting = stages.find((s) => s.key === 'meeting')!;
+
+    const backdatedAt = '2020-01-15T09:30:00.000Z';
+    const stageRes = await call(base, 'PATCH', `/api/crm/leads/${leadId}/stage`, { stageId: meeting.id, note: 'Backdated entry from a missed log', occurredAt: backdatedAt }, ceoHeaders);
+    assert.equal(stageRes.status, 200);
+
+    const timelineRes = await call(base, 'GET', `/api/crm/leads/${leadId}/timeline?limit=50`, undefined, ceoHeaders);
+    const page = timelineRes.body as TimelinePage;
+    const stageChange = page.items.find((e) => e.type === 'stage_changed')!;
+    assert.equal(stageChange.detail!.occurredAt, backdatedAt, 'the caller-supplied occurredAt must be recorded on the entry detail');
+    assert.notEqual(stageChange.at, backdatedAt, 'the entry\'s own `at` (real audit-insertion time) must never be overwritten by the caller-supplied occurredAt');
+    assert.ok(Date.parse(stageChange.at) > Date.parse(backdatedAt), 'the real insertion time is still "now", long after the backdated occurredAt');
+
+    const invalidRes = await call(base, 'PATCH', `/api/crm/leads/${leadId}/stage`, { stageId: meeting.id, occurredAt: 'not-a-real-date' }, ceoHeaders);
+    assert.equal(invalidRes.status, 400, 'an unparseable occurredAt must be rejected, not silently accepted');
+  });
+});

@@ -804,19 +804,40 @@ export async function renderCrm(container) {
 
   // ---- Move stage ----
 
+  /** datetime-local inputs need "YYYY-MM-DDTHH:mm" in the viewer's own
+   * local time (an ISO string's trailing "Z"/offset breaks the control),
+   * so the UTC-based toISOString() can't be used directly here. */
+  function nowForDatetimeInput() {
+    const d = new Date();
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  }
+
   async function openMoveStageModal(lead, reload) {
     const result = await formModal({
       title: `${t(locale, 'crm_move_word')} "${lead.fullName}"`,
       fields: [
         { key: 'stageId', label: t(locale, 'crm_move_new_stage_field'), type: 'select', options: stages.map((s) => ({ value: s.id, label: s.name })), value: lead.stageId },
         { key: 'lostReason', label: t(locale, 'crm_move_lost_reason_field') },
+        { key: 'occurredAt', label: t(locale, 'crm_move_occurred_at_field'), type: 'datetime-local', value: nowForDatetimeInput() },
         { key: 'note', label: t(locale, 'crm_move_note_field'), type: 'textarea' },
       ],
       submitLabel: t(locale, 'crm_move_word'),
     });
     if (!result) return;
+    // Both the change's actual date/time and a note are mandatory for every
+    // manual stage move — mirrors the same post-formModal required-field
+    // check already used for openAddLeadModal's fullName/phone above.
+    if (!result.occurredAt || !result.note?.trim()) {
+      reportError(new Error(t(locale, 'crm_move_validation_required')));
+      return;
+    }
     try {
-      await api.patch(`/api/crm/leads/${lead.id}/stage`, { stageId: result.stageId, lostReason: result.lostReason.trim() || undefined, note: result.note?.trim() || undefined });
+      await api.patch(`/api/crm/leads/${lead.id}/stage`, {
+        stageId: result.stageId,
+        lostReason: result.lostReason.trim() || undefined,
+        note: result.note.trim(),
+        occurredAt: new Date(result.occurredAt).toISOString(),
+      });
       const target = stages.find((s) => s.id === result.stageId);
       toast(`${t(locale, 'crm_move_toast_prefix')} "${target?.name}".`, 'success');
       await refreshAll();
@@ -900,6 +921,10 @@ export async function renderCrm(container) {
         }
         if (d.lostReason) rows.push(el('div', { style: 'font-size:13px' }, `${t(locale, 'crm_timeline_reason_prefix')} ${d.lostReason}`));
         if (d.note) rows.push(el('div', { style: 'font-size:13px' }, `${t(locale, 'crm_timeline_comment_prefix')} ${d.note}`));
+        // occurredAt is the staff-selected actual time of the change
+        // (may be backdated) — distinct from the row's own `at`, which
+        // stays the real audit-insertion time used for ordering/duration.
+        if (d.occurredAt) rows.push(el('div', { class: 'muted', style: 'font-size:12px' }, `${t(locale, 'crm_timeline_occurred_at_prefix')} ${new Date(d.occurredAt).toLocaleString()}`));
       }
       if (Array.isArray(d.fieldsChanged)) {
         const fmtVal = (v) => (v === undefined || v === null || v === '' ? '—' : v);

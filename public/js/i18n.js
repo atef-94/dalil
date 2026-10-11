@@ -211,7 +211,9 @@ export const STRINGS = {
     crm_move_word: 'Move',
     crm_move_new_stage_field: 'New stage',
     crm_move_lost_reason_field: 'Lost reason (required only when the new stage is Lost-flagged)',
-    crm_move_note_field: 'Reason / note for this move (optional — shown on the Lead Timeline)',
+    crm_move_occurred_at_field: 'Date & time this change happened (required)',
+    crm_move_note_field: 'Reason / note for this move (required — shown on the Lead Timeline)',
+    crm_move_validation_required: 'The date/time of the change and a note are required.',
     crm_move_toast_prefix: 'Moved to',
     // ---- CRM: Ask AI toasts (crm.js) ----
     crm_ai_confidence_suffix: '% confidence',
@@ -232,6 +234,7 @@ export const STRINGS = {
     crm_timeline_time_in_stage_prefix: 'Time in previous stage:',
     crm_timeline_reason_prefix: 'Reason:',
     crm_timeline_comment_prefix: 'Comment:',
+    crm_timeline_occurred_at_prefix: 'Occurred at:',
     crm_timeline_no_matches: 'No matching activity.',
     crm_timeline_card_title: 'Timeline / History',
     // ---- CRM: Lead detail header + actions (crm.js) ----
@@ -1872,7 +1875,9 @@ export const STRINGS = {
     crm_move_word: 'نقل',
     crm_move_new_stage_field: 'المرحلة الجديدة',
     crm_move_lost_reason_field: 'سبب الخسارة (مطلوب فقط عند النقل إلى مرحلة مصنّفة كخسارة)',
-    crm_move_note_field: 'سبب / ملاحظة لهذا النقل (اختياري — يظهر في السجل الزمني للعميل المحتمل)',
+    crm_move_occurred_at_field: 'تاريخ ووقت حدوث هذا التغيير (مطلوب)',
+    crm_move_note_field: 'سبب / ملاحظة لهذا النقل (مطلوب — يظهر في السجل الزمني للعميل المحتمل)',
+    crm_move_validation_required: 'تاريخ ووقت التغيير والملاحظة مطلوبان.',
     crm_move_toast_prefix: 'تم النقل إلى',
     // ---- CRM: Ask AI toasts (crm.js) ----
     crm_ai_confidence_suffix: '% ثقة',
@@ -1893,6 +1898,7 @@ export const STRINGS = {
     crm_timeline_time_in_stage_prefix: 'المدة في المرحلة السابقة:',
     crm_timeline_reason_prefix: 'السبب:',
     crm_timeline_comment_prefix: 'تعليق:',
+    crm_timeline_occurred_at_prefix: 'وقت الحدوث:',
     crm_timeline_no_matches: 'لا يوجد نشاط مطابق.',
     crm_timeline_card_title: 'السجل الزمني / التاريخ',
     // ---- CRM: Lead detail header + actions (crm.js) ----

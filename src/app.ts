@@ -2792,7 +2792,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
       managerEmployeeId: ownerKeys.managerEmployeeId,
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
-    const body = parseJsonBody<{ stageId: string; lostReason?: string; note?: string }>(ctx.body);
+    const body = parseJsonBody<{ stageId: string; lostReason?: string; note?: string; occurredAt?: string }>(ctx.body);
+    // occurredAt is caller-supplied (e.g. the Move Stage modal's required
+    // date/time picker, letting staff record a change that actually
+    // happened earlier than the moment they log it) — purely descriptive
+    // metadata on the audit row, never used as the row's own createdAt:
+    // LeadTimelineService's timeInPreviousStageMs/ordering math and
+    // AnalyticsService's duration metrics both depend on createdAt being
+    // the real insertion time, so that invariant stays untouched.
+    if (body.occurredAt !== undefined && Number.isNaN(Date.parse(body.occurredAt))) {
+      throw new ValidationError('occurredAt must be a valid date/time');
+    }
     const fromStageId = lead.stageId;
     const updated = await crm.moveToStage(ctx.params.leadId!, actor.companyId, body.stageId, body.lostReason);
     const stage = await crmStages.getStage(updated.stageId, actor.companyId);
@@ -2816,7 +2826,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       // (shown alongside "Previous Stage / New Stage" in the Lead
       // Timeline) — distinct from a standalone Comment/Note, which still
       // goes through the Message architecture untouched.
-      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason, note: body.note?.trim() || undefined },
+      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason, note: body.note?.trim() || undefined, occurredAt: body.occurredAt || undefined },
     });
     // Both events fire together during the transition period: 'status_changed'
     // keeps any pre-existing workflow/AiPolicy row triggered on the legacy
