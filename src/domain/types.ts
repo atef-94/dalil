@@ -1947,6 +1947,7 @@ export type IntegrationProvider =
   | 'whatsapp'
   | 'email'
   | 'meta_ads'
+  | 'facebook_leads'
   | 'google_calendar'
   | 'payment_stripe'
   | 'e_signature'
@@ -2025,6 +2026,37 @@ export interface CommunicationDeliveryEvent {
    * debugging — never trusted for anything beyond that, and never re-run
    * as an instruction (see CommunicationDeliveryService.handleWebhook). */
   rawEvent?: Record<string, unknown>;
+  createdAt: string;
+}
+
+/**
+ * The idempotency ledger for Facebook Instant Lead Forms webhook deliveries
+ * — one row per `leadgen_id` ACTIVE has ever seen, written *before* the
+ * webhook handler acknowledges the delivery (see FacebookLeadsService).
+ * Meta retries undelivered/slow webhooks for up to 3 days and can also
+ * double-deliver near-simultaneously; `leadgen_id` is the one value Meta
+ * guarantees is stable and unique per lead submission, so it — not the
+ * phone number, which a *different*, legitimately separate lead could
+ * coincidentally share — is the correct idempotency key. A lead whose
+ * phone number collides with an already-existing lead (any source, not
+ * just a repeated webhook) is `'duplicate_phone'`, a distinct, expected
+ * outcome from CrmService's own existing per-company phone-dedup guard —
+ * never retried, since retrying would hit the exact same collision again.
+ */
+export interface FacebookLeadEvent {
+  id: string;
+  companyId: string;
+  connectionId: string;
+  pageId: string;
+  formId?: string;
+  leadgenId: string;
+  status: 'processed' | 'duplicate_phone' | 'skipped_invalid_data';
+  /** Set only for status 'processed' — the real Lead this event created. */
+  leadId?: string;
+  /** Short, non-sensitive diagnostic note (e.g. which required field was
+   * missing) — never the raw Graph API payload, which could carry PII
+   * beyond what was actually usable. */
+  note?: string;
   createdAt: string;
 }
 

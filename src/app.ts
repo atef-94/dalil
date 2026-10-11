@@ -14,6 +14,7 @@ import type {
   CommunicationDeliveryEvent,
   DocumentExtractedField,
   DocumentExtractionRun,
+  FacebookLeadEvent,
   IntegrationConnection,
   IntegrationEvent,
   Invitation,
@@ -142,6 +143,7 @@ import { AiWorkflowService } from './modules/ai/ai-workflow.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
 import { SignatureService } from './modules/integrations/e-signature.service.js';
 import { CommunicationDeliveryService } from './modules/integrations/communication-delivery.service.js';
+import { FacebookLeadsService } from './modules/integrations/facebook-leads.service.js';
 import { ForecastingService } from './modules/forecasting/forecasting.service.js';
 import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
 import { ImportSessionService } from './modules/imports/import-session.service.js';
@@ -214,6 +216,19 @@ export interface AppOptions {
    * returned by any route. */
   ownerPassword1?: string;
   ownerPassword2?: string;
+  /** Meta App Secret for the Facebook Instant Lead Forms integration —
+   * verifies the X-Hub-Signature-256 header on every inbound leadgen
+   * webhook delivery. Omit to leave the integration unconfigured (every
+   * webhook delivery is then rejected with 403, never silently accepted
+   * unverified — see FacebookLeadsService.verifySignature). Not required
+   * in production: unlike the owner credentials, not every tenant uses
+   * this integration. */
+  facebookAppSecret?: string;
+  /** The verify_token this deployment and the Meta Developer Console's
+   * webhook subscription form must agree on for the one-time GET
+   * verification handshake. Omit to leave the handshake always failing —
+   * same fail-closed default as facebookAppSecret. */
+  facebookWebhookVerifyToken?: string;
 }
 
 export interface Application {
@@ -265,6 +280,7 @@ export interface Application {
     aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
     signatures: SignatureService;
+    facebookLeads: FacebookLeadsService;
     /** Sweeps overdue payment schedule lines AND emits one
      * `payment.overdue_swept` domain event per swept line — use this
      * instead of `finance.sweepOverdue()` wherever the sweep should also
@@ -360,6 +376,7 @@ function buildRepos(db?: DatabaseSync) {
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
     communicationDeliveryEvents: repo<CommunicationDeliveryEvent>('communication_delivery_events'),
+    facebookLeadEvents: repo<FacebookLeadEvent>('facebook_lead_events'),
     leadDistributionPools: repo<LeadDistributionPool>('lead_distribution_pools'),
     salesCommissionRules: repo<SalesCommissionRule>('sales_commission_rules'),
     salesCommissions: repo<SalesCommission>('sales_commissions'),
@@ -717,6 +734,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
       process.stderr.write(`automation event emission failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   };
+
+  const facebookLeads = new FacebookLeadsService(
+    { connections: repos.integrationConnections, events: repos.facebookLeadEvents },
+    integrations,
+    crm,
+    auditLog,
+    emitEvent,
+    options.facebookAppSecret,
+    options.facebookWebhookVerifyToken,
+  );
 
   // Shared by the manual sweep route below and main.ts's periodic tick, so
   // both paths emit the same `payment.overdue_swept` event per line instead
@@ -3295,6 +3322,43 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: { id: event.id, status: event.status } };
   });
 
+  // Facebook/Instagram Instant Lead Forms — Meta's one-time GET
+  // verification handshake. Unlike the two webhook routes above (one URL
+  // per company), this is a single global URL shared by every connected
+  // company's Pages (see FacebookLeadsService's class doc comment) — Meta
+  // itself has no concept of a company here, only this one App-level
+  // subscription. The response must be the raw hub.challenge text, not
+  // JSON (Meta compares it byte-for-byte) — see the `raw: true` flag.
+  httpServer.get('/api/integrations/facebook/webhooks', async (ctx) => {
+    const challenge = facebookLeads.verifyChallenge(
+      ctx.query.get('hub.mode') ?? undefined,
+      ctx.query.get('hub.verify_token') ?? undefined,
+      ctx.query.get('hub.challenge') ?? undefined,
+    );
+    return { status: 200, body: challenge, raw: true };
+  });
+
+  // Facebook/Instagram Instant Lead Forms — the real leadgen webhook
+  // delivery. HMAC-verified against FACEBOOK_APP_SECRET over the exact
+  // raw request bytes (ctx.rawBody, not a re-serialization of the parsed
+  // body — see RequestContext.rawBody's doc comment for why that
+  // distinction matters here specifically). Each leadgen change is
+  // processed independently and idempotently; if any one of them hits a
+  // genuine operational failure, handleLeadgenChange lets it throw, which
+  // propagates out of this handler and becomes a 5xx — Meta retries the
+  // whole delivery, and every change already durably processed is a safe
+  // no-op on that retry (see FacebookLeadEvent / handleLeadgenChange).
+  httpServer.post('/api/integrations/facebook/webhooks', async (ctx) => {
+    const signatureHeader = ctx.headers['x-hub-signature-256'];
+    facebookLeads.verifySignature(ctx.rawBody, typeof signatureHeader === 'string' ? signatureHeader : undefined);
+    const changes = facebookLeads.extractLeadgenChanges(ctx.body);
+    const results = [];
+    for (const change of changes) {
+      results.push(await facebookLeads.handleLeadgenChange(change));
+    }
+    return { status: 200, body: { received: results.length } };
+  });
+
   // The real delivery timeline for one sent message — every status
   // transition a verified webhook has actually reported, not an assumed
   // "sent = delivered". See CommunicationDeliveryService.
@@ -5191,7 +5255,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     services: {
       rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding, invitations, platformAdmin,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, sweepExpiredRevokedTokens, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, sweepExpiredRevokedTokens, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures, facebookLeads,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,

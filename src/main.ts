@@ -27,6 +27,13 @@ async function main(): Promise<void> {
   const ownerEmail2 = process.env.OWNER_EMAIL_2;
   const ownerPassword1 = process.env.OWNER_PASSWORD_1;
   const ownerPassword2 = process.env.OWNER_PASSWORD_2;
+  // Facebook Instant Lead Forms (see modules/integrations/facebook-leads.
+  // service.ts) — both optional. Unset means the integration stays
+  // unconfigured and every webhook delivery/verification attempt is
+  // rejected (fail-closed), not that the server refuses to boot: unlike
+  // the owner credentials, no tenant is required to use this integration.
+  const facebookAppSecret = process.env.FACEBOOK_APP_SECRET;
+  const facebookWebhookVerifyToken = process.env.FACEBOOK_WEBHOOK_VERIFY_TOKEN;
 
   const dbPath = process.env.SQLITE_PATH ?? join(__dirname, '..', 'data', 'active-os.db');
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -52,6 +59,8 @@ async function main(): Promise<void> {
     ownerEmail2,
     ownerPassword1,
     ownerPassword2,
+    facebookAppSecret,
+    facebookWebhookVerifyToken,
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS ? Number(process.env.RATE_LIMIT_WINDOW_MS) : undefined,
     rateLimitMax: process.env.RATE_LIMIT_MAX ? Number(process.env.RATE_LIMIT_MAX) : undefined,
     authRateLimitMax: process.env.AUTH_RATE_LIMIT_MAX ? Number(process.env.AUTH_RATE_LIMIT_MAX) : undefined,
