@@ -100,7 +100,7 @@ export class ScenarioSimulationService {
     const startDate = input.startDate ?? new Date().toISOString();
     const template = await this.resolveTemplate(companyId, input);
 
-    const schedule = generateSchedule({
+    const { lines: schedule } = generateSchedule({
       template,
       totalPrice: input.totalPrice,
       discountPercent: input.discountPercent,

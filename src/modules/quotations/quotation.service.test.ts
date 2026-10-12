@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { InMemoryRepository } from '../../infra/repository.js';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service.js';
 import { QuotationService } from './quotation.service.js';
-import type { PaymentPlanTemplate, PaymentScheduleLine, Quotation, Unit } from '../../domain/types.js';
+import type { PaymentPlanTemplate, PaymentScheduleLine, Project, Quotation, Unit } from '../../domain/types.js';
 
 async function setup() {
   const units = new InMemoryRepository<Unit>();
+  const projects = new InMemoryRepository<Project>();
   const paymentPlans = new PaymentPlansService(new InMemoryRepository<PaymentPlanTemplate>(), new InMemoryRepository<PaymentScheduleLine>());
-  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, projects, paymentPlans);
 
   const unit = await units.save({
     id: 'unit-1',
@@ -186,4 +187,113 @@ test('findUnitByCode looks a unit up by its code (case-insensitive), scoped to t
 test('generate rejects a nonexistent unit', async () => {
   const { quotations, template } = await setup();
   await assert.rejects(() => quotations.generate({ companyId: 'c1', unitId: 'no-such-unit', paymentPlanTemplateId: template.id, createdByUserId: 'u1' }));
+});
+
+// ---- Manual unit (spec section 2B: no linked Inventory Unit) ----
+
+test('calculate/generate work from a manually-entered unit with no real Unit row', async () => {
+  const { quotations, template } = await setup();
+  const manualUnit = { code: 'MAN-1', unitType: 'villa', areaSqm: 300, listPrice: 4_000_000 };
+  const calc = await quotations.calculate('c1', { manualUnit, paymentPlanTemplateId: template.id });
+  assert.equal(calc.unit, undefined);
+  assert.equal(calc.unitSnapshot.code, 'MAN-1');
+  assert.equal(calc.unitSnapshot.totalUnitPrice, 4_000_000);
+  assert.equal(calc.unitSnapshot.pricePerMeter, Math.round((4_000_000 / 300) * 100) / 100);
+
+  const quotation = await quotations.generate({ companyId: 'c1', manualUnit, paymentPlanTemplateId: template.id, createdByUserId: 'u1' });
+  assert.equal(quotation.unitId, undefined);
+  assert.equal(quotation.unitSnapshot?.code, 'MAN-1');
+  assert.equal(quotation.projectId, undefined);
+});
+
+test('a manual unit can be associated with a known project via manualProjectId', async () => {
+  const { quotations, template } = await setup();
+  const manualUnit = { code: 'MAN-2', unitType: 'apartment', areaSqm: 100, listPrice: 1_500_000 };
+  const quotation = await quotations.generate({
+    companyId: 'c1', manualUnit, manualProjectId: 'proj-1', paymentPlanTemplateId: template.id, createdByUserId: 'u1',
+  });
+  assert.equal(quotation.projectId, 'proj-1');
+});
+
+test('exactly one of unitId or manualUnit is required — both or neither is rejected', async () => {
+  const { quotations, unit, template } = await setup();
+  await assert.rejects(() => quotations.calculate('c1', { paymentPlanTemplateId: template.id }));
+  await assert.rejects(() => quotations.calculate('c1', {
+    unitId: unit.id, manualUnit: { code: 'X', unitType: 'apartment', areaSqm: 100, listPrice: 100_000 }, paymentPlanTemplateId: template.id,
+  }));
+});
+
+// ---- Inline terms (one-off payment terms, not a reusable template) ----
+
+test('calculate with inlineTerms never persists a template — repeated calls create no rows', async () => {
+  const { quotations, unit, paymentPlans } = await setup();
+  const before = (await paymentPlans.listTemplates('c1')).length;
+  const inlineTerms = { downPaymentType: 'percentage' as const, downPaymentValue: 10, frequency: 'quarterly' as const, termMonths: 24, fees: [] };
+  await quotations.calculate('c1', { unitId: unit.id, inlineTerms });
+  await quotations.calculate('c1', { unitId: unit.id, inlineTerms });
+  const after = (await paymentPlans.listTemplates('c1')).length;
+  assert.equal(after, before);
+});
+
+test('generate with inlineTerms persists exactly one ad-hoc template, excluded from the reusable list', async () => {
+  const { quotations, unit, paymentPlans } = await setup();
+  const inlineTerms = { downPaymentType: 'percentage' as const, downPaymentValue: 10, frequency: 'quarterly' as const, termMonths: 24, fees: [] };
+  const quotation = await quotations.generate({ companyId: 'c1', unitId: unit.id, inlineTerms, createdByUserId: 'u1' });
+  const template = await paymentPlans.getTemplate(quotation.paymentPlanTemplateId);
+  assert.ok(template);
+  assert.equal(template!.adHoc, true);
+  const reusable = await paymentPlans.listReusableTemplates('c1');
+  assert.ok(!reusable.some((t) => t.id === template!.id));
+});
+
+test('exactly one of paymentPlanTemplateId or inlineTerms is required', async () => {
+  const { quotations, unit, template } = await setup();
+  await assert.rejects(() => quotations.calculate('c1', { unitId: unit.id }));
+  const inlineTerms = { downPaymentType: 'percentage' as const, downPaymentValue: 10, frequency: 'quarterly' as const, termMonths: 24, fees: [] };
+  await assert.rejects(() => quotations.calculate('c1', { unitId: unit.id, paymentPlanTemplateId: template.id, inlineTerms }));
+});
+
+// ---- unitSnapshot deep-snapshot guarantee (closes the pre-existing gap
+// where unit attributes were always re-read live, unlike the schedule) ----
+
+test('unitSnapshot is immune to a later edit of the unit area/finishing', async () => {
+  const { quotations, units, unit, template } = await setup();
+  const quotation = await quotations.generate({ companyId: 'c1', unitId: unit.id, paymentPlanTemplateId: template.id, createdByUserId: 'u1' });
+  assert.equal(quotation.unitSnapshot?.areaSqm, 120);
+
+  await units.save({ ...unit, areaSqm: 999, finishingType: 'super lux' });
+
+  const { calculation } = await quotations.recompute(quotation.id, 'c1');
+  assert.equal(calculation.unitSnapshot.areaSqm, 120);
+});
+
+// ---- Financial validation gate on status transitions ----
+
+test('updateStatus blocks moving an unreconciled quotation to sent/accepted, but allows staying generated', async () => {
+  const { quotations, unit, paymentPlans } = await setup();
+  const badTemplate = await paymentPlans.createTemplate({
+    companyId: 'c1',
+    name: 'Underfunded plan',
+    downPaymentType: 'percentage',
+    downPaymentValue: 10,
+    frequency: 'quarterly',
+    termMonths: 12,
+    fees: [],
+    paymentMethod: 'installments_plus_scheduled',
+    recurringInstallmentAmount: 1_000, // far short of what's needed
+  });
+  const quotation = await quotations.generate({ companyId: 'c1', unitId: unit.id, paymentPlanTemplateId: badTemplate.id, createdByUserId: 'u1' });
+  assert.equal(quotation.validation?.isValid, false);
+  await assert.rejects(() => quotations.updateStatus(quotation.id, 'c1', 'sent'));
+  await assert.rejects(() => quotations.updateStatus(quotation.id, 'c1', 'accepted'));
+  const cancelled = await quotations.updateStatus(quotation.id, 'c1', 'cancelled');
+  assert.equal(cancelled.status, 'cancelled'); // non-financial-gated transitions still work
+});
+
+test('updateStatus allows sent/accepted for a fully reconciled (equal_installments) quotation', async () => {
+  const { quotations, unit, template } = await setup();
+  const quotation = await quotations.generate({ companyId: 'c1', unitId: unit.id, paymentPlanTemplateId: template.id, createdByUserId: 'u1' });
+  assert.equal(quotation.validation?.isValid, true);
+  const sent = await quotations.updateStatus(quotation.id, 'c1', 'sent');
+  assert.equal(sent.status, 'sent');
 });

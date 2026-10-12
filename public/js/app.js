@@ -1,5 +1,5 @@
-import { el, clear, icon, errorBanner, emptyState, deniedState } from './ui.js';
-import { isAuthenticated, clearToken } from './api.js';
+import { el, clear, icon, errorBanner, emptyState, deniedState, toast } from './ui.js';
+import { isAuthenticated, clearToken, api } from './api.js';
 import { loadSession, session, getLocale, setLocale, can } from './state.js';
 import { registerRoute, startRouter, navigate, currentPath } from './router.js';
 import { t } from './i18n.js';
@@ -140,7 +140,12 @@ async function showApp() {
   });
 
   const logoutBtn = el('button', { class: 'ghost' }, t(locale, 'logout'));
-  logoutBtn.addEventListener('click', () => {
+  logoutBtn.addEventListener('click', async () => {
+    try {
+      await api.post('/api/auth/logout', {});
+    } catch (err) {
+      // Non-fatal — the token may already be expired; log out locally regardless.
+    }
     clearToken();
     showAuth();
   });
@@ -149,7 +154,7 @@ async function showApp() {
   const topbarTitle = el('div', { id: 'topbar-title' }, '');
 
   const backdrop = el('div', { id: 'sidebar-backdrop' });
-  const sidebarToggle = el('button', { id: 'sidebar-toggle', class: 'icon-btn ghost', 'aria-label': 'Toggle navigation' }, icon('menu'));
+  const sidebarToggle = el('button', { id: 'sidebar-toggle', class: 'icon-btn ghost', 'aria-label': t(locale, 'app_toggle_navigation') }, icon('menu'));
   const sidebarEl = el('aside', { id: 'sidebar' }, [
     el('div', { class: 'brand' }, [el('div', { class: 'mark' }, 'A'), t(locale, 'appName')]),
     el('div', { class: 'company-name' }, session.me?.employee?.title ? `${session.me.email} · ${session.me.employee.title}` : session.me?.email || ''),
@@ -225,7 +230,7 @@ async function showApp() {
       if (err.status === 403) {
         content.appendChild(deniedState(err.message));
       } else {
-        content.appendChild(errorBanner(err.message || 'Something went wrong loading this page.'));
+        content.appendChild(errorBanner(err.message || t(locale, 'app_page_load_error')));
       }
     }
   }
@@ -269,5 +274,13 @@ async function bootstrap() {
   }
   await showApp();
 }
+
+// A 401 from any API call (token expired, revoked, etc.) fires this once —
+// drop back to the login screen with a clear message instead of leaving
+// the already-rendered page up while every further action silently fails.
+window.addEventListener('session-expired', () => {
+  toast(t(getLocale(), 'common_session_expired'), 'error');
+  showAuth();
+});
 
 bootstrap();

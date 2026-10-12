@@ -63,7 +63,7 @@ test('previewSchedule generates without persisting anything', async () => {
   const { svc, scheduleLines } = freshService();
   const template = await svc.createTemplate(baseTemplateInput);
   const preview = await svc.previewSchedule(template.id, 'c1', 100000);
-  assert.ok(preview.length > 1);
+  assert.ok(preview.lines.length > 1);
   const persisted = await scheduleLines.findAll(() => true);
   assert.equal(persisted.length, 0);
 });

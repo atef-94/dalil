@@ -1,0 +1,398 @@
+{
+  "_meta": {
+    "description": "Entity taxonomy for the ACTIVE AI language dataset. Each entity type lists: a stable `entity` key (used in the `entities` object of every dataset record), its `value_type`, whether it is a closed enum or an open/free-text vocabulary, and — where applicable — the real backend field/type it is grounded in (src/domain/types.ts) so extracted entities map directly onto real ACTIVE API parameters instead of an invented schema.",
+    "grounding_note": "Several fields that look like they should be closed enums are intentionally open free-text strings in the real system (unitType, finishingType, view, orientation) because ACTIVE lets each company/project define its own vocabulary. The entity list below marks these as open_vocabulary and gives common real-world Egyptian-market example values for template generation, without implying the backend restricts them to that list.",
+    "franco_variants_note": "location and other proper-noun entities include a franco_variants array with commonly-seen Franco-Arabic / informal-English-transliteration spellings. These are reasonable linguistic variations for generation purposes, not a claim of exhaustively verified real-world usage frequency (see active_ai_dataset_report.md, Section: Data Provenance & Honesty)."
+  },
+  "entities": [
+    {
+      "entity": "project_name",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Project.name (src/domain/types.ts)",
+      "description": "Name of a real-estate development/compound, e.g. 'مدينتي', 'Mountain View iCity', 'Palm Hills New Cairo'.",
+      "notes": "Often mixed Arabic/English/brand-Latin script even in Arabic sentences; frequently abbreviated or misspelled in WhatsApp text."
+    },
+    {
+      "entity": "developer_name",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Project.developerName (src/domain/types.ts)",
+      "description": "Real-estate developer/company name, e.g. 'طلعت مصطفى', 'SODIC', 'Emaar Misr', 'Mountain View'."
+    },
+    {
+      "entity": "location",
+      "value_type": "string",
+      "vocabulary": "closed_list_with_variants",
+      "grounding": "Project.location / Project.city (free text in schema, closed in practice to Egyptian market areas)",
+      "description": "Egyptian real-estate destination/area name.",
+      "canonical_values": [
+        "new_cairo", "el_tagamoa_el_khames", "new_capital", "el_sheikh_zayed",
+        "sixth_of_october", "el_sahel", "ain_el_sokhna", "el_alamein",
+        "ras_el_hekma", "mostakbal_city", "shorouk", "badr_city", "obour",
+        "maadi", "heliopolis", "nasr_city", "zamalek", "downtown_cairo",
+        "north_coast", "marassi", "hacienda_bay", "el_gouna", "hurghada",
+        "marsa_matrouh", "october_gardens", "zayed_2"
+      ],
+      "franco_variants": {
+        "new_cairo": ["New Cairo", "نيو كايرو", "نيوكايرو"],
+        "el_tagamoa_el_khames": ["التجمع الخامس", "التجمع 5", "tagamoa 5", "el tagamoa el 5", "5th settlement", "tagamo3"],
+        "new_capital": ["العاصمة الإدارية", "العاصمة", "new capital", "el 3asema", "capital"],
+        "el_sheikh_zayed": ["الشيخ زايد", "شيخ زايد", "sheikh zayed", "zayed"],
+        "sixth_of_october": ["٦ أكتوبر", "6 اكتوبر", "6th of october", "october", "6 october"],
+        "el_sahel": ["الساحل", "el sa7el", "el sahel", "north coast"],
+        "ain_el_sokhna": ["العين السخنة", "السخنة", "3ein el sokhna", "sokhna", "ain sokhna"],
+        "el_alamein": ["العلمين", "alamein", "el 3lamein"],
+        "ras_el_hekma": ["رأس الحكمة", "راس الحكمة", "ras el hekma", "ras hekma"]
+      }
+    },
+    {
+      "entity": "unit_type",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Unit.unitType / ProjectUnitSpec.unitType — free string, not a hard enum, by explicit design (src/domain/types.ts comment: 'Free string, matching Unit.unitType's convention — never a hard enum.')",
+      "description": "Type of real-estate unit.",
+      "common_values": [
+        "apartment", "studio", "duplex", "penthouse", "villa", "twin_house",
+        "town_house", "standalone_villa", "chalet", "cabin", "office",
+        "clinic", "retail_shop", "commercial_unit", "administrative_unit",
+        "medical_unit", "roof", "ground_with_garden"
+      ],
+      "arabic_labels": {
+        "apartment": "شقة", "studio": "استوديو", "duplex": "دوبلكس",
+        "penthouse": "بنتهاوس", "villa": "فيلا", "twin_house": "توين هاوس",
+        "town_house": "تاون هاوس", "standalone_villa": "فيلا ستاند الون",
+        "chalet": "شاليه", "office": "مكتب اداري", "clinic": "عيادة",
+        "retail_shop": "محل تجاري", "commercial_unit": "وحدة تجارية",
+        "roof": "روف"
+      }
+    },
+    {
+      "entity": "unit_code",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Unit.unitCode (src/domain/types.ts)",
+      "description": "Alphanumeric unit identifier, e.g. 'B2-304', 'وحدة رقم ٤٥'."
+    },
+    {
+      "entity": "unit_area_sqm",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Unit.areaSqm (src/domain/types.ts)",
+      "description": "Built-up/sellable area in square meters."
+    },
+    {
+      "entity": "land_area_sqm",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Project.landAreaFromSqm / landAreaToSqm, ProjectUnitSpec.landAreaFromSqm/landAreaToSqm",
+      "description": "Land/plot area in square meters, mainly for villas/townhouses/standalones."
+    },
+    {
+      "entity": "bedrooms",
+      "value_type": "integer",
+      "vocabulary": "numeric",
+      "grounding": "Unit.bedrooms / ProjectUnitSpec.bedrooms",
+      "description": "Number of bedrooms, e.g. 'غرفتين', '3 bedrooms', '2BR'."
+    },
+    {
+      "entity": "bathrooms",
+      "value_type": "integer",
+      "vocabulary": "numeric",
+      "grounding": "Unit.bathrooms (src/domain/types.ts)",
+      "description": "Number of bathrooms."
+    },
+    {
+      "entity": "floor",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Unit.floor (src/domain/types.ts)",
+      "description": "Floor level, e.g. 'الدور الأرضي', 'ground floor', '3rd floor', 'دور 5'."
+    },
+    {
+      "entity": "view",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Unit.view (free text, no hard enum)",
+      "description": "Unit view/orientation feature.",
+      "common_values": ["garden_view", "sea_view", "lagoon_view", "landscape_view", "street_view", "pool_view", "golf_view"],
+      "arabic_labels": {"garden_view": "فيو جاردن", "sea_view": "فيو بحر", "lagoon_view": "فيو لاجون", "landscape_view": "فيو لاندسكيب"}
+    },
+    {
+      "entity": "finishing_type",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Project.finishingType / Unit.finishingType (free string, unit overrides project)",
+      "description": "Finishing level of the unit.",
+      "common_values": ["fully_finished", "semi_finished", "core_and_shell", "lux_finished", "with_ac"],
+      "arabic_labels": {"fully_finished": "تشطيب كامل", "semi_finished": "نص تشطيب", "core_and_shell": "كور اند شل", "lux_finished": "سوبر لوكس"}
+    },
+    {
+      "entity": "budget_min",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "search_units / search_projects filters (ai-agent.service.ts tool params)",
+      "description": "Lower bound of the customer's stated budget, in EGP unless another currency is specified."
+    },
+    {
+      "entity": "budget_max",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "search_units / search_projects filters (ai-agent.service.ts tool params)",
+      "description": "Upper bound of the customer's stated budget."
+    },
+    {
+      "entity": "list_price",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Unit.listPrice (src/domain/types.ts)",
+      "description": "Quoted/listed total unit price."
+    },
+    {
+      "entity": "down_payment_percent",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "PaymentPlanTemplate down-payment terms",
+      "description": "Down payment as a percentage of total price, e.g. 'مقدم 10%', '15% down payment'."
+    },
+    {
+      "entity": "down_payment_amount",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "PaymentPlanTemplate / Offer payment schedule",
+      "description": "Down payment as an absolute amount."
+    },
+    {
+      "entity": "installment_amount",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "PaymentScheduleLine.amount",
+      "description": "Periodic installment amount."
+    },
+    {
+      "entity": "payment_duration_years",
+      "value_type": "integer",
+      "vocabulary": "numeric",
+      "grounding": "PaymentPlanTemplate installment years",
+      "description": "Total number of years over which installments are paid, e.g. 'على 8 سنين', 'over 10 years'."
+    },
+    {
+      "entity": "payment_frequency",
+      "value_type": "string",
+      "vocabulary": "closed_enum",
+      "grounding": "PaymentFrequency (src/domain/types.ts): 'monthly' | 'quarterly' | 'semiannual' | 'annual' | 'custom'",
+      "canonical_values": ["monthly", "quarterly", "semiannual", "annual", "custom"],
+      "arabic_labels": {"monthly": "شهري", "quarterly": "كل 3 شهور", "semiannual": "نص سنوي", "annual": "سنوي"}
+    },
+    {
+      "entity": "cash_discount_percent",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "PaymentPlanTemplate cash-payment discount terms",
+      "description": "Discount offered for full cash payment, e.g. 'خصم كاش 15%'."
+    },
+    {
+      "entity": "maintenance_fee_percent",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Project/Unit maintenance fee terms",
+      "description": "Maintenance deposit, usually a percentage of unit price."
+    },
+    {
+      "entity": "club_fee",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Project club/facilities fee terms",
+      "description": "Club membership/facilities fee amount."
+    },
+    {
+      "entity": "delivery_date",
+      "value_type": "date",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Project.deliveryDate / Unit delivery terms",
+      "description": "Expected handover/delivery date, e.g. 'التسليم 2027', 'delivery Q4 2026'."
+    },
+    {
+      "entity": "delivery_year",
+      "value_type": "integer",
+      "vocabulary": "numeric",
+      "grounding": "Derived from Project.deliveryDate",
+      "description": "Handover year only, when the customer only mentions a year."
+    },
+    {
+      "entity": "parking",
+      "value_type": "boolean_or_string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Unit facilities/features text",
+      "description": "Whether a parking spot is included/requested, e.g. 'فيه جراج؟', 'with parking'."
+    },
+    {
+      "entity": "unit_status",
+      "value_type": "string",
+      "vocabulary": "closed_enum",
+      "grounding": "UnitStatus (src/domain/types.ts): 'available' | 'held' | 'reserved' | 'contracted' | 'cancelled'",
+      "canonical_values": ["available", "held", "reserved", "contracted", "cancelled"],
+      "arabic_labels": {"available": "متاحة", "held": "محجوزة مؤقت", "reserved": "محجوزة", "contracted": "متعاقد عليها", "cancelled": "ملغية"}
+    },
+    {
+      "entity": "lead_name",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Lead.name (src/domain/types.ts)",
+      "description": "Customer/lead's personal name."
+    },
+    {
+      "entity": "lead_id",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Lead.id",
+      "description": "Internal lead identifier, when referenced explicitly (e.g. copy-pasted from a CRM link)."
+    },
+    {
+      "entity": "phone_number",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Lead.phone (src/domain/types.ts)",
+      "description": "Customer phone number, Egyptian mobile format (010/011/012/015 + 8 digits) most common."
+    },
+    {
+      "entity": "lead_source",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Lead.source / Campaign channel attribution",
+      "description": "Where the lead originated, e.g. 'فيسبوك', 'facebook ad', 'referral', 'walk-in', 'exhibition'."
+    },
+    {
+      "entity": "broker_name",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "BrokerCompany / broker-attributed Lead fields",
+      "description": "Name of an individual real-estate broker/agent."
+    },
+    {
+      "entity": "broker_company",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "BrokerCompany.name (src/domain/types.ts)",
+      "description": "Name of a brokerage firm."
+    },
+    {
+      "entity": "offer_id",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Offer.id (evolved from Quotation, src/domain/types.ts)",
+      "description": "Identifier for a generated price offer/quotation."
+    },
+    {
+      "entity": "quotation_status",
+      "value_type": "string",
+      "vocabulary": "closed_enum",
+      "grounding": "QuotationStatus (src/domain/types.ts): 'draft' | 'generated' | 'sent' | 'accepted' | 'expired' | 'cancelled'",
+      "canonical_values": ["draft", "generated", "sent", "accepted", "expired", "cancelled"]
+    },
+    {
+      "entity": "reservation_id",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Reservation.id (src/domain/types.ts)",
+      "description": "Identifier for a unit reservation."
+    },
+    {
+      "entity": "reservation_status",
+      "value_type": "string",
+      "vocabulary": "closed_enum",
+      "grounding": "ReservationStatus (src/domain/types.ts): 'active' | 'converted' | 'cancelled'",
+      "canonical_values": ["active", "converted", "cancelled"]
+    },
+    {
+      "entity": "contract_status",
+      "value_type": "string",
+      "vocabulary": "closed_enum",
+      "grounding": "ContractStatus (src/domain/types.ts)",
+      "canonical_values": ["draft", "pending_approval", "signed", "cancelled", "terminated"]
+    },
+    {
+      "entity": "crm_stage",
+      "value_type": "string",
+      "vocabulary": "closed_enum_configurable",
+      "grounding": "CrmStage.key — the 12 default-seeded stages in src/modules/crm/crm-stage.service.ts DEFAULT_STAGES; company admins may rename/add stages, so this list is the shipped default, not a hard backend enum.",
+      "canonical_values": [
+        "fresh", "no_answer", "follow_up", "meeting", "offers", "reservations",
+        "contacts", "follow_up_after_meeting", "cancellation", "not_interested",
+        "hold", "cold_call"
+      ],
+      "arabic_labels": {
+        "fresh": "ليدز جديدة", "no_answer": "ما ردش", "follow_up": "متابعة",
+        "meeting": "ميتنج", "offers": "عروض", "reservations": "حجوزات",
+        "contacts": "تم التواصل / فوز", "follow_up_after_meeting": "متابعة بعد الميتنج",
+        "cancellation": "إلغاء", "not_interested": "مش مهتم", "hold": "هولد",
+        "cold_call": "كولد كول"
+      }
+    },
+    {
+      "entity": "lead_priority",
+      "value_type": "string",
+      "vocabulary": "closed_enum",
+      "grounding": "Lead.priority (matches MaintenancePriority convention): 'low' | 'medium' | 'high' | 'urgent'",
+      "canonical_values": ["low", "medium", "high", "urgent"]
+    },
+    {
+      "entity": "channel",
+      "value_type": "string",
+      "vocabulary": "closed_enum",
+      "grounding": "MessageChannel (src/domain/types.ts): 'internal' | 'email' | 'whatsapp' | 'sms' | 'call' | 'note'",
+      "canonical_values": ["internal", "email", "whatsapp", "sms", "call", "note"],
+      "arabic_labels": {"whatsapp": "واتساب", "call": "مكالمة", "email": "ايميل", "sms": "رسالة نصية", "note": "ملاحظة"}
+    },
+    {
+      "entity": "date_time",
+      "value_type": "datetime",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Generic ISO datetime fields (Task.dueAt, meeting scheduling, follow-up scheduling)",
+      "description": "A date/time expression, absolute ('الاتنين الجاي الساعة 4') or relative ('بكرة', 'tomorrow', 'next week')."
+    },
+    {
+      "entity": "currency",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Monetary amounts default to EGP across ACTIVE; other currencies appear only in investor-facing/USD-pegged pricing contexts.",
+      "common_values": ["EGP", "USD"],
+      "arabic_labels": {"EGP": "جنيه", "USD": "دولار"}
+    },
+    {
+      "entity": "roi_percent",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Not a stored backend field — appears only in investment-language conversational entries (informational, not system_action).",
+      "description": "Return-on-investment percentage the customer asks about or is quoted."
+    },
+    {
+      "entity": "rental_yield_percent",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Not a stored backend field — investment-language conversational entries only.",
+      "description": "Annual rental yield percentage."
+    },
+    {
+      "entity": "task_type",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Task.type (generic tasks/reminders/follow-ups module)",
+      "description": "Kind of task/reminder being created, e.g. 'follow_up_call', 'send_offer', 'schedule_meeting'."
+    },
+    {
+      "entity": "employee_name",
+      "value_type": "string",
+      "vocabulary": "open_vocabulary",
+      "grounding": "Employee.name — used when assigning/reassigning a lead or task to a specific team member.",
+      "description": "Sales agent / manager / team member name."
+    },
+    {
+      "entity": "amount_egp",
+      "value_type": "number",
+      "vocabulary": "numeric",
+      "grounding": "Generic monetary amount (Payment.amount, Contract totals, Offer totals) when no more specific entity applies.",
+      "description": "A plain Egyptian-pound amount mentioned without further qualification."
+    }
+  ]
+}

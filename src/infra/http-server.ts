@@ -14,11 +14,20 @@ export interface RequestContext {
   params: Record<string, string>;
   query: URLSearchParams;
   body: unknown;
+  /** The exact bytes of the request body, as received, before JSON.parse —
+   * every other route only ever needs `body` (already-parsed JSON); this
+   * exists for the one class of route that must verify a provider's HMAC
+   * signature against its own original bytes (re-serializing the parsed
+   * JSON is not guaranteed byte-identical — different key order, number
+   * formatting, or escaping would silently break verification). Empty
+   * string for a route with no body, and for multipart/form-data bodies
+   * (file-import routes), which never need signature verification. */
+  rawBody: string;
   headers: IncomingMessage['headers'];
   ip: string;
 }
 
-export type RouteHandler = (ctx: RequestContext) => Promise<{ status: number; body?: unknown } | void>;
+export type RouteHandler = (ctx: RequestContext) => Promise<{ status: number; body?: unknown; raw?: boolean } | void>;
 
 interface Route {
   method: HttpMethod;
@@ -115,7 +124,7 @@ export class HttpServer {
     return undefined;
   }
 
-  private async readBody(req: IncomingMessage, maxBodyBytes: number): Promise<unknown> {
+  private async readBody(req: IncomingMessage, maxBodyBytes: number): Promise<{ parsed: unknown; raw: string }> {
     const chunks: Buffer[] = [];
     let total = 0;
     for await (const chunk of req) {
@@ -125,21 +134,22 @@ export class HttpServer {
       }
       chunks.push(chunk as Buffer);
     }
-    if (chunks.length === 0) return undefined;
-    const raw = Buffer.concat(chunks);
+    if (chunks.length === 0) return { parsed: undefined, raw: '' };
+    const buffer = Buffer.concat(chunks);
 
     // Multipart/form-data (real file uploads — Lead/Inventory/Payment
-    // import routes) never goes through JSON.parse; everything else on
-    // this hand-written server is JSON as before.
+    // import routes) never goes through JSON.parse, and has no meaningful
+    // single "raw body" string (binary parts) — no current caller needs
+    // signature verification over a multipart body.
     const contentType = req.headers['content-type'] ?? '';
     if (contentType.startsWith('multipart/form-data')) {
-      return parseMultipart(raw, contentType);
+      return { parsed: parseMultipart(buffer, contentType), raw: '' };
     }
 
-    const text = raw.toString('utf8');
-    if (!text.trim()) return undefined;
+    const text = buffer.toString('utf8');
+    if (!text.trim()) return { parsed: undefined, raw: text };
     try {
-      return JSON.parse(text);
+      return { parsed: JSON.parse(text), raw: text };
     } catch {
       throw new HttpError(400, 'invalid JSON body');
     }
@@ -151,7 +161,22 @@ export class HttpServer {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      // img-src allows https: (not just 'self'/data:) because several
+      // fields (Developer.logoUrl, Project.imageUrls/coverImageUrl/
+      // masterPlanImageUrl, Unit.floorPlanImageUrl) are documented as
+      // "paste an already-hosted URL" — this system has no object-storage
+      // upload pipeline, so those images live on whatever external host
+      // the developer already uses. img-src can't execute script, so this
+      // stays a narrow, image-only relaxation. style-src/font-src name the
+      // two Google Fonts hosts specifically (not a broad https:) for the
+      // Inter webfont <link> in index.html — same narrow-allowlist pattern.
+      // blob: is also allowed for img-src only — real uploaded Project
+      // media (see infra/file-storage.ts) is served back as base64 JSON,
+      // never raw bytes, so the frontend decodes it into a same-origin
+      // Blob and renders that via a blob: object URL; blob: cannot be used
+      // to load a remote image, so this doesn't reopen the restriction
+      // img-src https: already represents.
+      "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:",
     );
     if (this.options.nodeEnv === 'production') {
       res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
@@ -192,6 +217,11 @@ export class HttpServer {
       const contents = await readFile(filePath);
       const contentType = CONTENT_TYPES[extname(filePath)] ?? 'application/octet-stream';
       res.setHeader('Content-Type', contentType);
+      // Asset filenames carry no content hash/version, so a "cached" response
+      // here is indistinguishable from a stale one after a deploy — always
+      // revalidate rather than let a browser (mobile Safari especially) keep
+      // serving yesterday's JS/CSS indefinitely.
+      res.setHeader('Cache-Control', 'no-cache');
       res.writeHead(200);
       res.end(contents);
       return true;
@@ -210,12 +240,23 @@ export class HttpServer {
     this.applySecurityHeaders(res);
     this.applyCors(req, res);
 
-    const finish = (status: number, body?: unknown) => {
+    const finish = (status: number, body?: unknown, raw?: boolean) => {
       const durationMs = Date.now() - start;
       logRequest({ ts: new Date().toISOString(), method, path, status, durationMs, ip });
       if (method === 'HEAD' || body === undefined) {
         res.writeHead(status);
         res.end();
+        return;
+      }
+      // Opt-in plain-text response — only Meta's webhook verification
+      // handshake needs this (it compares the response body to
+      // hub.challenge byte-for-byte; a JSON-quoted string would never
+      // match). Every other route leaves `raw` unset and gets the
+      // existing JSON encoding, unchanged.
+      if (raw && typeof body === 'string') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.writeHead(status);
+        res.end(body);
         return;
       }
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -250,18 +291,20 @@ export class HttpServer {
         throw new HttpError(404, 'not found');
       }
 
-      const body = method === 'POST' || method === 'PATCH' ? await this.readBody(req, match.route.maxBodyBytes ?? MAX_BODY_BYTES) : undefined;
+      const { parsed: body, raw: rawBody } =
+        method === 'POST' || method === 'PATCH' ? await this.readBody(req, match.route.maxBodyBytes ?? MAX_BODY_BYTES) : { parsed: undefined, raw: '' };
       const ctx: RequestContext = {
         method,
         path,
         params: match.params,
         query: url.searchParams,
         body,
+        rawBody,
         headers: req.headers,
         ip,
       };
       const result = await match.route.handler(ctx);
-      finish(result?.status ?? 204, result?.body);
+      finish(result?.status ?? 204, result?.body, result?.raw);
     } catch (err) {
       const status = err instanceof HttpError ? err.status : 500;
       const durationMs = Date.now() - start;

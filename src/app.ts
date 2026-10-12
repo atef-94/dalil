@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   ActionName,
   AgentDecision,
@@ -13,8 +14,12 @@ import type {
   CommunicationDeliveryEvent,
   DocumentExtractedField,
   DocumentExtractionRun,
+  FacebookLeadEvent,
   IntegrationConnection,
   IntegrationEvent,
+  Invitation,
+  RevokedToken,
+  PasswordResetToken,
   AuditLogEntry,
   Branch,
   BrokerCompany,
@@ -30,6 +35,8 @@ import type {
   Employee,
   Lead,
   LeadDistributionPool,
+  LeadInterestType,
+  LeadSourceChannel,
   LeaveRequest,
   LegalDocument,
   MaintenanceTicket,
@@ -47,6 +54,9 @@ import type {
   Facility,
   Consultant,
   SalesPhoneNumber,
+  ProjectUnitSpec,
+  ProjectFavorite,
+  FileAsset,
   ActionApproval,
   ApprovableActionType,
   DiscountApprovalPolicy,
@@ -77,6 +87,8 @@ import type {
 } from './domain/types.js';
 import { netContractValue } from './domain/money.js';
 import type { DatabaseSync } from 'node:sqlite';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { InMemoryRepository, type Repository } from './infra/repository.js';
 import { SqliteRepository } from './infra/sqlite-repository.js';
 import { HttpServer, type RequestContext } from './infra/http-server.js';
@@ -88,8 +100,9 @@ import { runImport, SkipRow } from './infra/csv-import.js';
 import { AuditLog } from './infra/audit-log.js';
 import { verifyToken } from './infra/security.js';
 import { HttpError, TokenError, ValidationError, ForbiddenError, NotFoundError } from './infra/errors.js';
-import { seedDemoData } from './infra/seed.js';
+import { seedDemoData, lockDemoData, seedPlatformOwners } from './infra/seed.js';
 import { EventBus, type DomainEvent } from './infra/event-bus.js';
+import { FileStorageService } from './infra/file-storage.js';
 
 import { RbacEvaluator } from './modules/permissions/rbac.evaluator.js';
 import { buildPermissionManifest } from './modules/permissions/manifest.builder.js';
@@ -109,6 +122,9 @@ import { SalesCommissionService } from './modules/commissions/sales-commission.s
 import { ApprovalEngineService } from './modules/approvals/approval-engine.service.js';
 import { RoleManagementService } from './modules/permissions/role-management.service.js';
 import { OnboardingService } from './modules/onboarding/onboarding.service.js';
+import { InvitationService } from './modules/organization/invitation.service.js';
+import { PlatformAdminService } from './modules/platform/platform-admin.service.js';
+import { isPlatformOwner } from './modules/permissions/platform-owner.js';
 import { HrService } from './modules/hr/hr.service.js';
 import { OperationsService } from './modules/operations/operations.service.js';
 import { LegalService } from './modules/legal/legal.service.js';
@@ -127,14 +143,24 @@ import { AiWorkflowService } from './modules/ai/ai-workflow.service.js';
 import { IntegrationService } from './modules/integrations/integration.service.js';
 import { SignatureService } from './modules/integrations/e-signature.service.js';
 import { CommunicationDeliveryService } from './modules/integrations/communication-delivery.service.js';
+import { FacebookLeadsService } from './modules/integrations/facebook-leads.service.js';
 import { ForecastingService } from './modules/forecasting/forecasting.service.js';
 import { ScenarioSimulationService } from './modules/forecasting/scenario-simulation.service.js';
 import { ImportSessionService } from './modules/imports/import-session.service.js';
 import { LeadImportService, LEAD_IMPORT_FIELDS } from './modules/crm/lead-import.service.js';
 import { PaymentImportService, PAYMENT_IMPORT_FIELDS } from './modules/finance/payment-import.service.js';
-import { InventoryImportService, INVENTORY_IMPORT_FIELDS, type InventoryImportOptions } from './modules/inventory/inventory-import.service.js';
+import {
+  InventoryImportService,
+  INVENTORY_IMPORT_FIELDS,
+  CATALOG_IMPORT_FIELDS,
+  AVAILABILITY_IMPORT_FIELDS,
+  CATALOG_ANCHOR_KEYS,
+  AVAILABILITY_ANCHOR_KEYS,
+  type InventoryImportOptions,
+} from './modules/inventory/inventory-import.service.js';
+import { classifySheet } from './infra/field-mapping.js';
 import { DocumentIntelligenceService } from './modules/documents/document-intelligence.service.js';
-import { QuotationService } from './modules/quotations/quotation.service.js';
+import { QuotationService, type ManualUnitInput, type InlineTermsInput } from './modules/quotations/quotation.service.js';
 import { buildQuotationWorkbook, buildQuotationPrintHtml } from './modules/quotations/quotation-export.service.js';
 import { buildOfferPdf, fetchOfferImages } from './modules/quotations/offer-pdf.service.js';
 import { IMPORT_MAX_BODY_BYTES } from './infra/http-server.js';
@@ -171,6 +197,38 @@ export interface AppOptions {
    * request). Only set true when genuinely deployed behind a trusted single
    * reverse proxy. */
   trustProxy?: boolean;
+  /** Directory real uploaded project media (cover image, master plan,
+   * gallery, brochure) is written to — see FileStorageService. Omit (as
+   * the test suite does) for a disposable OS temp directory; main.ts
+   * passes a real path on the same persistent volume the SQLite file
+   * itself lives on. */
+  fileStorageDir?: string;
+  /** The two, and only two, platform-owner email addresses (see
+   * modules/permissions/platform-owner.ts). Never hardcoded, never
+   * frontend-exposed — read from OWNER_EMAIL_1/OWNER_EMAIL_2 by main.ts.
+   * Omit (as most tests do) to skip bootstrapping owner accounts entirely;
+   * required in production (see assertProductionSafety below). */
+  ownerEmail1?: string;
+  ownerEmail2?: string;
+  /** Initial passwords for the two owner accounts, used only the first
+   * time each account is bootstrapped (seedPlatformOwners never overwrites
+   * an existing owner's password on a later boot). Never logged, never
+   * returned by any route. */
+  ownerPassword1?: string;
+  ownerPassword2?: string;
+  /** Meta App Secret for the Facebook Instant Lead Forms integration —
+   * verifies the X-Hub-Signature-256 header on every inbound leadgen
+   * webhook delivery. Omit to leave the integration unconfigured (every
+   * webhook delivery is then rejected with 403, never silently accepted
+   * unverified — see FacebookLeadsService.verifySignature). Not required
+   * in production: unlike the owner credentials, not every tenant uses
+   * this integration. */
+  facebookAppSecret?: string;
+  /** The verify_token this deployment and the Meta Developer Console's
+   * webhook subscription form must agree on for the one-time GET
+   * verification handshake. Omit to leave the handshake always failing —
+   * same fail-closed default as facebookAppSecret. */
+  facebookWebhookVerifyToken?: string;
 }
 
 export interface Application {
@@ -201,6 +259,8 @@ export interface Application {
     auditLog: AuditLog;
     roleManagement: RoleManagementService;
     onboarding: OnboardingService;
+    invitations: InvitationService;
+    platformAdmin: PlatformAdminService;
     hr: HrService;
     operations: OperationsService;
     legal: LegalService;
@@ -220,6 +280,7 @@ export interface Application {
     aiWorkflow: AiWorkflowService;
     integrations: IntegrationService;
     signatures: SignatureService;
+    facebookLeads: FacebookLeadsService;
     /** Sweeps overdue payment schedule lines AND emits one
      * `payment.overdue_swept` domain event per swept line — use this
      * instead of `finance.sweepOverdue()` wherever the sweep should also
@@ -241,6 +302,11 @@ export interface Application {
      * sweepOverdueAndEmit/sweepSlaBreachesAndEmit above, including the
      * optional `companyId` rule. */
     sweepExpiredReservationsAndEmit: (companyId?: string) => Promise<number>;
+    /** Prunes RevokedToken rows past their own expiresAt — a token that old
+     * could never be replayed anyway (its 12h TTL is already up), so the
+     * row is pure bookkeeping at that point. Unscoped by design (it isn't a
+     * tenant-data query, just storage hygiene). */
+    sweepExpiredRevokedTokens: () => Promise<number>;
   };
   seedResult?: Awaited<ReturnType<typeof seedDemoData>>;
 }
@@ -261,6 +327,9 @@ function buildRepos(db?: DatabaseSync) {
     facilities: repo<Facility>('facilities'),
     consultants: repo<Consultant>('consultants'),
     salesPhoneNumbers: repo<SalesPhoneNumber>('sales_phone_numbers'),
+    projectUnitSpecs: repo<ProjectUnitSpec>('project_unit_specs'),
+    projectFavorites: repo<ProjectFavorite>('project_favorites'),
+    fileAssets: repo<FileAsset>('file_assets'),
     users: repo<User>('users'),
     roles: repo<Role>('roles'),
     grants: repo<PermissionGrant>('permission_grants'),
@@ -307,6 +376,7 @@ function buildRepos(db?: DatabaseSync) {
     integrationConnections: repo<IntegrationConnection>('integration_connections'),
     integrationEvents: repo<IntegrationEvent>('integration_events'),
     communicationDeliveryEvents: repo<CommunicationDeliveryEvent>('communication_delivery_events'),
+    facebookLeadEvents: repo<FacebookLeadEvent>('facebook_lead_events'),
     leadDistributionPools: repo<LeadDistributionPool>('lead_distribution_pools'),
     salesCommissionRules: repo<SalesCommissionRule>('sales_commission_rules'),
     salesCommissions: repo<SalesCommission>('sales_commissions'),
@@ -318,6 +388,9 @@ function buildRepos(db?: DatabaseSync) {
     aiWorkflowRuns: repo<AiWorkflowRun>('ai_workflow_runs'),
     aiWorkflowStepRuns: repo<AiWorkflowStepRun>('ai_workflow_step_runs'),
     signatureEnvelopes: repo<SignatureEnvelope>('signature_envelopes'),
+    invitations: repo<Invitation>('invitations'),
+    revokedTokens: repo<RevokedToken>('revoked_tokens'),
+    passwordResetTokens: repo<PasswordResetToken>('password_reset_tokens'),
   };
 }
 
@@ -325,6 +398,11 @@ interface Actor {
   userId: string;
   companyId: string;
   userType: string;
+  /** Only set for a real bearer-token request (absent for the dev x-demo-user
+   * bypass, which has no underlying token to revoke). Lets logout() revoke
+   * exactly this session — see RevokedToken. */
+  jti?: string;
+  tokenExp?: number;
 }
 
 async function resolveActor(
@@ -332,13 +410,37 @@ async function resolveActor(
   users: Repository<User>,
   tokenSecret: string,
   nodeEnv: string,
+  revokedTokens: Repository<RevokedToken>,
+  companies: Repository<Company>,
 ): Promise<Actor> {
   const authHeader = ctx.headers.authorization;
   if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice('Bearer '.length);
     try {
       const payload = verifyToken(token, tokenSecret);
-      return { userId: payload.sub, companyId: payload.companyId, userType: payload.userType };
+      // Two independent revocation checks (see RevokedToken/sessionsRevokedBefore
+      // doc comments in domain/types.ts for why there are two): a specific
+      // token killed by logout, or every token for this user killed at once
+      // by an admin/owner (forced logout after a password change, breach
+      // response, migration cleanup).
+      const user = await users.findById(payload.sub);
+      if (!user) throw new TokenError('invalid or expired token');
+      // <= (not <): sessionsRevokedBefore has only whole-second resolution
+      // (via iat), so a token issued in the very same second as the revoke
+      // call must still be treated as revoked, not waved through by a tie.
+      if (user.sessionsRevokedBefore && payload.iat <= Math.floor(Date.parse(user.sessionsRevokedBefore) / 1000)) {
+        throw new TokenError('session has been revoked');
+      }
+      const [revoked] = await revokedTokens.findAll((r) => r.jti === payload.jti);
+      if (revoked) throw new TokenError('session has been revoked');
+      // A suspended tenant blocks every token for every one of its users
+      // immediately, not just future logins — otherwise a session issued
+      // before the suspension would keep working for up to its full 12h
+      // TTL, which is exactly the gap mandatory proof point 8 ("suspended
+      // sessions cannot continue accessing protected resources") rules out.
+      const company = await companies.findById(payload.companyId);
+      if (company?.status === 'suspended') throw new TokenError('this company has been suspended');
+      return { userId: payload.sub, companyId: payload.companyId, userType: payload.userType, jti: payload.jti, tokenExp: payload.exp };
     } catch {
       throw new TokenError('invalid or expired token');
     }
@@ -370,6 +472,15 @@ export async function assertProductionSafety(options: AppOptions): Promise<void>
     if (!options.tokenSecret || options.tokenSecret === 'dev-secret') {
       throw new Error('refusing to boot in production without a real TOKEN_SECRET');
     }
+    if (!options.ownerEmail1 || !options.ownerEmail2) {
+      throw new Error('refusing to boot in production without OWNER_EMAIL_1 and OWNER_EMAIL_2 configured');
+    }
+    if (options.ownerEmail1.trim().toLowerCase() === options.ownerEmail2.trim().toLowerCase()) {
+      throw new Error('OWNER_EMAIL_1 and OWNER_EMAIL_2 must be distinct');
+    }
+    if (!options.ownerPassword1 || !options.ownerPassword2) {
+      throw new Error('refusing to boot in production without OWNER_PASSWORD_1 and OWNER_PASSWORD_2 configured');
+    }
     if (!options.db) {
       process.stderr.write('WARNING: no persistent database configured — data will not survive a restart.\n');
     } else if (!process.env.DATABASE_URL) {
@@ -393,13 +504,23 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
   const auditLog = new AuditLog(repos.auditEntries);
   const organization = new OrganizationService(repos.companies, repos.employees, repos.branches, repos.departments);
-  const auth = new AuthService(repos.users, options.tokenSecret);
+  const auth = new AuthService(repos.users, options.tokenSecret, repos.companies, options.secretStoreKey ?? options.tokenSecret, repos.passwordResetTokens);
   const crmStages = new CrmStageService(repos.crmStages);
   const crm = new CrmService(repos.leads, crmStages);
   const importSessions = new ImportSessionService(repos.importSessions);
   const leadImport = new LeadImportService(repos.leads, repos.users, crm);
   const leadDistribution = new LeadDistributionService(repos.leadDistributionPools, repos.users, repos.employees, repos.leads, crm, crmStages);
-  const leadTimeline = new LeadTimelineService(repos.leads, repos.auditEntries, repos.messages, repos.tasks, repos.opportunities, repos.contracts);
+  const leadTimeline = new LeadTimelineService(
+    repos.leads,
+    repos.auditEntries,
+    repos.messages,
+    repos.tasks,
+    repos.opportunities,
+    repos.contracts,
+    repos.users,
+    repos.employees,
+    repos.reservations,
+  );
   const inventory = new InventoryService(
     repos.units,
     repos.unitHolds,
@@ -411,19 +532,25 @@ export async function buildApplication(options: AppOptions): Promise<Application
     repos.facilities,
     repos.consultants,
     repos.salesPhoneNumbers,
+    repos.projectUnitSpecs,
+    repos.projectFavorites,
   );
   const inventoryImport = new InventoryImportService(inventory);
+  const fileStorage = new FileStorageService(options.fileStorageDir ?? join(tmpdir(), 'active-os-uploads'), repos.fileAssets);
   const documentIntelligence = new DocumentIntelligenceService(repos.documentExtractionRuns, repos.documentExtractedFields, inventoryImport);
   const paymentPlans = new PaymentPlansService(repos.templates, repos.scheduleLines);
-  const quotations = new QuotationService(repos.quotations, repos.units, paymentPlans);
+  const quotations = new QuotationService(repos.quotations, repos.units, repos.projects, paymentPlans);
   const sales = new SalesService(repos.opportunities, repos.contracts, inventory, paymentPlans, repos.discountApprovalPolicies);
   const approvalEngine = new ApprovalEngineService(repos.actionApprovals, rbac);
   const finance = new FinanceService(repos.payments, repos.receipts, repos.scheduleLines, repos.refunds);
   const paymentImport = new PaymentImportService(repos.leads, inventory, sales, paymentPlans, finance);
-  const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm);
+  const brokers = new BrokersService(repos.brokerCompanies, repos.brokerLeads, repos.commissionRules, repos.commissions, crm, repos.contracts, repos.reservations);
   const salesCommissions = new SalesCommissionService(repos.salesCommissionRules, repos.salesCommissions, repos.employees, repos.users);
-  const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles);
+  const roleManagement = new RoleManagementService(repos.roles, repos.grants, repos.userRoles, rbac);
   const onboarding = new OnboardingService(organization, auth, roleManagement, crmStages);
+  const invitations = new InvitationService(repos.invitations, repos.roles, organization, auth, roleManagement);
+  const platformAdmin = new PlatformAdminService(onboarding, repos.companies, auditLog);
+  const ownerEmails: [string, string] = [options.ownerEmail1 ?? '', options.ownerEmail2 ?? ''];
   const hr = new HrService(repos.leaveRequests, repos.employees);
   const operations = new OperationsService(repos.maintenanceTickets, repos.units);
   const legal = new LegalService(repos.legalDocuments, repos.contracts);
@@ -556,6 +683,27 @@ export async function buildApplication(options: AppOptions): Promise<Application
       crmStages: repos.crmStages,
       leads: repos.leads,
     });
+  } else {
+    // Demo seeding was just turned off on a deployment that may already
+    // have a persisted demo login from before — lock it out rather than
+    // leaving the old, publicly-documented password live. See lockDemoData.
+    await lockDemoData({ users: repos.users });
+  }
+
+  // Platform-owner bootstrap — additive and independent of demo seeding
+  // above. Only runs when both owner emails are configured (most tests omit
+  // them entirely); production refuses to boot without them, enforced by
+  // assertProductionSafety above.
+  if (options.ownerEmail1 && options.ownerEmail2 && options.ownerPassword1 && options.ownerPassword2) {
+    await seedPlatformOwners(
+      { companies: repos.companies, users: repos.users },
+      {
+        ownerEmail1: options.ownerEmail1,
+        ownerEmail2: options.ownerEmail2,
+        ownerPassword1: options.ownerPassword1,
+        ownerPassword2: options.ownerPassword2,
+      },
+    );
   }
 
   const globalRateLimiter = new SlidingWindowRateLimiter(options.rateLimitWindowMs ?? 60_000, options.rateLimitMax ?? 300);
@@ -569,7 +717,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     trustProxy: options.trustProxy ?? false,
   });
 
-  const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv);
+  const actorOf = (ctx: RequestContext) => resolveActor(ctx, repos.users, options.tokenSecret, options.nodeEnv, repos.revokedTokens, repos.companies);
 
   // Fires every event-triggered workflow synchronously (so an automation's
   // side effects, e.g. a created task, are visible by the time the request
@@ -586,6 +734,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
       process.stderr.write(`automation event emission failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   };
+
+  const facebookLeads = new FacebookLeadsService(
+    { connections: repos.integrationConnections, events: repos.facebookLeadEvents },
+    integrations,
+    crm,
+    auditLog,
+    emitEvent,
+    options.facebookAppSecret,
+    options.facebookWebhookVerifyToken,
+  );
 
   // Shared by the manual sweep route below and main.ts's periodic tick, so
   // both paths emit the same `payment.overdue_swept` event per line instead
@@ -632,6 +790,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
         payload: { ...reservation },
         dedupeKey: `reservation.expired:${reservation.id}`,
       });
+    }
+    return expired.length;
+  };
+
+  const sweepExpiredRevokedTokens = async (): Promise<number> => {
+    const now = Date.now();
+    const expired = await repos.revokedTokens.findAll((r) => Date.parse(r.expiresAt) <= now);
+    for (const row of expired) {
+      await repos.revokedTokens.deleteById(row.id);
     }
     return expired.length;
   };
@@ -805,19 +972,204 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
 
   httpServer.post('/api/auth/login', async (ctx) => {
-    const body = parseJsonBody<{ companyId: string; email: string; password: string }>(ctx.body);
+    const body = parseJsonBody<{ companyId: string; email: string; password: string; totpCode?: string }>(ctx.body);
     if (!body.companyId?.trim()) throw new ValidationError('companyId is required');
-    const { token, user } = await auth.login({ companyId: body.companyId, email: body.email, password: body.password });
-    return { status: 200, body: { token, userId: user.id, userType: user.userType, companyId: user.companyId } };
+    // When the account has MFA enabled and no code was sent, auth.login()
+    // throws TokenError('mfa_required') — the body serializes to exactly
+    // {"error":"mfa_required"}, which the client re-submits this same call
+    // against, with totpCode filled in.
+    const { token, user } = await auth.login({ companyId: body.companyId, email: body.email, password: body.password, totpCode: body.totpCode });
+    // Soft nudge, not a hard gate: an owner in production who hasn't
+    // enrolled MFA yet still gets a token (blocking it here would mean no
+    // owner could ever complete first-time enrollment, since enrollment
+    // itself requires a valid bearer token — an unrecoverable bootstrap
+    // problem with no out-of-band channel in this codebase). The real
+    // enforcement point is that /api/me/mfa/disable refuses to turn MFA
+    // back off for an owner once nodeEnv==='production' (see that route) —
+    // this flag just tells the frontend to steer them to enrollment
+    // immediately rather than leaving it undiscoverable.
+    const mfaSetupRequired = options.nodeEnv === 'production' && isPlatformOwner(user.email, ownerEmails) && !user.totpEnabled;
+    return { status: 200, body: { token, userId: user.id, userType: user.userType, companyId: user.companyId, mfaSetupRequired } };
   });
 
-  // Self-service tenant signup: creates the company, the founding employee,
-  // the user account, and an unrestricted "Owner" role for that user in one
-  // step — the real-users onboarding path (as opposed to the four fixed
-  // demo accounts and low-level /api/auth/register + /api/organization/*).
-  httpServer.post('/api/auth/signup', async (ctx) => {
+  // Auth tokens are stateless, 12-hour-TTL HMAC-signed strings with no
+  // server-side session store, so there is no session row to delete here —
+  // nothing was silently faking revocation before this route existed, there
+  // simply was no server round-trip on logout at all (the frontend only
+  // cleared its local token). This route gives logout a real server-side
+  // effect within that architecture: it requires a still-valid token,
+  // audit-logs the end of the session, and returns success; the frontend
+  // calls it before discarding its local token.
+  httpServer.post('/api/auth/logout', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (actor.jti && actor.tokenExp) {
+      await repos.revokedTokens.save({ id: randomUUID(), jti: actor.jti, expiresAt: new Date(actor.tokenExp * 1000).toISOString() });
+    }
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'logout', resource: 'session', resourceId: actor.userId, metadata: {} });
+    return { status: 200, body: { success: true } };
+  });
+
+  // Force-logout every session a user holds in one write, without needing
+  // to know which jtis are outstanding (see User.sessionsRevokedBefore's own
+  // doc comment) — used for forced logout after a password reset/compromise,
+  // and by the migration-safety step that needs to invalidate sessions.
+  // Self-service (a user can always force-logout their own other sessions)
+  // or gated on edit:employee within the same company, or a platform owner.
+  httpServer.post('/api/users/:id/revoke-sessions', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const targetId = ctx.params.id!;
+    const actorUser = await repos.users.findById(actor.userId);
+    const actorIsOwner = !!actorUser && isPlatformOwner(actorUser.email, ownerEmails);
+
+    if (targetId !== actor.userId && !actorIsOwner && !(await rbac.can(actor.userId, 'edit', 'employee'))) {
+      throw new ForbiddenError('missing edit:employee permission');
+    }
+    const target = await repos.users.findById(targetId);
+    if (!target || (!actorIsOwner && target.companyId !== actor.companyId)) {
+      throw new NotFoundError('user not found');
+    }
+    await repos.users.save({ ...target, sessionsRevokedBefore: new Date().toISOString() });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'session', resourceId: targetId, metadata: { securityAlert: true, event: 'sessions_revoked' } });
+    return { status: 200, body: { success: true } };
+  });
+
+  // ---- Password reset — public, token-gated, no email/SMS provider exists
+  // in this codebase (see the plan's honest-risks section), so the raw
+  // token never goes in this route's own HTTP response (anyone who submits
+  // any email gets the same generic response — putting the token there
+  // would be a direct account-takeover path). It's audit-logged instead, for
+  // an operator to relay out-of-band until a real provider is wired in. ----
+  httpServer.post('/api/auth/password-reset/request', async (ctx) => {
+    const body = parseJsonBody<{ companyId: string; email: string }>(ctx.body);
+    const result = await auth.requestPasswordReset(body.companyId, body.email);
+    if (result) {
+      await auditLog.record({
+        companyId: result.user.companyId, actorUserId: 'system', action: 'create', resource: 'password_reset_token', resourceId: result.user.id,
+        metadata: { securityAlert: true, event: 'password_reset_requested', resetTokenForOperatorRelay: result.rawToken },
+      });
+    }
+    return { status: 200, body: { success: true } };
+  });
+
+  httpServer.post('/api/auth/password-reset/confirm', async (ctx) => {
+    const body = parseJsonBody<{ token: string; newPassword: string }>(ctx.body);
+    const user = await auth.resetPassword(body.token, body.newPassword);
+    await auditLog.record({ companyId: user.companyId, actorUserId: user.id, action: 'edit', resource: 'session', resourceId: user.id, metadata: { securityAlert: true, event: 'password_reset_completed' } });
+    return { status: 200, body: { success: true } };
+  });
+
+  // ---- MFA (TOTP) self-service — any authenticated user manages only their
+  // own account here; there is no admin-on-behalf-of-another-user path. ----
+  httpServer.post('/api/me/mfa/enroll', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const result = await auth.enrollTotp(actor.userId);
+    return { status: 200, body: result };
+  });
+
+  httpServer.post('/api/me/mfa/verify', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const body = parseJsonBody<{ code: string }>(ctx.body);
+    const result = await auth.confirmTotpEnrollment(actor.userId, body.code);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'session', resourceId: actor.userId, metadata: { securityAlert: true, event: 'mfa_enabled' } });
+    return { status: 200, body: result };
+  });
+
+  httpServer.post('/api/me/mfa/recovery-codes', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const recoveryCodes = await auth.regenerateRecoveryCodes(actor.userId);
+    return { status: 200, body: { recoveryCodes } };
+  });
+
+  httpServer.post('/api/me/mfa/disable', async (ctx) => {
+    const actor = await actorOf(ctx);
+    const user = await repos.users.findById(actor.userId);
+    if (options.nodeEnv === 'production' && user && isPlatformOwner(user.email, ownerEmails)) {
+      throw new ForbiddenError('platform owners cannot disable MFA in production');
+    }
+    await auth.disableTotp(actor.userId);
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'edit', resource: 'session', resourceId: actor.userId, metadata: { securityAlert: true, event: 'mfa_disabled' } });
+    return { status: 200, body: { success: true } };
+  });
+
+  // ---- Invitations: the only way (besides platform-owner-initiated tenant
+  // creation below) a new account can be created now that public
+  // self-service signup is gone. See invitation.service.ts's own doc
+  // comment — this never duplicates the create-employee/register/
+  // assign-role chain, only adds a token layer on top of it. ----
+  httpServer.post('/api/organization/invitations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'employee'))) {
+      throw new ForbiddenError('missing create:employee permission');
+    }
+    if (!(await rbac.can(actor.userId, 'assign', 'role'))) {
+      throw new ForbiddenError('missing assign:role permission');
+    }
+    const body = parseJsonBody<{ email: string; roleId: string }>(ctx.body);
+    const { invitation, rawToken } = await invitations.createInvitation({
+      companyId: actor.companyId,
+      email: body.email,
+      roleId: body.roleId,
+      createdByUserId: actor.userId,
+    });
+    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'employee', resourceId: invitation.id, metadata: { invitation: true, email: invitation.email } });
+    // The raw token is only ever returned here, to the admin who created the
+    // invitation — this app has no real email/SMS provider wired in (see the
+    // security-overhaul deliverables report), so the admin is responsible
+    // for sharing the accept link out-of-band until one is configured.
+    return { status: 201, body: { id: invitation.id, email: invitation.email, expiresAt: invitation.expiresAt, token: rawToken } };
+  });
+
+  httpServer.get('/api/organization/invitations', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'employee'))) {
+      throw new ForbiddenError('missing view:employee permission');
+    }
+    const list = await invitations.listInvitations(actor.companyId);
+    return { status: 200, body: paginate(list, ctx.query) };
+  });
+
+  httpServer.delete('/api/organization/invitations/:id', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'employee'))) {
+      throw new ForbiddenError('missing create:employee permission');
+    }
+    await invitations.revokeInvitation(actor.companyId, ctx.params.id!);
+    return { status: 200, body: { success: true } };
+  });
+
+  // Public, token-gated — the accept-page UI's "who is this invite for"
+  // lookup. Never exposes companyId/roleId, only what the UI needs to show.
+  httpServer.get('/api/auth/invitations/:token', async (ctx) => {
+    const result = await invitations.getInvitationByToken(ctx.params.token!);
+    if (!result) throw new NotFoundError('invitation not found, expired, or already used');
+    return { status: 200, body: result };
+  });
+
+  httpServer.post('/api/auth/invitations/:token/accept', async (ctx) => {
+    const body = parseJsonBody<{ fullName: string; password: string; locale?: 'en' | 'ar' }>(ctx.body);
+    const result = await invitations.acceptInvitation({ token: ctx.params.token!, fullName: body.fullName, password: body.password, locale: body.locale });
+    return { status: 201, body: { token: result.token, userId: result.user.id, userType: result.user.userType, companyId: result.user.companyId } };
+  });
+
+  // ---- Platform administration: gated on isPlatformOwner(actor.email)
+  // directly, never through rbac.can() — the tenant-scoped grant system has
+  // no platform concept at all (see platform-owner.ts's own doc comment).
+  // Replaces the old public POST /api/auth/signup and
+  // POST /api/organization/companies as the only way a brand-new tenant
+  // gets created. ----
+  const requirePlatformOwner = async (ctx: RequestContext): Promise<Actor & { email: string }> => {
+    const actor = await actorOf(ctx);
+    const user = await repos.users.findById(actor.userId);
+    if (!user || !isPlatformOwner(user.email, ownerEmails)) {
+      throw new ForbiddenError('platform-owner access required');
+    }
+    return { ...actor, email: user.email };
+  };
+
+  httpServer.post('/api/platform/tenants', async (ctx) => {
+    const owner = await requirePlatformOwner(ctx);
     const body = parseJsonBody<{ companyName: string; fullName: string; email: string; password: string; locale?: 'en' | 'ar' }>(ctx.body);
-    const result = await onboarding.signupNewCompany(body);
+    const result = await platformAdmin.createTenant(body, owner.userId);
     return {
       status: 201,
       body: {
@@ -830,15 +1182,31 @@ export async function buildApplication(options: AppOptions): Promise<Application
     };
   });
 
-  // ---- Organization ----
-  httpServer.post('/api/organization/companies', async (ctx) => {
-    // Intentionally public: creating a company is tenant signup — there is
-    // no user or role to gate it behind before the first company exists.
-    const body = parseJsonBody<{ name: string }>(ctx.body);
-    const company = await organization.createCompany({ name: body.name });
-    return { status: 201, body: company };
+  httpServer.get('/api/platform/tenants', async (ctx) => {
+    await requirePlatformOwner(ctx);
+    const tenants = await platformAdmin.listTenants();
+    return { status: 200, body: paginate(tenants, ctx.query) };
   });
 
+  httpServer.post('/api/platform/tenants/:id/suspend', async (ctx) => {
+    const owner = await requirePlatformOwner(ctx);
+    const company = await platformAdmin.setTenantStatus(ctx.params.id!, 'suspended', owner.userId);
+    return { status: 200, body: company };
+  });
+
+  httpServer.post('/api/platform/tenants/:id/reactivate', async (ctx) => {
+    const owner = await requirePlatformOwner(ctx);
+    const company = await platformAdmin.setTenantStatus(ctx.params.id!, 'active', owner.userId);
+    return { status: 200, body: company };
+  });
+
+  httpServer.get('/api/platform/audit-log', async (ctx) => {
+    await requirePlatformOwner(ctx);
+    const entries = await platformAdmin.listPlatformAuditTrail();
+    return { status: 200, body: paginate(entries, ctx.query) };
+  });
+
+  // ---- Organization ----
   httpServer.post('/api/organization/employees', async (ctx) => {
     const actor = await actorOf(ctx);
     // Fixed gap: this previously required only a valid token, never
@@ -876,7 +1244,15 @@ export async function buildApplication(options: AppOptions): Promise<Application
       ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
     }));
     const searched = searchFilter(filtered, ['fullName', 'email', 'title'], ctx.query.get('q'));
-    return { status: 200, body: paginate(searched, ctx.query) };
+    const page = paginate(searched, ctx.query);
+    // Enrich each row with its linked user id — the Lead form's "Assigned
+    // Sales User" picker needs it to populate ownerEmployeeUserId, which is
+    // actually a User id (see employeeScopeKeys above), not an Employee id.
+    const items = await Promise.all(page.items.map(async (e) => ({
+      ...e,
+      ownerUserId: (await repos.users.findAll((u) => u.employeeId === e.id))[0]?.id,
+    })));
+    return { status: 200, body: { ...page, items } };
   });
 
   httpServer.post('/api/organization/employees/:employeeId/reassign-manager', async (ctx) => {
@@ -1022,7 +1398,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing edit:role permission');
     }
     const body = parseJsonBody<{ action: PermissionGrant['action']; resource: PermissionGrant['resource']; scope: PermissionGrant['scope']; sensitivity?: PermissionGrant['sensitivity'] }>(ctx.body);
-    const grant = await roleManagement.addGrant(actor.companyId, ctx.params.roleId!, body);
+    const grant = await roleManagement.addGrant(actor.companyId, ctx.params.roleId!, body, actor.userId);
     return { status: 201, body: grant };
   });
 
@@ -1069,7 +1445,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
         role = await roleManagement.createRole(actor.companyId, roleName);
         roleByName.set(roleName, role);
       }
-      return roleManagement.addGrant(actor.companyId, role.id, { action, resource, scope, sensitivity });
+      return roleManagement.addGrant(actor.companyId, role.id, { action, resource, scope, sensitivity }, actor.userId);
     });
     return { status: 200, body: result };
   });
@@ -1192,7 +1568,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const scope = await rbac.getListAccessScope(actor.userId, 'view', 'payment_plan_template');
     if (scope.kind === 'none') return { status: 403, body: { error: 'missing view:payment_plan_template permission' } };
-    const templates = await paymentPlans.listTemplates(actor.companyId);
+    const templates = await paymentPlans.listReusableTemplates(actor.companyId);
     return { status: 200, body: paginate(templates, ctx.query) };
   });
 
@@ -1202,8 +1578,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:payment_plan_template permission');
     }
     const body = parseJsonBody<{ templateId: string; totalPrice: number; discountPercent?: number; escalationPercentPerYear?: number }>(ctx.body);
-    const lines = await paymentPlans.previewSchedule(body.templateId, actor.companyId, body.totalPrice, body.discountPercent, body.escalationPercentPerYear);
-    return { status: 200, body: lines };
+    const result = await paymentPlans.previewSchedule(body.templateId, actor.companyId, body.totalPrice, body.discountPercent, body.escalationPercentPerYear);
+    return { status: 200, body: result };
   });
 
   httpServer.post('/api/contracts/:contractId/payment-schedule/generate', async (ctx) => {
@@ -1238,8 +1614,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
   // Reuses PaymentPlansService.previewSchedule under the hood (see
   // quotation.service.ts) — never a second calculation engine.
   interface QuotationRequestBody {
-    unitId: string;
-    paymentPlanTemplateId: string;
+    unitId?: string;
+    manualUnit?: ManualUnitInput;
+    manualProjectId?: string;
+    paymentPlanTemplateId?: string;
+    inlineTerms?: InlineTermsInput;
     discountPercent?: number;
     escalationPercentPerYear?: number;
     totalPriceOverride?: number;
@@ -1289,7 +1668,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       leadId: ctx.query.get('leadId') ?? undefined,
     });
     const filtered = await filterByListScope(all, scope, (q) => employeeScopeKeys(q.createdByUserId));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    return { status: 200, body: paginate(filtered, ctx.query, actor.companyId) };
   });
 
   const quotationScopeCheck = async (actor: Actor, action: ActionName, quotationId: string) => {
@@ -1340,7 +1719,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const html = buildQuotationPrintHtml(quotation, calculation, calculation.unit);
+    const html = buildQuotationPrintHtml(quotation, calculation);
     return { status: 200, body: { html } };
   });
 
@@ -1371,10 +1750,14 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const actor = await actorOf(ctx);
     const quotation = await quotationScopeCheck(actor, 'view', ctx.params.id!);
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const project = await inventory.getProject(quotation.projectId);
-    if (!project) throw new NotFoundError('project not found for this quotation');
+    // A manually-entered unit (spec section 2B) may have no linked Project
+    // at all — the PDF still generates, just without the project-image/
+    // master-plan sections, never a hard failure (spec section 29.9: don't
+    // fabricate, degrade the optional sections gracefully instead).
+    const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
-    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+    const locale = ctx.query.get('locale') === 'ar' ? 'ar' : 'en';
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images, locale);
     return {
       status: 200,
       body: { filename: `${quotation.referenceNumber}.pdf`, contentType: 'application/pdf', base64: buffer.toString('base64') },
@@ -1393,12 +1776,12 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!body.to?.trim()) throw new ValidationError('"to" (the recipient WhatsApp number) is required');
 
     const { calculation } = await quotations.recompute(quotation.id, actor.companyId);
-    const project = await inventory.getProject(quotation.projectId);
-    if (!project) throw new NotFoundError('project not found for this quotation');
+    const project = quotation.projectId ? await inventory.getProject(quotation.projectId) : undefined;
     const images = await fetchOfferImages(calculation.unit, project);
-    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images);
+    const locale = ctx.query.get('locale') === 'ar' ? 'ar' : 'en';
+    const buffer = await buildOfferPdf(quotation, calculation, calculation.unit, project, images, locale);
 
-    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project.name}, Unit ${calculation.unit.code}`;
+    const caption = body.message?.trim() || `Offer ${quotation.referenceNumber} — ${project?.name ?? calculation.unitSnapshot.code}, Unit ${calculation.unitSnapshot.code}`;
     const result = await integrations.send(
       actor.companyId,
       'whatsapp',
@@ -1447,8 +1830,12 @@ export async function buildApplication(options: AppOptions): Promise<Application
     const q = ctx.query.get('q') ?? undefined;
     const minPriceFromRaw = ctx.query.get('minPriceFrom');
     const maxPriceToRaw = ctx.query.get('maxPriceTo');
+    const bedroomsRaw = ctx.query.get('bedrooms');
+    const sortRaw = ctx.query.get('sort');
+    const sort = sortRaw === 'price_asc' || sortRaw === 'price_desc' || sortRaw === 'newest' ? sortRaw : undefined;
+    const onlyFavorites = ctx.query.get('favorites') === 'true';
     const projects =
-      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw
+      destination || developerId || unitType || q || minPriceFromRaw || maxPriceToRaw || bedroomsRaw || sort
         ? await inventory.searchProjects(actor.companyId, {
             destination,
             developerId,
@@ -1456,10 +1843,29 @@ export async function buildApplication(options: AppOptions): Promise<Application
             q,
             minPriceFrom: minPriceFromRaw ? Number(minPriceFromRaw) : undefined,
             maxPriceTo: maxPriceToRaw ? Number(maxPriceToRaw) : undefined,
+            bedrooms: bedroomsRaw ? Number(bedroomsRaw) : undefined,
+            sort,
             limit: 200,
           })
         : await inventory.listProjects(actor.companyId);
-    return { status: 200, body: paginate(projects, ctx.query) };
+    const favoriteIds = new Set(await inventory.listFavoriteProjectIds(actor.companyId, actor.userId));
+    const filtered = onlyFavorites ? projects.filter((p) => favoriteIds.has(p.id)) : projects;
+    const page = paginate(filtered, ctx.query);
+    return { status: 200, body: { ...page, items: page.items.map((p) => ({ ...p, isFavorite: favoriteIds.has(p.id) })) } };
+  });
+
+  httpServer.post('/api/inventory/projects/:projectId/favorite', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    await inventory.addProjectFavorite(actor.companyId, actor.userId, ctx.params.projectId!);
+    return { status: 204 };
+  });
+
+  httpServer.delete('/api/inventory/projects/:projectId/favorite', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    await inventory.removeProjectFavorite(actor.companyId, actor.userId, ctx.params.projectId!);
+    return { status: 204 };
   });
 
   httpServer.get('/api/inventory/projects/:projectId', async (ctx) => {
@@ -1586,6 +1992,29 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: await inventory.deactivateSalesPhoneNumber(ctx.params.phoneId!, actor.companyId) };
   });
 
+  // Project Unit Specs — a project's marketed product ranges (Unit Type +
+  // Bedrooms -> BUA/price ranges), distinct from a physical Unit. Gated on
+  // 'project', same as every other project-master-data entity above.
+  httpServer.post('/api/inventory/projects/:projectId/unit-specs', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'project'))) throw new ForbiddenError('missing create:project permission');
+    const body = parseJsonBody<Omit<Parameters<typeof inventory.createProjectUnitSpec>[0], 'companyId' | 'projectId'>>(ctx.body);
+    return { status: 201, body: await inventory.createProjectUnitSpec({ ...body, companyId: actor.companyId, projectId: ctx.params.projectId! }) };
+  });
+
+  httpServer.get('/api/inventory/projects/:projectId/unit-specs', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) throw new ForbiddenError('missing view:project permission');
+    return { status: 200, body: await inventory.listProjectUnitSpecs(actor.companyId, ctx.params.projectId!) };
+  });
+
+  httpServer.patch('/api/inventory/unit-specs/:specId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'edit', 'project'))) throw new ForbiddenError('missing edit:project permission');
+    const body = parseJsonBody<Parameters<typeof inventory.updateProjectUnitSpec>[2]>(ctx.body);
+    return { status: 200, body: await inventory.updateProjectUnitSpec(ctx.params.specId!, actor.companyId, body) };
+  });
+
   httpServer.post('/api/inventory/units', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
@@ -1630,6 +2059,50 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: result };
   });
 
+  // ---- Project media file upload/download ----
+  // The one place in this app where a "file" field is backed by real
+  // stored bytes rather than a pasted external URL — see
+  // infra/file-storage.ts's own doc comment. Covers Project cover image,
+  // master plan image, gallery images, and brochure PDF; every other
+  // media/document field (locationMapUrl, ministerialDecisionDocumentUrl,
+  // floorPlanImageUrl, …) keeps the existing paste-a-URL convention.
+  httpServer.post(
+    '/api/inventory/files/upload',
+    async (ctx) => {
+      const actor = await actorOf(ctx);
+      if (!(await rbac.can(actor.userId, 'edit', 'project'))) {
+        throw new ForbiddenError('missing edit:project permission');
+      }
+      const body = ctx.body as MultipartBody | undefined;
+      const file = body?.files?.[0];
+      if (!file) throw new ValidationError('a file upload ("file" field) is required');
+      const asset = await fileStorage.saveFile({
+        companyId: actor.companyId,
+        uploadedByUserId: actor.userId,
+        originalName: file.filename,
+        contentType: file.contentType,
+        data: file.data,
+      });
+      return {
+        status: 201,
+        body: { fileId: asset.id, url: `/api/inventory/files/${asset.id}`, contentType: asset.contentType, originalName: asset.originalName },
+      };
+    },
+    { maxBodyBytes: 16 * 1024 * 1024 },
+  );
+
+  httpServer.get('/api/inventory/files/:fileId', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'view', 'project'))) {
+      throw new ForbiddenError('missing view:project permission');
+    }
+    const { asset, data } = await fileStorage.getFile(ctx.params.fileId!, actor.companyId);
+    return {
+      status: 200,
+      body: { contentType: asset.contentType, base64: data.toString('base64'), originalName: asset.originalName },
+    };
+  });
+
   // ---- Inventory Import pipeline (staged: upload -> preview -> confirm) ----
   // The richer alternative to the bulk-CSV route above, for real
   // Excel/PDF exports with unpredictable headers. Every row still only
@@ -1657,8 +2130,20 @@ export async function buildApplication(options: AppOptions): Promise<Application
         contentType: file.contentType,
         fields: INVENTORY_IMPORT_FIELDS,
         fillDownBlankCells: body?.fields?.fillDownBlankCells === 'true',
+        // Only Developer/Project/Phase/Destination ever inherit a blank
+        // cell from the row above — Price/BUA/Garden/Bedrooms/Status never
+        // do, matching every real spreadsheet's actual merged-cell shape
+        // (a title column merged down a block of rows; a price column
+        // never is).
+        hierarchicalFieldKeys: ['projectName', 'developerName', 'phaseName', 'destination'],
         sheetNameAsColumn: body?.fields?.sheetNameAsProject === 'true' ? 'Project' : undefined,
       });
+      // Informational only — classifies the detected columns as a project-
+      // catalog table, a live-availability table, a summary/fact-sheet, or
+      // unrecognized, so the frontend can suggest the right import mode
+      // instead of the user having to guess. Never changes what gets
+      // imported; the user's own mode choice at the preview step does.
+      const detectedSheetKind = classifySheet(session.detectedColumns, CATALOG_IMPORT_FIELDS, AVAILABILITY_IMPORT_FIELDS, CATALOG_ANCHOR_KEYS, AVAILABILITY_ANCHOR_KEYS);
       return {
         status: 200,
         body: {
@@ -1670,6 +2155,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: INVENTORY_IMPORT_FIELDS,
+          detectedSheetKind,
+          formulaErrors: session.formulaErrors,
+          sheetGaps: session.sheetGaps,
         },
       };
     },
@@ -1681,10 +2169,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'create', 'unit'))) {
       throw new ForbiddenError('missing create:unit permission');
     }
-    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions }>(ctx.body);
+    const body = parseJsonBody<{ mapping: Record<string, string | null>; options?: InventoryImportOptions & { mode?: 'availability' | 'catalog' } }>(ctx.body);
     const session = await importSessions.confirmMapping(ctx.params.sessionId!, actor.companyId, body.mapping, body.options as Record<string, unknown> | undefined);
     const mappedRows = importSessions.mapRows(session);
-    const preview = await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
+    // 'catalog' mode never writes a physical Unit — a Project Catalog
+    // workbook describes a product range (see inventory-import.service.ts's
+    // own top-of-file comment), not individually coded units.
+    const preview =
+      body.options?.mode === 'catalog'
+        ? await inventoryImport.buildProjectUnitSpecPreview(actor.companyId, mappedRows, body.options)
+        : await inventoryImport.buildPreview(actor.companyId, mappedRows, body.options);
     return { status: 200, body: preview };
   });
 
@@ -1698,21 +2192,40 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ValidationError('this import session has not been mapped yet — call the preview step first');
     }
     const mappedRows = importSessions.mapRows(session);
-    const result = await inventoryImport.importRows(
-      actor.companyId,
-      mappedRows,
-      async (unit, action) => {
-        await auditLog.record({
-          companyId: actor.companyId,
-          actorUserId: actor.userId,
-          action: action === 'create' ? 'create' : 'edit',
-          resource: 'unit',
-          resourceId: unit.id,
-          metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
-        });
-      },
-      session.importOptions as InventoryImportOptions | undefined,
-    );
+    const options = session.importOptions as (InventoryImportOptions & { mode?: 'availability' | 'catalog' }) | undefined;
+    const result =
+      options?.mode === 'catalog'
+        ? await inventoryImport.importProjectUnitSpecRows(actor.companyId, mappedRows, options, { sourceImportId: session.id })
+        : await inventoryImport.importRows(
+            actor.companyId,
+            mappedRows,
+            async (unit, action) => {
+              await auditLog.record({
+                companyId: actor.companyId,
+                actorUserId: actor.userId,
+                action: action === 'create' ? 'create' : 'edit',
+                resource: 'unit',
+                resourceId: unit.id,
+                metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName },
+              });
+            },
+            options,
+            { sourceImportId: session.id },
+          );
+    if (options?.mode === 'catalog') {
+      for (const r of (result as Awaited<ReturnType<typeof inventoryImport.importProjectUnitSpecRows>>).results) {
+        if (r.specId) {
+          await auditLog.record({
+            companyId: actor.companyId,
+            actorUserId: actor.userId,
+            action: r.status === 'created' ? 'create' : 'edit',
+            resource: 'project',
+            resourceId: r.specId,
+            metadata: { importedViaFile: true, importSessionId: session.id, fileName: session.fileName, entity: 'project_unit_spec' },
+          });
+        }
+      }
+    }
     await importSessions.markConfirmed(session.id, actor.companyId);
     return { status: 200, body: result };
   });
@@ -1871,7 +2384,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       limit: 500,
     });
     const filtered = searchFilter(units, ['code', 'unitType'], ctx.query.get('q'));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    return { status: 200, body: paginate(filtered, ctx.query, actor.companyId) };
   });
 
   // Manual unit edit route — previously updateUnitDetails() was only ever
@@ -1942,11 +2455,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email?: string;
       nationalId?: string;
       sourceId?: string;
+      source?: Lead['source'];
       stageId?: string;
       tags?: string[];
       priority?: Lead['priority'];
       ownerEmployeeUserId?: string;
       requiredSkill?: string;
+      interestedInType?: Lead['interestedInType'];
+      interestedInLabel?: string;
+      budgetMin?: number;
+      budgetMax?: number;
+      preferredLocation?: string;
     }>(ctx.body);
     // An explicit ownerEmployeeUserId always wins. Otherwise, if this
     // company has configured a Lead Distribution pool, hand the lead to
@@ -1970,16 +2489,35 @@ export async function buildApplication(options: AppOptions): Promise<Application
       email: body.email,
       nationalId: body.nationalId,
       sourceId: body.sourceId,
+      source: body.source,
       stageId: body.stageId,
       tags: body.tags,
       priority: body.priority,
       requiredSkill: body.requiredSkill,
       ownerEmployeeUserId: ownerEmployeeUserId ?? actor.userId,
       firstContactSlaDueAt,
+      interestedInType: body.interestedInType,
+      interestedInLabel: body.interestedInLabel,
+      budgetMin: body.budgetMin,
+      budgetMax: body.budgetMax,
+      preferredLocation: body.preferredLocation,
     });
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'lead', resourceId: lead.id });
     await emitEvent({ companyId: actor.companyId, type: 'lead.created', payload: { ...lead }, actorUserId: actor.userId, dedupeKey: `lead.created:${lead.id}` });
     return { status: 201, body: lead };
+  });
+
+  // Pre-submit duplicate check the Lead form calls before creating a new
+  // lead, so a rep sees (and can open) the existing lead instead of just
+  // getting a rejected create request — see CrmService.checkDuplicateByPhone.
+  httpServer.get('/api/crm/leads/check-duplicate', async (ctx) => {
+    const actor = await actorOf(ctx);
+    if (!(await rbac.can(actor.userId, 'create', 'lead'))) {
+      throw new ForbiddenError('missing create:lead permission');
+    }
+    const phone = ctx.query.get('phone') ?? '';
+    const duplicate = await crm.checkDuplicateByPhone(actor.companyId, phone);
+    return { status: 200, body: { duplicate: duplicate ?? null } };
   });
 
   // ---- CRM Stages ----
@@ -2160,6 +2698,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: LEAD_IMPORT_FIELDS,
+          formulaErrors: session.formulaErrors,
         },
       };
     },
@@ -2210,8 +2749,18 @@ export async function buildApplication(options: AppOptions): Promise<Application
     let leads = await crm.listForScope(scope, (lead) => employeeScopeKeys(lead.ownerEmployeeUserId));
     const stageId = ctx.query.get('stageId');
     if (stageId) leads = leads.filter((l) => l.stageId === stageId);
+    // Additive list-view filters for the redesigned CRM client-card list
+    // (Priority / Source / Assigned Sales User) — plain equality filters
+    // over fields already on Lead, so omitting them leaves every existing
+    // caller's behavior unchanged.
+    const priority = ctx.query.get('priority');
+    if (priority) leads = leads.filter((l) => l.priority === priority);
+    const source = ctx.query.get('source');
+    if (source) leads = leads.filter((l) => l.source === source);
+    const ownerEmployeeUserId = ctx.query.get('ownerEmployeeUserId');
+    if (ownerEmployeeUserId) leads = leads.filter((l) => l.ownerEmployeeUserId === ownerEmployeeUserId);
     const filtered = searchFilter(leads, ['fullName', 'phone', 'email'], ctx.query.get('q'));
-    return { status: 200, body: paginate(filtered, ctx.query) };
+    return { status: 200, body: paginate(filtered, ctx.query, actor.companyId) };
   });
 
   httpServer.get('/api/crm/leads/:leadId', async (ctx) => {
@@ -2243,7 +2792,17 @@ export async function buildApplication(options: AppOptions): Promise<Application
       managerEmployeeId: ownerKeys.managerEmployeeId,
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
-    const body = parseJsonBody<{ stageId: string; lostReason?: string }>(ctx.body);
+    const body = parseJsonBody<{ stageId: string; lostReason?: string; note?: string; occurredAt?: string }>(ctx.body);
+    // occurredAt is caller-supplied (e.g. the Move Stage modal's required
+    // date/time picker, letting staff record a change that actually
+    // happened earlier than the moment they log it) — purely descriptive
+    // metadata on the audit row, never used as the row's own createdAt:
+    // LeadTimelineService's timeInPreviousStageMs/ordering math and
+    // AnalyticsService's duration metrics both depend on createdAt being
+    // the real insertion time, so that invariant stays untouched.
+    if (body.occurredAt !== undefined && Number.isNaN(Date.parse(body.occurredAt))) {
+      throw new ValidationError('occurredAt must be a valid date/time');
+    }
     const fromStageId = lead.stageId;
     const updated = await crm.moveToStage(ctx.params.leadId!, actor.companyId, body.stageId, body.lostReason);
     const stage = await crmStages.getStage(updated.stageId, actor.companyId);
@@ -2263,7 +2822,11 @@ export async function buildApplication(options: AppOptions): Promise<Application
       // `typeof meta.toStatus === 'string'` detection — intentionally left
       // unmodified, see the CRM restructuring plan — still renders a
       // readable "Status changed to ..." timeline entry for stage moves.
-      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason },
+      // `note` is an optional reason/comment tied to this one transition
+      // (shown alongside "Previous Stage / New Stage" in the Lead
+      // Timeline) — distinct from a standalone Comment/Note, which still
+      // goes through the Message architecture untouched.
+      metadata: { fromStageId, toStageId: updated.stageId, toStatus: stage.name, lostReason: updated.lostReason, note: body.note?.trim() || undefined, occurredAt: body.occurredAt || undefined },
     });
     // Both events fire together during the transition period: 'status_changed'
     // keeps any pre-existing workflow/AiPolicy row triggered on the legacy
@@ -2303,6 +2866,13 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{
+      fullName?: string;
+      phone?: string;
+      source?: LeadSourceChannel;
+      interestedInType?: LeadInterestType;
+      interestedInLabel?: string;
+      budgetMin?: number;
+      budgetMax?: number;
       propertyTypeWanted?: string;
       purchaseGoal?: string;
       preferredLocation?: string;
@@ -2315,6 +2885,28 @@ export async function buildApplication(options: AppOptions): Promise<Application
       preferredTransferMethod?: string;
     }>(ctx.body);
     const updated = await crm.updateCustomFields(ctx.params.leadId!, actor.companyId, body);
+    // "Important Lead Data Changes" in the Lead Timeline: only the fields
+    // that actually changed value, each with its previous/new value — not
+    // a blanket "lead edited" entry, and never overwriting a prior change
+    // (this is one more append-only AuditLog row, same as every other
+    // audited mutation).
+    const leadBefore = lead as unknown as Record<string, unknown>;
+    const leadAfter = updated as unknown as Record<string, unknown>;
+    const changedFields = (Object.keys(body) as (keyof typeof body)[]).filter((key) => body[key] !== undefined && leadBefore[key] !== leadAfter[key]);
+    if (changedFields.length > 0) {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'lead',
+        resourceId: updated.id,
+        metadata: {
+          fieldsChanged: changedFields,
+          previousValues: Object.fromEntries(changedFields.map((k) => [k, leadBefore[k]])),
+          newValues: Object.fromEntries(changedFields.map((k) => [k, leadAfter[k]])),
+        },
+      });
+    }
     return { status: 200, body: updated };
   });
 
@@ -2332,8 +2924,16 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ ownerEmployeeUserId: string }>(ctx.body);
+    const previousOwnerUserId = lead.ownerEmployeeUserId;
     const updated = await crm.assignOwner(ctx.params.leadId!, actor.companyId, body.ownerEmployeeUserId);
-    await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'assign', resource: 'lead', resourceId: updated.id, metadata: { newOwnerUserId: updated.ownerEmployeeUserId } });
+    await auditLog.record({
+      companyId: actor.companyId,
+      actorUserId: actor.userId,
+      action: 'assign',
+      resource: 'lead',
+      resourceId: updated.id,
+      metadata: { previousOwnerUserId, newOwnerUserId: updated.ownerEmployeeUserId },
+    });
     return { status: 200, body: updated };
   });
 
@@ -2352,12 +2952,32 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!allowed) throw new ForbiddenError('missing edit:lead permission for this lead');
     const body = parseJsonBody<{ tags?: string[]; priority?: Lead['priority'] }>(ctx.body);
     const updated = await crm.updateTagsAndPriority(ctx.params.leadId!, actor.companyId, body);
+    const previousTags = (lead.tags ?? []).join(',');
+    const newTags = (updated.tags ?? []).join(',');
+    if (previousTags !== newTags || lead.priority !== updated.priority) {
+      await auditLog.record({
+        companyId: actor.companyId,
+        actorUserId: actor.userId,
+        action: 'edit',
+        resource: 'lead',
+        resourceId: updated.id,
+        metadata: {
+          fieldsChanged: [previousTags !== newTags ? 'tags' : undefined, lead.priority !== updated.priority ? 'priority' : undefined].filter(Boolean),
+          previousValues: { tags: lead.tags, priority: lead.priority },
+          newValues: { tags: updated.tags, priority: updated.priority },
+        },
+      });
+    }
     return { status: 200, body: updated };
   });
 
   // Unified Lead Timeline: everything ACTIVE actually recorded about this
-  // lead (status/owner history, messages, tasks, opportunity, contract),
-  // in one chronological view.
+  // lead (stage/owner/field-change history, comments/calls/WhatsApp/email,
+  // follow-ups, offers, reservations, contracts), newest first, with
+  // optional type/actor/date-range filters, free-text search, and
+  // pagination — all applied server-side over the full, real history (the
+  // service never truncates it, so filtering/search/paging here can never
+  // miss an older entry the way client-side-only filtering would).
   httpServer.get('/api/crm/leads/:leadId/timeline', async (ctx) => {
     const actor = await actorOf(ctx);
     const lead = await crm.getLead(ctx.params.leadId!);
@@ -2372,7 +2992,22 @@ export async function buildApplication(options: AppOptions): Promise<Application
     });
     if (!allowed) throw new ForbiddenError('missing view:lead permission for this lead');
     const timeline = await leadTimeline.getTimeline(ctx.params.leadId!, actor.companyId);
-    return { status: 200, body: timeline };
+    let entries = [...timeline.entries].reverse(); // newest first
+
+    const type = ctx.query.get('type');
+    if (type) {
+      const types = new Set(type.split(',').map((t) => t.trim()).filter(Boolean));
+      entries = entries.filter((e) => types.has(e.type));
+    }
+    const userId = ctx.query.get('userId');
+    if (userId) entries = entries.filter((e) => e.actorUserId === userId);
+    const from = ctx.query.get('from');
+    if (from) entries = entries.filter((e) => Date.parse(e.at) >= Date.parse(from));
+    const to = ctx.query.get('to');
+    if (to) entries = entries.filter((e) => Date.parse(e.at) <= Date.parse(to));
+    entries = searchFilter(entries, ['summary', 'actorName'], ctx.query.get('q'));
+
+    return { status: 200, body: paginate(entries, ctx.query) };
   });
 
   // ---- Sales ----
@@ -2534,7 +3169,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       repos.leads.findAll((l) => l.companyId === actor.companyId),
       inventory.listProjects(actor.companyId),
       inventory.listUnits(actor.companyId),
-      paymentPlans.listTemplates(actor.companyId),
+      paymentPlans.listReusableTemplates(actor.companyId),
       sales.listOpportunities(actor.companyId),
     ]);
     const result = await runImport(
@@ -2697,6 +3332,43 @@ export async function buildApplication(options: AppOptions): Promise<Application
     return { status: 200, body: { id: event.id, status: event.status } };
   });
 
+  // Facebook/Instagram Instant Lead Forms — Meta's one-time GET
+  // verification handshake. Unlike the two webhook routes above (one URL
+  // per company), this is a single global URL shared by every connected
+  // company's Pages (see FacebookLeadsService's class doc comment) — Meta
+  // itself has no concept of a company here, only this one App-level
+  // subscription. The response must be the raw hub.challenge text, not
+  // JSON (Meta compares it byte-for-byte) — see the `raw: true` flag.
+  httpServer.get('/api/integrations/facebook/webhooks', async (ctx) => {
+    const challenge = facebookLeads.verifyChallenge(
+      ctx.query.get('hub.mode') ?? undefined,
+      ctx.query.get('hub.verify_token') ?? undefined,
+      ctx.query.get('hub.challenge') ?? undefined,
+    );
+    return { status: 200, body: challenge, raw: true };
+  });
+
+  // Facebook/Instagram Instant Lead Forms — the real leadgen webhook
+  // delivery. HMAC-verified against FACEBOOK_APP_SECRET over the exact
+  // raw request bytes (ctx.rawBody, not a re-serialization of the parsed
+  // body — see RequestContext.rawBody's doc comment for why that
+  // distinction matters here specifically). Each leadgen change is
+  // processed independently and idempotently; if any one of them hits a
+  // genuine operational failure, handleLeadgenChange lets it throw, which
+  // propagates out of this handler and becomes a 5xx — Meta retries the
+  // whole delivery, and every change already durably processed is a safe
+  // no-op on that retry (see FacebookLeadEvent / handleLeadgenChange).
+  httpServer.post('/api/integrations/facebook/webhooks', async (ctx) => {
+    const signatureHeader = ctx.headers['x-hub-signature-256'];
+    facebookLeads.verifySignature(ctx.rawBody, typeof signatureHeader === 'string' ? signatureHeader : undefined);
+    const changes = facebookLeads.extractLeadgenChanges(ctx.body);
+    const results = [];
+    for (const change of changes) {
+      results.push(await facebookLeads.handleLeadgenChange(change));
+    }
+    return { status: 200, body: { received: results.length } };
+  });
+
   // The real delivery timeline for one sent message — every status
   // transition a verified webhook has actually reported, not an assumed
   // "sent = delivered". See CommunicationDeliveryService.
@@ -2852,6 +3524,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
           sampleRows: session.rawRows.slice(0, 5),
           totalRows: session.rawRows.length,
           fields: PAYMENT_IMPORT_FIELDS,
+          formulaErrors: session.formulaErrors,
         },
       };
     },
@@ -2916,7 +3589,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:payment_schedule permission');
     }
     const refunds = await finance.listRefunds(actor.companyId);
-    return { status: 200, body: paginate(refunds, ctx.query) };
+    return { status: 200, body: paginate(refunds, ctx.query, actor.companyId) };
   });
 
   // Reversing money already collected is always sensitive — every
@@ -3121,8 +3794,8 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'broker_company'))) {
       throw new ForbiddenError('missing edit:broker_company permission');
     }
-    const body = parseJsonBody<{ contractId: string; contractAmount: number }>(ctx.body);
-    const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId, body.contractAmount);
+    const body = parseJsonBody<{ contractId: string }>(ctx.body);
+    const commission = await brokers.recordCommissionForContract(actor.companyId, ctx.params.brokerCompanyId!, body.contractId);
     await auditLog.record({ companyId: actor.companyId, actorUserId: actor.userId, action: 'create', resource: 'broker_company', resourceId: commission.id, metadata: { brokerCommission: true, brokerCompanyId: ctx.params.brokerCompanyId, contractId: body.contractId, amount: commission.amount } });
     return { status: 201, body: commission };
   });
@@ -3563,6 +4236,14 @@ export async function buildApplication(options: AppOptions): Promise<Application
   });
 
   // ---- Communication: internal messages ----
+  // Real send, same pattern as the Quotations "send via WhatsApp" route
+  // above (integrations.send() first, then log the Message) — the only
+  // difference is this is optional here: a caller who omits "to" (or picks
+  // a channel with no provider, e.g. 'internal'/'sms') gets the original
+  // log-only behavior unchanged. CommunicationService.sendMessage() itself
+  // still never calls out — the real send is this route's job, same as
+  // Quotations', so the existing "logged only, no external gateway" unit
+  // test for CommunicationService stays true and unbroken.
   httpServer.post('/api/communication/messages', async (ctx) => {
     const actor = await actorOf(ctx);
     if (!(await rbac.can(actor.userId, 'create', 'message'))) {
@@ -3570,14 +4251,30 @@ export async function buildApplication(options: AppOptions): Promise<Application
     }
     const body = parseJsonBody<{
       toUserId?: string;
+      to?: string;
       subject: string;
       body: string;
       channel?: Message['channel'];
       relatedResource?: Message['relatedResource'];
       relatedResourceId?: string;
     }>(ctx.body);
-    const message = await communication.sendMessage({ companyId: actor.companyId, fromUserId: actor.userId, ...body });
-    return { status: 201, body: message };
+
+    let providerResult: Record<string, unknown> | undefined;
+    if ((body.channel === 'whatsapp' || body.channel === 'email') && body.to?.trim()) {
+      providerResult = await integrations.send(
+        actor.companyId,
+        body.channel,
+        'send_message',
+        body.channel === 'email'
+          ? { to: body.to.trim(), subject: body.subject, body: body.body }
+          : { to: body.to.trim(), body: body.body },
+        actor.userId,
+      );
+    }
+
+    const { to: _to, ...rest } = body;
+    const message = await communication.sendMessage({ companyId: actor.companyId, fromUserId: actor.userId, ...rest });
+    return { status: 201, body: providerResult ? { message, providerResult } : message };
   });
 
   httpServer.get('/api/communication/my-messages', async (ctx) => {
@@ -3845,7 +4542,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
       throw new ForbiddenError('missing edit:task permission');
     }
-    const task = await tasks.completeTask(ctx.params.taskId!, actor.companyId);
+    const task = await tasks.completeTask(ctx.params.taskId!, actor.companyId, actor.userId);
     return { status: 200, body: task };
   });
 
@@ -3854,7 +4551,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
     if (!(await rbac.can(actor.userId, 'edit', 'task'))) {
       throw new ForbiddenError('missing edit:task permission');
     }
-    const task = await tasks.cancelTask(ctx.params.taskId!, actor.companyId);
+    const task = await tasks.cancelTask(ctx.params.taskId!, actor.companyId, actor.userId);
     return { status: 200, body: task };
   });
 
@@ -4549,7 +5246,7 @@ export async function buildApplication(options: AppOptions): Promise<Application
       throw new ForbiddenError('missing view:audit_log permission');
     }
     const entries = await auditLog.listForCompany(actor.companyId);
-    return { status: 200, body: paginate(entries, ctx.query) };
+    return { status: 200, body: paginate(entries, ctx.query, actor.companyId) };
   });
 
   // ---- Health / dev-only ----
@@ -4566,9 +5263,9 @@ export async function buildApplication(options: AppOptions): Promise<Application
     httpServer,
     repos,
     services: {
-      rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding,
+      rbac, organization, auth, crm, crmStages, leadDistribution, leadTimeline, inventory, paymentPlans, sales, finance, brokers, salesCommissions, approvalEngine, forecasting, scenarioSimulation, auditLog, roleManagement, onboarding, invitations, platformAdmin,
       hr, operations, legal, purchasing, marketing, communication, analytics, leadScoring, portal,
-      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures,
+      tasks, automation, eventBus, sweepOverdueAndEmit, sweepSlaBreachesAndEmit, sweepExpiredReservationsAndEmit, sweepExpiredRevokedTokens, aiAgent, aiMemory, llmOrchestrator, documentIntelligence, aiWorkflow, integrations, signatures, facebookLeads,
       importSessions, leadImport, paymentImport, inventoryImport, quotations,
     },
     seedResult,

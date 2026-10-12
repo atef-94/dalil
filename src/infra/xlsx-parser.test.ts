@@ -237,3 +237,46 @@ test('parseXlsxAllSheets applies header auto-detection independently per sheet',
   assert.deepEqual(sheets[0]!.headers, ['Unit Type', 'BUA From', 'BUA To']);
   assert.equal(sheets[0]!.rows.length, 1);
 });
+
+// ---- Formula-error detection: a broken formula cell (#REF!, #DIV/0!, ...)
+// must never be read as legitimate data (silently blank) without at least
+// being reported — the importer can then flag the affected row. ----
+
+test('parseXlsx reads a formula-error cell as blank but reports it in formulaErrors', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  sheet.addRow(['Project', 'Unit Type', 'BUA From']);
+  const row = sheet.addRow(['Zed Towers', 'Apartment', null]);
+  row.getCell(3).value = { formula: 'A1/0', result: { error: '#REF!' } } as unknown as ExcelJS.CellValue;
+  row.commit();
+  const buf = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  const { rows, formulaErrors } = await parseXlsx(buf, INVENTORY_LIKE_FIELDS);
+  assert.equal(rows[0]!['BUA From'], '', 'a formula-error cell is never treated as legitimate data');
+  assert.equal(formulaErrors.length, 1);
+  assert.match(formulaErrors[0]!, /row 1, column "BUA From": formula error \(#REF!\)/);
+});
+
+test('parseXlsx reports no formula errors for a normal, error-free workbook', async () => {
+  const buf = await buildWorkbook([
+    ['Project', 'Unit Type'],
+    ['Zed Towers', 'Apartment'],
+  ]);
+  const { formulaErrors } = await parseXlsx(buf, INVENTORY_LIKE_FIELDS);
+  assert.deepEqual(formulaErrors, []);
+});
+
+test('parseXlsxAllSheets collects formulaErrors independently per sheet', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Stayn');
+  sheet.addRow(['Project', 'Unit Type']);
+  const row = sheet.addRow(['Zed Towers', null]);
+  row.getCell(2).value = { formula: 'X', result: { error: '#DIV/0!' } } as unknown as ExcelJS.CellValue;
+  row.commit();
+  const buf = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  const sheets = await parseXlsxAllSheets(buf, INVENTORY_LIKE_FIELDS);
+  assert.equal(sheets.length, 1);
+  assert.equal(sheets[0]!.formulaErrors.length, 1);
+  assert.match(sheets[0]!.formulaErrors[0]!, /#DIV\/0!/);
+});

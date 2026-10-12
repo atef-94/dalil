@@ -84,6 +84,10 @@ export class OrganizationService {
     return this.departments.findById(id);
   }
 
+  async getCompany(id: string): Promise<Company | undefined> {
+    return this.companies.findById(id);
+  }
+
   async createCompany(input: CreateCompanyInput): Promise<Company> {
     if (!input.name?.trim()) {
       throw new OrgValidationError('name is required');

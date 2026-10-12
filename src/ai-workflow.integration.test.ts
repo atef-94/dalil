@@ -2,8 +2,39 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildApplication } from './app.js';
 
+const OWNER_EMAIL = 'owner1@platform.test';
+const OWNER_PASSWORD = 'owner-1-password-123';
+
 async function freshApp() {
-  return buildApplication({ nodeEnv: 'test', tokenSecret: 'test-secret', allowedOrigins: [], seed: true });
+  return buildApplication({
+    nodeEnv: 'test',
+    tokenSecret: 'test-secret',
+    allowedOrigins: [],
+    seed: true,
+    ownerEmail1: OWNER_EMAIL,
+    ownerEmail2: 'owner2@platform.test',
+    ownerPassword1: OWNER_PASSWORD,
+    ownerPassword2: 'owner-2-password-123',
+  });
+}
+
+/** Creates a brand-new tenant via the owner-gated /api/platform/tenants route
+ * (the only way to do this now that public signup is gone) and returns the
+ * bearer-token headers for its founding user, exactly like the old
+ * self-service signup response did. */
+async function createSecondTenant(base: string, namePrefix: string) {
+  const ownerLogin = await call(base, 'POST', '/api/auth/login', {
+    companyId: '__platform__', email: OWNER_EMAIL, password: OWNER_PASSWORD,
+  });
+  const ownerHeaders = { authorization: `Bearer ${(ownerLogin.body as { token: string }).token}` };
+  const tenant = await call(base, 'POST', '/api/platform/tenants', {
+    companyName: `${namePrefix} ${Date.now()}`,
+    fullName: 'Owner B',
+    email: `${namePrefix.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}@example.com`,
+    password: 'a-real-password-123',
+  }, ownerHeaders);
+  assert.equal(tenant.status, 201);
+  return { authorization: `Bearer ${(tenant.body as { token: string }).token}` };
 }
 
 async function withServer(run: (base: string, app: Awaited<ReturnType<typeof freshApp>>) => Promise<void>) {
@@ -154,11 +185,8 @@ test('AI Workflow Engine rejects a request from a user without create:ai_action 
     assert.equal(startedRes.status, 201);
     const runId = (startedRes.body as { id: string }).id;
 
-    const otherSignup = await call(base, 'POST', '/api/auth/signup', {
-      companyName: `Other Co ${Date.now()}`, fullName: 'Other CEO', email: `other-${Date.now()}@example.com`, password: 'Passw0rd!123',
-    });
-    const otherToken = (otherSignup.body as { token: string }).token;
-    const getRes = await call(base, 'GET', `/api/ai/workflows/${runId}`, undefined, { Authorization: `Bearer ${otherToken}` });
+    const otherHeaders = await createSecondTenant(base, 'Other Co');
+    const getRes = await call(base, 'GET', `/api/ai/workflows/${runId}`, undefined, { Authorization: otherHeaders.authorization });
     assert.equal(getRes.status, 404);
   });
 });

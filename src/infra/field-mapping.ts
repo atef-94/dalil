@@ -96,3 +96,42 @@ export function suggestMapping(detectedColumns: string[], fields: ImportFieldDef
 
   return mapping;
 }
+
+export type SheetKind = 'catalog' | 'availability' | 'summary' | 'unknown';
+
+/**
+ * Classifies a sheet's headers as a project-catalog table, a live-
+ * availability table, a summary/fact-sheet, or unrecognized — scored
+ * against two separate field dictionaries using the same suggestMapping
+ * already used for column mapping, never a separate guessing heuristic.
+ *
+ * A dictionary only "claims" a sheet when at least one of its anchor
+ * fields (the field(s) that give a row real identity — a unit code for
+ * availability, a project/developer name for catalog) actually matched a
+ * column; a sheet with a few loose matches but no anchor (a Fact Sheet's
+ * "Type / Quantity / Min SQM / Max SQM / Min Price / Max Price" summary
+ * table commonly scores a couple of loose matches this way) is classified
+ * 'summary' rather than guessed into either real import path. A sheet with
+ * no matches at all against either dictionary is 'unknown'.
+ */
+export function classifySheet(
+  headers: string[],
+  catalogFields: ImportFieldDef[],
+  availabilityFields: ImportFieldDef[],
+  catalogAnchorKeys: string[],
+  availabilityAnchorKeys: string[],
+): SheetKind {
+  const catalogMapping = suggestMapping(headers, catalogFields);
+  const availabilityMapping = suggestMapping(headers, availabilityFields);
+  const catalogValues = Object.values(catalogMapping);
+  const availabilityValues = Object.values(availabilityMapping);
+  const catalogScore = catalogValues.filter(Boolean).length;
+  const availabilityScore = availabilityValues.filter(Boolean).length;
+  const hasCatalogAnchor = catalogAnchorKeys.some((k) => catalogValues.includes(k));
+  const hasAvailabilityAnchor = availabilityAnchorKeys.some((k) => availabilityValues.includes(k));
+
+  if (hasAvailabilityAnchor && availabilityScore >= catalogScore) return 'availability';
+  if (hasCatalogAnchor && catalogScore >= availabilityScore) return 'catalog';
+  if (catalogScore === 0 && availabilityScore === 0) return 'unknown';
+  return 'summary';
+}

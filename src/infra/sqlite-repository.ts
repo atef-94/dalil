@@ -27,8 +27,19 @@ export class SqliteRepository<T extends { id: string }> implements Repository<T>
     return row ? (JSON.parse(row.data) as T) : undefined;
   }
 
-  async findAll(predicate?: (item: T) => boolean): Promise<T[]> {
-    const rows = this.db.prepare(`SELECT data FROM "${this.table}"`).all() as { data: string }[];
+  /**
+   * `companyId` is optional, additive, correctness-depth — not a
+   * performance fix. `json_extract` over an unindexed TEXT column still
+   * reads every row off disk either way; what it buys is that a row for
+   * the wrong tenant never even reaches the JS `predicate` callback, so a
+   * caller that forgets its own companyId check in `predicate` doesn't
+   * leak another tenant's row by that mistake alone. Existing call sites
+   * that omit it are completely unaffected (same SQL as before).
+   */
+  async findAll(predicate?: (item: T) => boolean, companyId?: string): Promise<T[]> {
+    const rows = companyId
+      ? (this.db.prepare(`SELECT data FROM "${this.table}" WHERE json_extract(data, '$.companyId') = ?`).all(companyId) as { data: string }[])
+      : (this.db.prepare(`SELECT data FROM "${this.table}"`).all() as { data: string }[]);
     const items = rows.map((r) => JSON.parse(r.data) as T);
     return predicate ? items.filter(predicate) : items;
   }

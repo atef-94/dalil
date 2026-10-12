@@ -37,6 +37,7 @@ async function seedEmployeeUser(h: ReturnType<typeof freshHarness>, companyId: s
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   });
   return { userId, employeeId };
 }

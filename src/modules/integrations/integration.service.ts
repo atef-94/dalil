@@ -52,6 +52,15 @@ const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     actions: ['update_campaign_status'],
   },
   {
+    provider: 'facebook_leads',
+    name: 'Facebook Instant Lead Forms',
+    description:
+      'Receives Facebook/Instagram Lead Ads submissions via Meta\'s leadgen webhook and creates a CRM lead for each one. Inbound-only — no send() action; config.pageId is the connected Facebook Page id the webhook payload is matched against (see FacebookLeadsService). The page_access_token credential must have the leads_retrieval permission.',
+    configFields: ['pageId'],
+    credentialFields: ['page_access_token'],
+    actions: [],
+  },
+  {
     provider: 'google_calendar',
     name: 'Google Calendar',
     description: 'Create calendar events for follow-ups and meetings.',
@@ -235,7 +244,19 @@ export class IntegrationService {
       throw new AutomationError(`rate limit exceeded for ${provider} — try again shortly`, 429);
     }
 
-    const credentials = await this.resolveCredentials(companyId, connection);
+    let credentials: Record<string, string>;
+    try {
+      credentials = await this.resolveCredentials(companyId, connection);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.recordEvent(companyId, connection.id, provider, action, 'failed', params, 0, message);
+      await this.repos.connections.save({ ...connection, status: 'error', lastError: message, updatedAt: new Date().toISOString() });
+      // A 4xx (not 5xx) status so the real reason reaches the caller even in
+      // production, where the router redacts 5xx messages to a generic
+      // "internal server error" — this is a correctable connection problem
+      // (reconnect the integration), not a server defect.
+      throw new AutomationError(`could not read stored credentials for ${provider}: ${message} — try reconnecting the integration`, 422);
+    }
 
     let attempts = 0;
     let lastError: string | undefined;
@@ -287,10 +308,20 @@ export class IntegrationService {
       companyId, actorUserId: userId, action: 'execute', resource: 'integration_connection', resourceId: connection.id,
       metadata: { provider, integrationAction: action, attempts, failed: true, error: lastError },
     });
-    throw new AutomationError(`${provider} ${action} failed after ${attempts} attempt(s): ${lastError}`, 502);
+    // 422, not 502: this is the provider rejecting the request (bad/expired
+    // token, wrong phone number id, etc.), correctable by reconnecting —
+    // not a server defect. Kept below 500 so the real reason reaches the
+    // caller even in production, where the router redacts every 5xx
+    // message to a generic "internal server error".
+    throw new AutomationError(`${provider} ${action} failed after ${attempts} attempt(s): ${lastError}`, 422);
   }
 
-  private async resolveCredentials(companyId: string, connection: IntegrationConnection): Promise<Record<string, string>> {
+  /** Not private: FacebookLeadsService reuses this exact resolution (the
+   * same `integration:{connectionId}:{field}` key convention connect()
+   * writes under) to read a connected Page's access token — the webhook
+   * flow has no `action` to dispatch through send(), just a credential to
+   * read, so it calls this directly instead of duplicating the lookup. */
+  async resolveCredentials(companyId: string, connection: IntegrationConnection): Promise<Record<string, string>> {
     const result: Record<string, string> = {};
     for (const key of connection.credentialKeys) {
       const field = key.split(':').slice(2).join(':');
@@ -483,6 +514,35 @@ export class IntegrationService {
     });
     if (!res.ok) throw new Error(`Meta Ads API returned ${res.status}`);
     return { status: res.status };
+  }
+
+  // ---- Facebook Instant Lead Forms ----
+  // Meta's leadgen webhook only ever carries the lead's id — the actual
+  // submitted field values are fetched separately via this call, exactly
+  // as Meta's own docs describe. Not part of the send()/dispatch() pipeline
+  // above (there's no outbound "action" here, just a lookup), so
+  // FacebookLeadsService calls this directly. Throws a plain Error (not an
+  // HttpError subclass) on any non-ok response or malformed token — by
+  // design, so it propagates as a genuine operational failure the webhook
+  // route maps to a 5xx, telling Meta to retry rather than silently
+  // dropping the lead (see FacebookLeadsService.handleLeadgenChange).
+  async fetchFacebookLeadData(leadgenId: string, pageAccessToken: string): Promise<Record<string, string>> {
+    const res = await this.fetchImpl(
+      `https://graph.facebook.com/v20.0/${encodeURIComponent(leadgenId)}?access_token=${encodeURIComponent(pageAccessToken)}`,
+    );
+    if (!res.ok) throw new Error(`Facebook Graph API returned ${res.status} fetching lead ${leadgenId}`);
+    // Real shape: { field_data: [{ name, values: [string] }, ...], ... }.
+    // Only the first value per field is used — Lead Ads form fields are
+    // single-answer; a multi-value field (e.g. a checkbox question) isn't
+    // one this mapping is meant to carry into a scalar Lead property.
+    const body = (await res.json().catch(() => ({}))) as { field_data?: { name?: string; values?: unknown[] }[] };
+    const fields: Record<string, string> = {};
+    for (const entry of body.field_data ?? []) {
+      if (typeof entry.name === 'string' && Array.isArray(entry.values) && typeof entry.values[0] === 'string') {
+        fields[entry.name] = entry.values[0];
+      }
+    }
+    return fields;
   }
 
   // ---- Google Calendar ----

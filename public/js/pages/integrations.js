@@ -8,8 +8,7 @@ export async function renderIntegrations(container) {
   const locale = getLocale();
   let eventsOffset = 0;
   container.appendChild(el('div', { class: 'page-header' }, el('h1', {}, t(locale, 'page_title_integrations'))));
-  container.appendChild(el('p', { class: 'muted' },
-    'Connect external providers with securely encrypted credentials. Every send is rate-limited, retried on failure, and logged below — nothing is silent.'));
+  container.appendChild(el('p', { class: 'muted' }, t(locale, 'integrations_intro')));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
@@ -26,7 +25,7 @@ export async function renderIntegrations(container) {
   container.appendChild(formCard);
 
   const providerSelect = selectInput(connectors.map((c) => ({ value: c.provider, label: c.name })));
-  const nameInput = el('input', { type: 'text', placeholder: 'Display name' });
+  const nameInput = el('input', { type: 'text', placeholder: t(locale, 'integrations_display_name_field') });
   const fieldsSlot = el('div', { class: 'form-row' });
 
   function renderFields() {
@@ -42,7 +41,7 @@ export async function renderIntegrations(container) {
     for (const field of def?.credentialFields || []) {
       const input = el('input', { type: 'password', placeholder: field });
       credInputs[field] = input;
-      fieldsSlot.appendChild(el('div', {}, [el('label', {}, `${field} (secret)`), input]));
+      fieldsSlot.appendChild(el('div', {}, [el('label', {}, `${field} ${t(locale, 'integrations_field_secret_suffix')}`), input]));
     }
     fieldsSlot._get = () => ({
       config: Object.fromEntries(Object.entries(configInputs).map(([k, i]) => [k, i.value.trim()])),
@@ -52,17 +51,17 @@ export async function renderIntegrations(container) {
   providerSelect.addEventListener('change', renderFields);
   renderFields();
 
-  const connectBtn = el('button', { class: 'primary' }, 'Connect');
+  const connectBtn = el('button', { class: 'primary' }, t(locale, 'integrations_connect_btn'));
   connectBtn.addEventListener('click', async () => {
     if (!nameInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('A display name is required.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'integrations_display_name_required_error')));
       return;
     }
     connectBtn.disabled = true;
     try {
       const { config, credentials } = fieldsSlot._get();
       await api.post('/api/integrations/connections', { provider: providerSelect.value, displayName: nameInput.value.trim(), config, credentials });
-      toast('Integration connected.', 'success');
+      toast(t(locale, 'integrations_connected_toast'), 'success');
       nameInput.value = '';
       await loadConnections();
     } catch (err) {
@@ -72,10 +71,10 @@ export async function renderIntegrations(container) {
     }
   });
 
-  formCard.appendChild(el('h3', { style: 'margin-top:0' }, 'Connect a provider'));
+  formCard.appendChild(el('h3', { style: 'margin-top:0' }, t(locale, 'integrations_connect_provider_title')));
   formCard.appendChild(el('div', { class: 'form-row' }, [
-    el('div', {}, [el('label', {}, 'Provider'), providerSelect]),
-    el('div', {}, [el('label', {}, 'Display name'), nameInput]),
+    el('div', {}, [el('label', {}, t(locale, 'automation_field_provider')), providerSelect]),
+    el('div', {}, [el('label', {}, t(locale, 'integrations_display_name_field')), nameInput]),
   ]));
   formCard.appendChild(fieldsSlot);
   formCard.appendChild(el('div', { class: 'form-actions' }, [connectBtn]));
@@ -90,22 +89,22 @@ export async function renderIntegrations(container) {
     try {
       const page = await api.get('/api/integrations/connections', { limit: 50 });
       clear(connectionsSlot);
-      connectionsSlot.appendChild(el('h3', {}, 'Connections'));
+      connectionsSlot.appendChild(el('h3', {}, t(locale, 'integrations_connections_title')));
       connectionsSlot.appendChild(table(
         [
-          { label: 'Provider', key: 'provider' },
-          { label: 'Name', key: 'displayName' },
-          { label: 'Status', render: (c) => statusBadge(c.status) },
-          { label: 'Last used', render: (c) => c.lastUsedAt ? new Date(c.lastUsedAt).toLocaleString() : 'never' },
-          { label: 'Last error', render: (c) => c.lastError || '' },
+          { label: t(locale, 'automation_field_provider'), key: 'provider' },
+          { label: t(locale, 'units_col_name'), key: 'displayName' },
+          { label: t(locale, 'units_col_status'), render: (c) => statusBadge(c.status) },
+          { label: t(locale, 'integrations_last_used_col'), render: (c) => c.lastUsedAt ? new Date(c.lastUsedAt).toLocaleString() : t(locale, 'integrations_never') },
+          { label: t(locale, 'integrations_last_error_col'), render: (c) => c.lastError || '' },
           { label: '', render: (c) => {
             if (c.status === 'disconnected') return '';
-            const btn = el('button', { class: 'danger' }, 'Disconnect');
+            const btn = el('button', { class: 'danger' }, t(locale, 'integrations_disconnect_btn'));
             btn.addEventListener('click', async () => {
-              if (!(await confirmModal(`Disconnect "${c.displayName}"? Its stored credentials will be deleted.`, { danger: true }))) return;
+              if (!(await confirmModal(`${t(locale, 'integrations_disconnect_confirm_prefix')}${c.displayName}${t(locale, 'integrations_disconnect_confirm_suffix')}`, { danger: true }))) return;
               try {
                 await api.delete(`/api/integrations/connections/${c.id}`);
-                toast('Integration disconnected.', 'success');
+                toast(t(locale, 'integrations_disconnected_toast'), 'success');
                 await loadConnections();
               } catch (err) {
                 errorSlot.appendChild(errorBanner(err.message));
@@ -115,7 +114,7 @@ export async function renderIntegrations(container) {
           } },
         ],
         page.items,
-        { empty: 'No integrations connected yet.' },
+        { empty: t(locale, 'integrations_connections_empty') },
       ));
     } catch (err) {
       clear(connectionsSlot);
@@ -133,18 +132,18 @@ export async function renderIntegrations(container) {
     try {
       const page = await api.get('/api/integrations/events', { limit: 20, offset: eventsOffset });
       clear(eventsSlot);
-      eventsSlot.appendChild(el('h3', {}, 'Delivery log'));
+      eventsSlot.appendChild(el('h3', {}, t(locale, 'integrations_delivery_log_title')));
       eventsSlot.appendChild(table(
         [
-          { label: 'Provider', key: 'provider' },
-          { label: 'Action', key: 'action' },
-          { label: 'Status', render: (e) => statusBadge(e.status) },
-          { label: 'Attempts', key: 'attempts' },
-          { label: 'Error', render: (e) => e.error || '' },
-          { label: 'When', render: (e) => new Date(e.createdAt).toLocaleString() },
+          { label: t(locale, 'automation_field_provider'), key: 'provider' },
+          { label: t(locale, 'automation_field_action'), key: 'action' },
+          { label: t(locale, 'units_col_status'), render: (e) => statusBadge(e.status) },
+          { label: t(locale, 'integrations_attempts_col'), key: 'attempts' },
+          { label: t(locale, 'automation_col_error'), render: (e) => e.error || '' },
+          { label: t(locale, 'ai_col_when'), render: (e) => new Date(e.createdAt).toLocaleString() },
         ],
         page.items.slice().reverse(),
-        { empty: 'No delivery attempts logged yet.' },
+        { empty: t(locale, 'integrations_events_empty') },
       ));
       eventsSlot.appendChild(paginationControls(page, (next) => { eventsOffset = next; loadEvents(); }));
     } catch (err) {

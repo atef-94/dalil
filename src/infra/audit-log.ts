@@ -18,4 +18,11 @@ export class AuditLog {
   async listForCompany(companyId: string): Promise<AuditLogEntry[]> {
     return this.repo.findAll((e) => e.companyId === companyId);
   }
+
+  /** Unscoped — platform-owner use only (see app.ts's GET /api/platform/
+   * audit-log, gated on isPlatformOwner). Every other caller must keep
+   * using listForCompany to stay tenant-scoped. */
+  async listAll(): Promise<AuditLogEntry[]> {
+    return this.repo.findAll();
+  }
 }

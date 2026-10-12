@@ -1,6 +1,7 @@
 import type { Lead, User } from '../../domain/types.js';
 import type { Repository } from '../../infra/repository.js';
 import type { ImportFieldDef } from '../../infra/field-mapping.js';
+import { normalizePhone } from '../../infra/phone.js';
 import { CrmService, type CreateLeadInput } from './crm.service.js';
 
 /**
@@ -99,8 +100,10 @@ export class LeadImportService {
   /**
    * Builds a row-by-row preview without writing anything: validates
    * required fields, and flags duplicates both against existing DB leads
-   * (phone/email/nationalId — the same identity signals CrmService itself
-   * enforces) and against earlier rows in the same file, so two rows for
+   * (normalized phone/email — the same identity signals CrmService itself
+   * enforces; National ID is no longer a dedup signal, matching
+   * CrmService.createLead) and against earlier rows in the same file, so
+   * two rows for
    * the same person in one spreadsheet don't both sail through as
    * "valid". This is deliberately the same logic buildPreview and
    * importRows below both call, so confirming an import can never behave
@@ -127,7 +130,6 @@ export class LeadImportService {
   ): Promise<LeadImportRowPreview[]> {
     const seenPhones = new Set<string>();
     const seenEmails = new Set<string>();
-    const seenNationalIds = new Set<string>();
 
     return mappedRows.map((raw, idx) => {
       const row = idx + 1;
@@ -138,24 +140,24 @@ export class LeadImportService {
       if (!phone) issues.push('"Phone" is required');
       if (issues.length > 0) return { row, status: 'invalid' as const, issues, raw };
 
+      const normalizedPhone = normalizePhone(phone!);
       const email = raw.email?.trim() || undefined;
       const nationalId = raw.nationalId?.trim() || undefined;
 
       const dupInDb = existingLeads.some(
-        (l) => l.phone === phone || (!!email && !!l.email && l.email === email) || (!!nationalId && !!l.nationalId && l.nationalId === nationalId),
+        (l) => normalizePhone(l.phone) === normalizedPhone || (!!email && !!l.email && l.email === email),
       );
-      const dupInBatch = seenPhones.has(phone!) || (!!email && seenEmails.has(email)) || (!!nationalId && seenNationalIds.has(nationalId));
+      const dupInBatch = seenPhones.has(normalizedPhone) || (!!email && seenEmails.has(email));
       if (dupInDb || dupInBatch) {
         return {
           row,
           status: 'duplicate' as const,
-          issues: [dupInDb ? 'A lead with this phone, email, or national ID already exists' : 'Duplicate of an earlier row in this same file'],
+          issues: [dupInDb ? 'A lead with this phone or email already exists' : 'Duplicate of an earlier row in this same file'],
           raw,
         };
       }
-      seenPhones.add(phone!);
+      seenPhones.add(normalizedPhone);
       if (email) seenEmails.add(email);
-      if (nationalId) seenNationalIds.add(nationalId);
 
       const ownerEmail = raw.ownerEmail?.trim() || undefined;
       const owner = ownerEmail ? companyUsers.find((u) => u.email.toLowerCase() === ownerEmail.toLowerCase()) : undefined;

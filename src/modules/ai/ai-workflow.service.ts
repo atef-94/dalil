@@ -199,7 +199,7 @@ export class AiWorkflowService {
     // Step 6: analyze_payment_plans — try each candidate unit in order
     // against every active template; a unit with no affordable plan is a
     // second real replan point (falls through to the next candidate).
-    const templates = await this.paymentPlans.listTemplates(run.companyId);
+    const templates = await this.paymentPlans.listReusableTemplates(run.companyId);
     if (templates.length === 0) {
       return this.escalate(run, ++sequence, 'analyze_payment_plans', 'No payment plan templates are configured for this company — cannot propose terms.');
     }
@@ -208,8 +208,8 @@ export class AiWorkflowService {
     let chosenMonthlyInstallment: number | undefined;
     for (const unit of candidates) {
       for (const template of templates) {
-        const scheduleLines = await this.paymentPlans.previewSchedule(template.id, run.companyId, unit.listPrice);
-        const installmentLines = scheduleLines.filter((l) => l.label !== 'Down Payment');
+        const { lines: scheduleLines } = await this.paymentPlans.previewSchedule(template.id, run.companyId, unit.listPrice);
+        const installmentLines = scheduleLines.filter((l) => l.kind !== 'down_payment');
         const avgInstallment = installmentLines.length > 0
           ? installmentLines.reduce((sum, l) => sum + l.amount, 0) / installmentLines.length
           : 0;

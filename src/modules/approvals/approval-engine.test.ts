@@ -34,6 +34,7 @@ async function seedUserWithGrants(
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   });
   const role: Role = { id: `role-${userId}`, companyId, name: 'Test Role', isSystem: false };
   await h.roles.save(role);

@@ -12,16 +12,16 @@ export async function renderWorkflowHistory(container) {
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, t(locale, 'page_title_workflow_history')),
-      el('p', { class: 'page-subtitle' }, 'Every run across every workflow, most recent first. Open a workflow\'s own page in Automation for its builder.'),
+      el('p', { class: 'page-subtitle' }, t(locale, 'wf_history_subtitle')),
     ]),
   ]));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
-  const workflowFilter = selectInput([{ value: '', label: 'All workflows' }]);
+  const workflowFilter = selectInput([{ value: '', label: t(locale, 'wf_history_all_workflows') }]);
   workflowFilter.addEventListener('change', () => { offset = 0; render(); });
   container.appendChild(el('div', { class: 'card' }, [
-    el('div', { class: 'form-row' }, [el('div', { style: 'max-width:260px' }, [el('label', {}, 'Workflow'), workflowFilter])]),
+    el('div', { class: 'form-row' }, [el('div', { style: 'max-width:260px' }, [el('label', {}, t(locale, 'wf_history_workflow_label')), workflowFilter])]),
   ]));
 
   const listSlot = el('div');
@@ -33,7 +33,7 @@ export async function renderWorkflowHistory(container) {
   async function retry(run) {
     try {
       await api.post(`/api/automation/runs/${run.id}/retry`, {});
-      toast('Run retried.', 'success');
+      toast(t(locale, 'automation_toast_run_retried'), 'success');
       await load();
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -46,20 +46,20 @@ export async function renderWorkflowHistory(container) {
     const pageItems = filtered.slice(offset, offset + PAGE_SIZE);
     listSlot.appendChild(table(
       [
-        { label: 'Workflow', render: (r) => workflows.find((w) => w.id === r.workflowId)?.name ?? r.workflowId },
-        { label: 'Started', render: (r) => new Date(r.startedAt).toLocaleString() },
-        { label: 'Status', render: (r) => statusBadge(r.status) },
-        { label: 'Initiated by', key: 'initiatedBy' },
-        { label: 'Error', render: (r) => r.error || '' },
+        { label: t(locale, 'wf_history_workflow_label'), render: (r) => workflows.find((w) => w.id === r.workflowId)?.name ?? r.workflowId },
+        { label: t(locale, 'automation_col_started'), render: (r) => new Date(r.startedAt).toLocaleString() },
+        { label: t(locale, 'automation_label_status'), render: (r) => statusBadge(r.status) },
+        { label: t(locale, 'automation_col_initiated_by'), key: 'initiatedBy' },
+        { label: t(locale, 'automation_col_error'), render: (r) => r.error || '' },
         { label: '', render: (r) => {
           if (r.status !== 'failed') return '';
-          const btn = el('button', {}, 'Retry');
+          const btn = el('button', {}, t(locale, 'automation_btn_retry'));
           btn.addEventListener('click', () => retry(r));
           return btn;
         } },
       ],
       pageItems,
-      { empty: 'No runs yet.', emptyIcon: 'history' },
+      { empty: t(locale, 'automation_empty_runs'), emptyIcon: 'history' },
     ));
     // Client-side pagination over the already-fetched, merged cross-workflow
     // run list — there's no single backend endpoint for "every run across
@@ -77,7 +77,7 @@ export async function renderWorkflowHistory(container) {
       const workflowsPage = await api.get('/api/automation/workflows', { limit: 100 });
       workflows = workflowsPage.items;
       clear(workflowFilter);
-      workflowFilter.appendChild(el('option', { value: '' }, 'All workflows'));
+      workflowFilter.appendChild(el('option', { value: '' }, t(locale, 'wf_history_all_workflows')));
       workflows.forEach((w) => workflowFilter.appendChild(el('option', { value: w.id }, w.name)));
 
       const runsByWorkflow = await Promise.all(workflows.map((w) => api.get(`/api/automation/workflows/${w.id}/runs`, { limit: 50 })));

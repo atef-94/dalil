@@ -46,6 +46,7 @@ async function seedEmployeeUser(
     locale: 'en',
     failedLoginCount: 0,
     createdAt: new Date().toISOString(),
+    totpEnabled: false,
   });
   return { userId, employeeId };
 }

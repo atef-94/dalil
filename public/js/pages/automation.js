@@ -3,106 +3,116 @@ import { t } from '../i18n.js';
 import { getLocale } from '../state.js';
 import { api } from '../api.js';
 
-const TRIGGER_TYPES = [{ value: 'event', label: 'Event' }, { value: 'scheduled', label: 'Scheduled' }, { value: 'webhook', label: 'Webhook' }];
+function triggerTypeOptions(locale) {
+  return [
+    { value: 'event', label: t(locale, 'automation_trigger_type_event') },
+    { value: 'scheduled', label: t(locale, 'automation_trigger_type_scheduled') },
+    { value: 'webhook', label: t(locale, 'automation_trigger_type_webhook') },
+  ];
+}
 const EVENT_TYPES = [
   'lead.created', 'lead.status_changed', 'lead.stage_changed', 'opportunity.created', 'contract.signed', 'contract.cancelled',
   'payment.recorded', 'payment.overdue_swept', 'maintenance_ticket.created', 'maintenance_ticket.status_changed',
   'leave_request.created', 'leave_request.decided', 'purchase_order.created', 'purchase_order.status_changed',
   'legal_document.status_changed', 'campaign.status_changed', 'broker_lead.submitted', 'employee.created',
 ];
-const ACTION_TYPES = [
-  { value: 'create_task', label: 'Create task' },
-  { value: 'create_lead', label: 'Create lead' },
-  { value: 'send_message', label: 'Send message' },
-  { value: 'update_lead_status', label: 'Update lead status' },
-  { value: 'assign_lead_owner', label: 'Assign lead owner' },
-  { value: 'update_campaign_status', label: 'Update campaign status' },
-  { value: 'webhook_call', label: 'Call webhook' },
-  { value: 'integration_call', label: 'Send via integration (WhatsApp/Email/etc)' },
-  { value: 'ai_decide', label: 'Hand off to AI agent' },
-  { value: 'require_approval', label: 'Require approval' },
-];
+function actionTypeOptions(locale) {
+  return [
+    { value: 'create_task', label: t(locale, 'automation_action_create_task') },
+    { value: 'create_lead', label: t(locale, 'automation_action_create_lead') },
+    { value: 'send_message', label: t(locale, 'automation_action_send_message') },
+    { value: 'update_lead_status', label: t(locale, 'automation_action_update_lead_status') },
+    { value: 'assign_lead_owner', label: t(locale, 'automation_action_assign_lead_owner') },
+    { value: 'update_campaign_status', label: t(locale, 'automation_action_update_campaign_status') },
+    { value: 'webhook_call', label: t(locale, 'automation_action_webhook_call') },
+    { value: 'integration_call', label: t(locale, 'automation_action_integration_call') },
+    { value: 'ai_decide', label: t(locale, 'automation_action_ai_decide') },
+    { value: 'require_approval', label: t(locale, 'automation_action_require_approval') },
+  ];
+}
 const CONDITION_OPERATORS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'exists'];
 
 // Which params each action type asks for, keyed to the fields the backend
 // executor actually reads (see automation.service.ts executeAction). Every
 // value input also accepts {{dot.path}} templating against the trigger
 // payload, same as the backend.
-const ACTION_PARAM_FIELDS = {
-  create_task: [
-    { key: 'title', label: 'Title', placeholder: 'e.g. Follow up with {{fullName}}' },
-    { key: 'description', label: 'Description (optional)' },
-    { key: 'assignedToUserId', label: 'Assign to user id (optional)' },
-  ],
-  create_lead: [
-    { key: 'fullName', label: 'Full name' },
-    { key: 'phone', label: 'Phone' },
-    { key: 'email', label: 'Email (optional)' },
-    { key: 'sourceId', label: 'Source id (optional)' },
-  ],
-  send_message: [
-    { key: 'subject', label: 'Subject' },
-    { key: 'body', label: 'Body' },
-    { key: 'toUserId', label: 'To user id (optional)' },
-  ],
-  update_lead_status: [
-    { key: 'leadId', label: 'Lead id', placeholder: '{{lead.id}} or a literal id' },
-    { key: 'stageId', label: 'Target CRM stage id', placeholder: 'see CRM → stage settings for each stage\'s id' },
-    { key: 'lostReason', label: 'Lost reason (required only when moving into a Lost-flagged stage)' },
-  ],
-  assign_lead_owner: [
-    { key: 'leadId', label: 'Lead id' },
-    { key: 'ownerEmployeeUserId', label: 'New owner user id' },
-  ],
-  update_campaign_status: [
-    { key: 'campaignId', label: 'Campaign id' },
-    { key: 'status', label: 'New status', placeholder: 'planned / active / completed / cancelled' },
-  ],
-  webhook_call: [
-    { key: 'url', label: 'URL' },
-    { key: 'method', label: 'Method (optional)', placeholder: 'POST' },
-    { key: 'secretKey', label: 'Secret key (optional)', placeholder: 'a key stored under Secrets below' },
-  ],
-  integration_call: [
-    { key: 'provider', label: 'Provider', placeholder: 'whatsapp / email / meta_ads / google_calendar / payment_stripe / custom_api' },
-    { key: 'action', label: 'Action', placeholder: 'e.g. send_message — see the Integrations page for each provider’s actions' },
-    { key: 'to', label: 'To (optional)', placeholder: 'phone number or email, depending on the provider' },
-    { key: 'body', label: 'Message body (optional)' },
-  ],
-  ai_decide: [
-    { key: 'agentKey', label: 'Agent', placeholder: 'sales / marketing / finance / support / hr — see the AI page' },
-    { key: 'subjectId', label: 'Subject id', placeholder: 'e.g. {{id}} for the triggering lead' },
-  ],
-  require_approval: [
-    { key: 'reason', label: 'Reason shown to the approver' },
-  ],
-};
+function actionParamFields(locale) {
+  return {
+    create_task: [
+      { key: 'title', label: t(locale, 'automation_field_title'), placeholder: t(locale, 'automation_placeholder_task_title') },
+      { key: 'description', label: t(locale, 'automation_field_description_optional') },
+      { key: 'assignedToUserId', label: t(locale, 'automation_field_assigned_to_user_id') },
+    ],
+    create_lead: [
+      { key: 'fullName', label: t(locale, 'automation_field_full_name') },
+      { key: 'phone', label: t(locale, 'automation_field_phone') },
+      { key: 'email', label: t(locale, 'automation_field_email_optional') },
+      { key: 'sourceId', label: t(locale, 'automation_field_source_id_optional') },
+    ],
+    send_message: [
+      { key: 'subject', label: t(locale, 'automation_field_subject') },
+      { key: 'body', label: t(locale, 'automation_field_body') },
+      { key: 'toUserId', label: t(locale, 'automation_field_to_user_id_optional') },
+    ],
+    update_lead_status: [
+      { key: 'leadId', label: t(locale, 'automation_field_lead_id'), placeholder: t(locale, 'automation_placeholder_lead_id') },
+      { key: 'stageId', label: t(locale, 'automation_field_target_stage_id'), placeholder: t(locale, 'automation_placeholder_stage_id') },
+      { key: 'lostReason', label: t(locale, 'automation_field_lost_reason') },
+    ],
+    assign_lead_owner: [
+      { key: 'leadId', label: t(locale, 'automation_field_lead_id') },
+      { key: 'ownerEmployeeUserId', label: t(locale, 'automation_field_new_owner_user_id') },
+    ],
+    update_campaign_status: [
+      { key: 'campaignId', label: t(locale, 'automation_field_campaign_id') },
+      { key: 'status', label: t(locale, 'automation_field_new_status'), placeholder: 'planned / active / completed / cancelled' },
+    ],
+    webhook_call: [
+      { key: 'url', label: t(locale, 'automation_field_url') },
+      { key: 'method', label: t(locale, 'automation_field_method_optional'), placeholder: 'POST' },
+      { key: 'secretKey', label: t(locale, 'automation_field_secret_key_optional'), placeholder: t(locale, 'automation_placeholder_secret_hint') },
+    ],
+    integration_call: [
+      { key: 'provider', label: t(locale, 'automation_field_provider'), placeholder: 'whatsapp / email / meta_ads / google_calendar / payment_stripe / custom_api' },
+      { key: 'action', label: t(locale, 'automation_field_action'), placeholder: t(locale, 'automation_placeholder_integration_action') },
+      { key: 'to', label: t(locale, 'automation_field_to_optional'), placeholder: t(locale, 'automation_placeholder_to_hint') },
+      { key: 'body', label: t(locale, 'automation_field_message_body_optional') },
+    ],
+    ai_decide: [
+      { key: 'agentKey', label: t(locale, 'automation_field_agent'), placeholder: 'sales / marketing / finance / support / hr — see the AI page' },
+      { key: 'subjectId', label: t(locale, 'automation_field_subject_id'), placeholder: t(locale, 'automation_placeholder_subject_id') },
+    ],
+    require_approval: [
+      { key: 'reason', label: t(locale, 'automation_field_approval_reason') },
+    ],
+  };
+}
 
-function triggerFields(triggerType, values = {}) {
+function triggerFields(triggerType, values = {}, locale) {
   const wrap = el('div', { class: 'form-row' });
   if (triggerType === 'event') {
     const eventSelect = selectInput(EVENT_TYPES.map((e) => ({ value: e, label: e })));
     if (values.eventType) eventSelect.value = values.eventType;
-    wrap.appendChild(el('div', {}, [el('label', {}, 'Event'), eventSelect]));
+    wrap.appendChild(el('div', {}, [el('label', {}, t(locale, 'automation_trigger_type_event')), eventSelect]));
     wrap.dataset.get = () => ({ type: 'event', eventType: eventSelect.value });
     wrap._get = () => ({ type: 'event', eventType: eventSelect.value });
   } else if (triggerType === 'scheduled') {
     const intervalInput = el('input', { type: 'number', min: '1', value: values.intervalMinutes || 60 });
-    wrap.appendChild(el('div', {}, [el('label', {}, 'Every N minutes'), intervalInput]));
+    wrap.appendChild(el('div', {}, [el('label', {}, t(locale, 'automation_label_interval_minutes')), intervalInput]));
     wrap._get = () => ({ type: 'scheduled', intervalMinutes: Number(intervalInput.value) });
   } else {
-    const slugInput = el('input', { type: 'text', placeholder: 'unique-slug', value: values.webhookSlug || '' });
-    wrap.appendChild(el('div', {}, [el('label', {}, 'Webhook slug'), slugInput]));
+    const slugInput = el('input', { type: 'text', placeholder: t(locale, 'automation_placeholder_webhook_slug'), value: values.webhookSlug || '' });
+    wrap.appendChild(el('div', {}, [el('label', {}, t(locale, 'automation_label_webhook_slug')), slugInput]));
     wrap._get = () => ({ type: 'webhook', webhookSlug: slugInput.value.trim() });
   }
   return wrap;
 }
 
-function stepEditor(step = {}) {
-  const nameInput = el('input', { type: 'text', placeholder: 'Step name', value: step.name || '' });
-  const actionSelect = selectInput(ACTION_TYPES, {});
+function stepEditor(step = {}, locale) {
+  const nameInput = el('input', { type: 'text', placeholder: t(locale, 'automation_field_step_name'), value: step.name || '' });
+  const actionSelect = selectInput(actionTypeOptions(locale), {});
   if (step.action?.type) actionSelect.value = step.action.type;
-  const onFailureSelect = selectInput([{ value: 'stop', label: 'Stop on failure' }, { value: 'continue', label: 'Continue on failure' }]);
+  const onFailureSelect = selectInput([{ value: 'stop', label: t(locale, 'automation_option_stop_on_failure') }, { value: 'continue', label: t(locale, 'automation_option_continue_on_failure') }]);
   if (step.onFailure) onFailureSelect.value = step.onFailure;
   const retriesInput = el('input', { type: 'number', min: '0', value: step.maxRetries ?? 0 });
 
@@ -112,7 +122,7 @@ function stepEditor(step = {}) {
 
   function renderParams() {
     clear(paramsSlot);
-    const fields = ACTION_PARAM_FIELDS[actionSelect.value] || [];
+    const fields = actionParamFields(locale)[actionSelect.value] || [];
     const inputs = {};
     for (const f of fields) {
       const input = el('input', { type: 'text', placeholder: f.placeholder || '', value: step.action?.params?.[f.key] || '' });
@@ -131,15 +141,15 @@ function stepEditor(step = {}) {
   renderParams();
 
   function addConditionRow(initial = {}) {
-    const fieldInput = el('input', { type: 'text', placeholder: 'e.g. status', value: initial.field || '' });
+    const fieldInput = el('input', { type: 'text', placeholder: t(locale, 'automation_placeholder_condition_field'), value: initial.field || '' });
     const opSelect = selectInput(CONDITION_OPERATORS.map((o) => ({ value: o, label: o })));
     if (initial.operator) opSelect.value = initial.operator;
-    const valueInput = el('input', { type: 'text', placeholder: 'value (optional for "exists")', value: initial.value ?? '' });
+    const valueInput = el('input', { type: 'text', placeholder: t(locale, 'automation_placeholder_condition_value'), value: initial.value ?? '' });
     const removeBtn = el('button', {}, '×');
     const row = el('div', { class: 'form-row', style: 'align-items:flex-end' }, [
-      el('div', {}, [el('label', {}, 'If field'), fieldInput]),
-      el('div', {}, [el('label', {}, 'Operator'), opSelect]),
-      el('div', {}, [el('label', {}, 'Value'), valueInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_if_field')), fieldInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_operator')), opSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_value')), valueInput]),
       removeBtn,
     ]);
     removeBtn.addEventListener('click', () => {
@@ -152,19 +162,19 @@ function stepEditor(step = {}) {
     conditionsSlot.appendChild(row);
   }
   (step.conditions || []).forEach((c) => addConditionRow(c));
-  const addConditionBtn = el('button', {}, '+ Add condition');
+  const addConditionBtn = el('button', {}, t(locale, 'automation_add_condition_btn'));
   addConditionBtn.addEventListener('click', () => addConditionRow());
 
-  const removeStepBtn = el('button', {}, 'Remove step');
+  const removeStepBtn = el('button', {}, t(locale, 'automation_remove_step_btn'));
   const card = el('div', { class: 'card', style: 'margin-bottom:10px' }, [
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Step name'), nameInput]),
-      el('div', {}, [el('label', {}, 'Action'), actionSelect]),
-      el('div', {}, [el('label', {}, 'On failure'), onFailureSelect]),
-      el('div', {}, [el('label', {}, 'Max retries'), retriesInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_field_step_name')), nameInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_field_action')), actionSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_on_failure')), onFailureSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_max_retries')), retriesInput]),
     ]),
-    el('div', {}, [el('label', {}, 'Conditions (all must match, or leave empty to always run)'), conditionsSlot, addConditionBtn]),
-    el('div', {}, [el('label', {}, 'Action parameters'), paramsSlot]),
+    el('div', {}, [el('label', {}, t(locale, 'automation_label_conditions')), conditionsSlot, addConditionBtn]),
+    el('div', {}, [el('label', {}, t(locale, 'automation_label_action_parameters')), paramsSlot]),
     el('div', { class: 'form-actions' }, [removeStepBtn]),
   ]);
   removeStepBtn.addEventListener('click', () => card.remove());
@@ -186,7 +196,7 @@ export async function renderAutomation(container) {
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, t(locale, 'page_title_automation')),
-      el('p', { class: 'page-subtitle' }, ['Pending approvals moved to ', el('a', { href: '#/approvals' }, 'Approvals'), '; run history across every workflow lives on ', el('a', { href: '#/workflow-history' }, 'Workflow History'), '.']),
+      el('p', { class: 'page-subtitle' }, [t(locale, 'automation_subtitle_pre'), el('a', { href: '#/approvals' }, t(locale, 'nav_approvals')), t(locale, 'automation_subtitle_mid'), el('a', { href: '#/workflow-history' }, t(locale, 'nav_workflow_history')), t(locale, 'automation_subtitle_post')]),
     ]),
   ]));
   const errorSlot = el('div');
@@ -204,13 +214,13 @@ export async function renderAutomation(container) {
         el('div', { class: 'muted' }, label),
       ]);
       statsSlot.appendChild(el('div', { style: 'display:flex;gap:24px;flex-wrap:wrap' }, [
-        tile('Active workflows', stats.activeWorkflows),
-        tile('Total runs', stats.totalRuns),
-        tile('Running', stats.runningRuns),
-        tile('Waiting approval', stats.waitingApprovalRuns),
-        tile('Completed', stats.completedRuns),
-        tile('Failed', stats.failedRuns),
-        tile('Pending approvals', stats.pendingApprovals),
+        tile(t(locale, 'automation_stat_active_workflows'), stats.activeWorkflows),
+        tile(t(locale, 'automation_stat_total_runs'), stats.totalRuns),
+        tile(t(locale, 'automation_stat_running'), stats.runningRuns),
+        tile(t(locale, 'automation_stat_waiting_approval'), stats.waitingApprovalRuns),
+        tile(t(locale, 'automation_stat_completed'), stats.completedRuns),
+        tile(t(locale, 'automation_stat_failed'), stats.failedRuns),
+        tile(t(locale, 'automation_stat_pending_approvals'), stats.pendingApprovals),
       ]));
     } catch (err) {
       statsSlot.appendChild(errorBanner(err.message));
@@ -218,13 +228,13 @@ export async function renderAutomation(container) {
   }
 
   // ---- New workflow builder ----
-  const nameInput = el('input', { type: 'text', placeholder: 'Workflow name' });
-  const descInput = el('input', { type: 'text', placeholder: 'Description (optional)' });
-  const triggerTypeSelect = selectInput(TRIGGER_TYPES);
+  const nameInput = el('input', { type: 'text', placeholder: t(locale, 'automation_placeholder_workflow_name') });
+  const descInput = el('input', { type: 'text', placeholder: t(locale, 'automation_field_description_optional') });
+  const triggerTypeSelect = selectInput(triggerTypeOptions(locale));
   const triggerFieldsSlot = el('div');
   function renderTriggerFields() {
     clear(triggerFieldsSlot);
-    const fields = triggerFields(triggerTypeSelect.value);
+    const fields = triggerFields(triggerTypeSelect.value, {}, locale);
     triggerFieldsSlot.appendChild(fields);
     triggerFieldsSlot._get = fields._get;
   }
@@ -234,24 +244,24 @@ export async function renderAutomation(container) {
   const stepsSlot = el('div');
   const stepCards = [];
   function addStep(step) {
-    const card = stepEditor(step);
+    const card = stepEditor(step, locale);
     stepCards.push(card);
     stepsSlot.appendChild(card);
   }
   addStep();
-  const addStepBtn = el('button', {}, '+ Add step');
+  const addStepBtn = el('button', {}, t(locale, 'automation_btn_add_step'));
   addStepBtn.addEventListener('click', () => addStep());
 
-  const createBtn = el('button', { class: 'primary' }, 'Create workflow');
+  const createBtn = el('button', { class: 'primary' }, t(locale, 'automation_btn_create_workflow'));
   createBtn.addEventListener('click', async () => {
     clear(errorSlot);
     if (!nameInput.value.trim()) {
-      errorSlot.appendChild(errorBanner('A workflow name is required.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'automation_err_name_required')));
       return;
     }
     const steps = stepCards.filter((c) => c.isConnected).map((c) => c._get());
     if (steps.length === 0) {
-      errorSlot.appendChild(errorBanner('At least one step is required.'));
+      errorSlot.appendChild(errorBanner(t(locale, 'automation_err_step_required')));
       return;
     }
     createBtn.disabled = true;
@@ -262,7 +272,7 @@ export async function renderAutomation(container) {
         trigger: triggerFieldsSlot._get(),
         steps,
       });
-      toast('Workflow created.', 'success');
+      toast(t(locale, 'automation_toast_workflow_created'), 'success');
       nameInput.value = ''; descInput.value = '';
       stepCards.length = 0;
       clear(stepsSlot);
@@ -276,41 +286,41 @@ export async function renderAutomation(container) {
   });
 
   container.appendChild(el('div', { class: 'card' }, [
-    el('h3', { style: 'margin-top:0' }, 'Build a workflow'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'automation_heading_build_workflow')),
     el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Name'), nameInput]),
-      el('div', {}, [el('label', {}, 'Description'), descInput]),
-      el('div', {}, [el('label', {}, 'Trigger type'), triggerTypeSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_name')), nameInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_description')), descInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_trigger_type')), triggerTypeSelect]),
     ]),
     triggerFieldsSlot,
-    el('h4', {}, 'Steps'),
+    el('h4', {}, t(locale, 'automation_heading_steps')),
     stepsSlot,
     addStepBtn,
     el('div', { class: 'form-actions' }, [createBtn]),
   ]));
 
   // ---- Templates ----
-  const templatesSlot = el('div', { class: 'card' }, [el('h3', { style: 'margin-top:0' }, 'Templates'), loadingState()]);
+  const templatesSlot = el('div', { class: 'card' }, [el('h3', { style: 'margin-top:0' }, t(locale, 'automation_heading_templates')), loadingState()]);
   container.appendChild(templatesSlot);
   try {
     const templates = await api.get('/api/automation/templates');
     clear(templatesSlot);
-    templatesSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Templates'));
-    templates.forEach((t) => {
-      const useBtn = el('button', {}, 'Use template');
+    templatesSlot.appendChild(el('h3', { style: 'margin-top:0' }, t(locale, 'automation_heading_templates')));
+    templates.forEach((tpl) => {
+      const useBtn = el('button', {}, t(locale, 'automation_btn_use_template'));
       useBtn.addEventListener('click', () => {
-        nameInput.value = t.name;
-        descInput.value = t.description;
-        triggerTypeSelect.value = t.trigger.type;
+        nameInput.value = tpl.name;
+        descInput.value = tpl.description;
+        triggerTypeSelect.value = tpl.trigger.type;
         renderTriggerFields();
         stepCards.length = 0;
         clear(stepsSlot);
-        t.steps.forEach((s) => addStep(s));
+        tpl.steps.forEach((s) => addStep(s));
         window.scrollTo({ top: 0, behavior: 'smooth' });
-        toast(`Loaded template "${t.name}" into the builder above.`, 'info');
+        toast(`${t(locale, 'automation_toast_template_loaded_prefix')} "${tpl.name}" ${t(locale, 'automation_toast_template_loaded_suffix')}`, 'info');
       });
       templatesSlot.appendChild(el('div', { class: 'form-row', style: 'align-items:center' }, [
-        el('div', {}, [el('strong', {}, t.name), el('div', { class: 'muted' }, t.description)]),
+        el('div', {}, [el('strong', {}, tpl.name), el('div', { class: 'muted' }, tpl.description)]),
         useBtn,
       ]));
     });
@@ -326,7 +336,7 @@ export async function renderAutomation(container) {
   async function setStatus(workflow, status) {
     try {
       await api.post(`/api/automation/workflows/${workflow.id}/status`, { status });
-      toast(`Workflow ${status}.`, 'success');
+      toast(`${t(locale, 'automation_toast_workflow_status_prefix')} ${status}.`, 'success');
       await Promise.all([loadWorkflows(), loadStats()]);
     } catch (err) {
       errorSlot.appendChild(errorBanner(err.message));
@@ -340,7 +350,7 @@ export async function renderAutomation(container) {
       btn.disabled = true;
       try {
         await api.post(`/api/automation/runs/${run.id}/retry`, {});
-        toast('Run retried.', 'success');
+        toast(t(locale, 'automation_toast_run_retried'), 'success');
         modalBody.remove();
         await showRuns(workflow);
       } catch (err) {
@@ -349,25 +359,25 @@ export async function renderAutomation(container) {
       }
     };
     const card = el('div', { class: 'modal-card' }, [
-      el('h3', { class: 'modal-title' }, `Run history — ${workflow.name}`),
+      el('h3', { class: 'modal-title' }, `${t(locale, 'automation_run_history_title')} — ${workflow.name}`),
       table(
         [
-          { label: 'Started', render: (r) => new Date(r.startedAt).toLocaleString() },
-          { label: 'Status', render: (r) => statusBadge(r.status) },
-          { label: 'Initiated by', key: 'initiatedBy' },
-          { label: 'Error', render: (r) => r.error || '' },
+          { label: t(locale, 'automation_col_started'), render: (r) => new Date(r.startedAt).toLocaleString() },
+          { label: t(locale, 'automation_label_status'), render: (r) => statusBadge(r.status) },
+          { label: t(locale, 'automation_col_initiated_by'), key: 'initiatedBy' },
+          { label: t(locale, 'automation_col_error'), render: (r) => r.error || '' },
           { label: '', render: (r) => {
             if (r.status !== 'failed') return '';
-            const retryBtn = el('button', {}, 'Retry');
+            const retryBtn = el('button', {}, t(locale, 'automation_btn_retry'));
             retryBtn.addEventListener('click', () => retry(r, retryBtn));
             return retryBtn;
           } },
         ],
         runsPage.items.slice().reverse(),
-        { empty: 'No runs yet.' },
+        { empty: t(locale, 'automation_empty_runs') },
       ),
       el('div', { class: 'form-actions', style: 'justify-content:flex-end' }, [
-        (() => { const b = el('button', { class: 'primary' }, 'Close'); b.addEventListener('click', () => modalBody.remove()); return b; })(),
+        (() => { const b = el('button', { class: 'primary' }, t(locale, 'common_close')); b.addEventListener('click', () => modalBody.remove()); return b; })(),
       ]),
     ]);
     modalBody.appendChild(card);
@@ -381,31 +391,31 @@ export async function renderAutomation(container) {
     try {
       const page = await api.get('/api/automation/workflows', { limit: 20, offset: workflowsOffset });
       clear(workflowsSlot);
-      workflowsSlot.appendChild(el('h3', {}, 'Workflows'));
+      workflowsSlot.appendChild(el('h3', {}, t(locale, 'automation_heading_workflows')));
       workflowsSlot.appendChild(table(
         [
-          { label: 'Name', key: 'name' },
-          { label: 'Trigger', render: (w) => w.trigger.type === 'event' ? `event: ${w.trigger.eventType}` : w.trigger.type === 'scheduled' ? `every ${w.trigger.intervalMinutes}m` : `webhook: ${w.trigger.webhookSlug}` },
-          { label: 'Steps', render: (w) => String(w.steps.length) },
-          { label: 'Status', render: (w) => statusBadge(w.status) },
+          { label: t(locale, 'automation_label_name'), key: 'name' },
+          { label: t(locale, 'automation_col_trigger'), render: (w) => w.trigger.type === 'event' ? `${t(locale, 'automation_trigger_prefix_event')} ${w.trigger.eventType}` : w.trigger.type === 'scheduled' ? `${t(locale, 'automation_trigger_prefix_every')} ${w.trigger.intervalMinutes}${t(locale, 'automation_trigger_suffix_minutes')}` : `${t(locale, 'automation_trigger_prefix_webhook')} ${w.trigger.webhookSlug}` },
+          { label: t(locale, 'automation_heading_steps'), render: (w) => String(w.steps.length) },
+          { label: t(locale, 'automation_label_status'), render: (w) => statusBadge(w.status) },
           { label: '', render: (w) => {
             const actions = el('div', { style: 'display:flex;gap:6px' });
-            const runsBtn = el('button', {}, 'Runs');
+            const runsBtn = el('button', {}, t(locale, 'automation_btn_runs'));
             runsBtn.addEventListener('click', () => showRuns(w));
             actions.appendChild(runsBtn);
             if (w.status === 'active') {
-              const pauseBtn = el('button', {}, 'Pause');
+              const pauseBtn = el('button', {}, t(locale, 'automation_btn_pause'));
               pauseBtn.addEventListener('click', () => setStatus(w, 'paused'));
               actions.appendChild(pauseBtn);
             } else if (w.status === 'paused') {
-              const resumeBtn = el('button', {}, 'Resume');
+              const resumeBtn = el('button', {}, t(locale, 'automation_btn_resume'));
               resumeBtn.addEventListener('click', () => setStatus(w, 'active'));
               actions.appendChild(resumeBtn);
             }
             if (w.status !== 'archived') {
-              const archiveBtn = el('button', {}, 'Archive');
+              const archiveBtn = el('button', {}, t(locale, 'automation_btn_archive'));
               archiveBtn.addEventListener('click', async () => {
-                if (await confirmModal(`Archive workflow "${w.name}"? It will stop reacting to new triggers.`, { danger: true })) setStatus(w, 'archived');
+                if (await confirmModal(`${t(locale, 'automation_confirm_archive_prefix')} "${w.name}"? ${t(locale, 'automation_confirm_archive_suffix')}`, { danger: true })) setStatus(w, 'archived');
               });
               actions.appendChild(archiveBtn);
             }
@@ -413,7 +423,7 @@ export async function renderAutomation(container) {
           } },
         ],
         page.items,
-        { empty: 'No workflows yet — build one above, or use a template.' },
+        { empty: t(locale, 'automation_empty_workflows') },
       ));
       workflowsSlot.appendChild(paginationControls(page, (next) => { workflowsOffset = next; loadWorkflows(); }));
     } catch (err) {
@@ -428,39 +438,39 @@ export async function renderAutomation(container) {
 
   async function loadSecrets() {
     clear(secretsSlot);
-    secretsSlot.appendChild(el('h3', { style: 'margin-top:0' }, 'Secrets (encrypted at rest, for webhook_call actions)'));
-    const keyInput = el('input', { type: 'text', placeholder: 'key, e.g. zapier_token' });
-    const valueInput = el('input', { type: 'password', placeholder: 'value' });
-    const saveBtn = el('button', { class: 'primary' }, 'Save secret');
+    secretsSlot.appendChild(el('h3', { style: 'margin-top:0' }, t(locale, 'automation_heading_secrets')));
+    const keyInput = el('input', { type: 'text', placeholder: t(locale, 'automation_placeholder_secret_key_example') });
+    const valueInput = el('input', { type: 'password', placeholder: t(locale, 'automation_label_value') });
+    const saveBtn = el('button', { class: 'primary' }, t(locale, 'automation_btn_save_secret'));
     saveBtn.addEventListener('click', async () => {
       if (!keyInput.value.trim() || !valueInput.value.trim()) return;
       try {
         await api.post('/api/automation/secrets', { key: keyInput.value.trim(), value: valueInput.value });
         keyInput.value = ''; valueInput.value = '';
-        toast('Secret saved.', 'success');
+        toast(t(locale, 'automation_toast_secret_saved'), 'success');
         await loadSecrets();
       } catch (err) {
         errorSlot.appendChild(errorBanner(err.message));
       }
     });
     secretsSlot.appendChild(el('div', { class: 'form-row' }, [
-      el('div', {}, [el('label', {}, 'Key'), keyInput]),
-      el('div', {}, [el('label', {}, 'Value'), valueInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_key')), keyInput]),
+      el('div', {}, [el('label', {}, t(locale, 'automation_label_value')), valueInput]),
       el('div', { class: 'form-actions' }, [saveBtn]),
     ]));
     try {
       const list = await api.get('/api/automation/secrets');
       secretsSlot.appendChild(table(
         [
-          { label: 'Key', key: 'key' },
-          { label: 'Created', render: (s) => new Date(s.createdAt).toLocaleString() },
+          { label: t(locale, 'automation_label_key'), key: 'key' },
+          { label: t(locale, 'automation_col_created'), render: (s) => new Date(s.createdAt).toLocaleString() },
           { label: '', render: (s) => {
-            const delBtn = el('button', { class: 'danger' }, 'Delete');
+            const delBtn = el('button', { class: 'danger' }, t(locale, 'automation_btn_delete'));
             delBtn.addEventListener('click', async () => {
-              if (!(await confirmModal(`Delete secret "${s.key}"? Any workflow referencing it will fail.`, { danger: true }))) return;
+              if (!(await confirmModal(`${t(locale, 'automation_confirm_delete_secret_prefix')} "${s.key}"? ${t(locale, 'automation_confirm_delete_secret_suffix')}`, { danger: true }))) return;
               try {
                 await api.delete(`/api/automation/secrets/${s.id}`);
-                toast('Secret deleted.', 'success');
+                toast(t(locale, 'automation_toast_secret_deleted'), 'success');
                 await loadSecrets();
               } catch (err) {
                 errorSlot.appendChild(errorBanner(err.message));
@@ -470,7 +480,7 @@ export async function renderAutomation(container) {
           } },
         ],
         list,
-        { empty: 'No secrets stored yet — values are encrypted and never shown again after saving.' },
+        { empty: t(locale, 'automation_empty_secrets') },
       ));
     } catch (err) {
       secretsSlot.appendChild(errorBanner(err.message));

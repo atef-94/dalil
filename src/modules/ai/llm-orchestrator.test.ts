@@ -90,7 +90,7 @@ function freshHarness() {
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
-  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, new InMemoryRepository<Project>(), paymentPlans);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
 
   const automation = new AutomationService(

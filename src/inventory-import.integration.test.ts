@@ -218,3 +218,77 @@ test('Inventory Import upload requires authentication', async () => {
     assert.equal(res.status, 401);
   });
 });
+
+// ---- Project Catalog import (mode: 'catalog') — a market/product-range
+// file must produce ProjectUnitSpec rows, never fake physical Units. ----
+
+test('full Project Catalog HTTP flow: mode=catalog upload -> preview -> confirm creates ProjectUnitSpecs, never physical Units', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'x-demo-user': ceoUserId };
+    const companyId = app.seedResult!.companyId;
+    const project = await app.services.inventory.createProject({ companyId, name: `Catalog Project ${Date.now()}` });
+
+    const csv = Buffer.from(
+      `Project,Unit Type,Project BUA From,Project BUA To,Project Price From,Project Price To\n` +
+        `${project.name},Apartment,120,135,8000000,10000000\n` +
+        `${project.name},Villa,250,300,15000000,20000000\n`,
+    );
+    const upload = await uploadFile(base, '/api/inventory/units/import/upload', 'catalog.csv', 'text/csv', csv, headers);
+    assert.equal(upload.status, 200);
+    const uploadBody = upload.body as { sessionId: string; suggestedMapping: Record<string, string | null>; detectedSheetKind: string };
+    assert.equal(uploadBody.detectedSheetKind, 'catalog');
+
+    const preview = await callJson(
+      base,
+      'POST',
+      `/api/inventory/units/import/${uploadBody.sessionId}/preview`,
+      { mapping: uploadBody.suggestedMapping, options: { mode: 'catalog' } },
+      headers,
+    );
+    assert.equal(preview.status, 200);
+    const previewBody = preview.body as { totalRows: number; validCount: number };
+    assert.equal(previewBody.totalRows, 2);
+    assert.equal(previewBody.validCount, 2);
+
+    const confirm = await callJson(base, 'POST', `/api/inventory/units/import/${uploadBody.sessionId}/confirm`, {}, headers);
+    assert.equal(confirm.status, 200);
+    const confirmBody = confirm.body as { succeeded: number; results: { specId?: string }[] };
+    assert.equal(confirmBody.succeeded, 2);
+    assert.ok(confirmBody.results.every((r) => r.specId));
+
+    const specsRes = await callJson(base, 'GET', `/api/inventory/projects/${project.id}/unit-specs`, undefined, headers);
+    assert.equal(specsRes.status, 200);
+    assert.equal((specsRes.body as unknown[]).length, 2);
+
+    const units = await app.repos.units.findAll((u) => u.companyId === companyId && u.projectId === project.id);
+    assert.equal(units.length, 0, 'a Project Catalog import must never create a physical Unit');
+  });
+});
+
+test('unit-specs routes are gated on the existing project resource, and PATCH is cross-tenant safe', async () => {
+  await withServer(async (base, app) => {
+    const ceoUserId = app.seedResult!.demoUsers.find((u) => u.label === 'CEO')!.userId;
+    const headers = { 'x-demo-user': ceoUserId };
+    const companyId = app.seedResult!.companyId;
+    const project = await app.services.inventory.createProject({ companyId, name: `Spec Project ${Date.now()}` });
+
+    const create = await callJson(base, 'POST', `/api/inventory/projects/${project.id}/unit-specs`, { unitType: 'Apartment', bedrooms: 2 }, headers);
+    assert.equal(create.status, 201);
+    const spec = create.body as { id: string };
+
+    const update = await callJson(base, 'PATCH', `/api/inventory/unit-specs/${spec.id}`, { bedrooms: 3 }, headers);
+    assert.equal(update.status, 200);
+    assert.equal((update.body as { bedrooms: number }).bedrooms, 3);
+
+    // A spec belonging to a different tenant can't be patched, even by an
+    // otherwise-fully-permissioned actor — same guard as updateProjectUnitSpec.
+    const crossTenantSpec = await app.services.inventory.createProjectUnitSpec({ companyId: 'company-other', projectId: 'p-other', unitType: 'Villa' });
+    const crossTenantUpdate = await callJson(base, 'PATCH', `/api/inventory/unit-specs/${crossTenantSpec.id}`, { bedrooms: 1 }, headers);
+    assert.equal(crossTenantUpdate.status, 404);
+
+    const agentUserId = app.seedResult!.demoUsers.find((u) => u.label === 'Sales Agent')!.userId;
+    const agentCreate = await callJson(base, 'POST', `/api/inventory/projects/${project.id}/unit-specs`, { unitType: 'Villa' }, { 'x-demo-user': agentUserId });
+    assert.equal(agentCreate.status, 403, 'unit-specs are gated on create:project, same as every other project-master-data route');
+  });
+});

@@ -93,7 +93,7 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   const templates = new InMemoryRepository<PaymentPlanTemplate>();
   const inventory = new InventoryService(units, holds, reservations, projects);
   const paymentPlans = new PaymentPlansService(templates, scheduleLines);
-  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, paymentPlans);
+  const quotations = new QuotationService(new InMemoryRepository<Quotation>(), units, new InMemoryRepository<Project>(), paymentPlans);
   const leadScoring = new LeadScoringService(leads, crmStages);
   const finance = new FinanceService(payments, receipts, scheduleLines, refunds);
   const sales = new SalesService(opportunities, contracts, inventory, paymentPlans);
@@ -151,11 +151,11 @@ function freshHarness(retryBaseDelayMs = 0, rateLimitPerMinute = 30) {
   };
 }
 
-test('listConnectors returns metadata for all 7 providers', () => {
+test('listConnectors returns metadata for all 8 providers', () => {
   const h = freshHarness();
   const connectors = h.integrations.listConnectors();
   const providers = connectors.map((c) => c.provider).sort();
-  assert.deepEqual(providers, ['custom_api', 'e_signature', 'email', 'google_calendar', 'meta_ads', 'payment_stripe', 'whatsapp']);
+  assert.deepEqual(providers, ['custom_api', 'e_signature', 'email', 'facebook_leads', 'google_calendar', 'meta_ads', 'payment_stripe', 'whatsapp']);
 });
 
 test('connect rejects a request missing a required credential field', async () => {

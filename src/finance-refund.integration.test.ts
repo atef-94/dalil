@@ -2,8 +2,39 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildApplication } from './app.js';
 
+const OWNER_EMAIL = 'owner1@platform.test';
+const OWNER_PASSWORD = 'owner-1-password-123';
+
 async function freshApp() {
-  return buildApplication({ nodeEnv: 'test', tokenSecret: 'test-secret', allowedOrigins: [], seed: true });
+  return buildApplication({
+    nodeEnv: 'test',
+    tokenSecret: 'test-secret',
+    allowedOrigins: [],
+    seed: true,
+    ownerEmail1: OWNER_EMAIL,
+    ownerEmail2: 'owner2@platform.test',
+    ownerPassword1: OWNER_PASSWORD,
+    ownerPassword2: 'owner-2-password-123',
+  });
+}
+
+/** Creates a brand-new tenant via the owner-gated /api/platform/tenants route
+ * (the only way to do this now that public signup is gone) and returns the
+ * bearer-token headers for its founding user, exactly like the old
+ * self-service signup response did. */
+async function createSecondTenant(base: string, namePrefix: string) {
+  const ownerLogin = await call(base, 'POST', '/api/auth/login', {
+    companyId: '__platform__', email: OWNER_EMAIL, password: OWNER_PASSWORD,
+  });
+  const ownerHeaders = { authorization: `Bearer ${(ownerLogin.body as { token: string }).token}` };
+  const tenant = await call(base, 'POST', '/api/platform/tenants', {
+    companyName: `${namePrefix} ${Date.now()}`,
+    fullName: 'Owner B',
+    email: `${namePrefix.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}@example.com`,
+    password: 'a-real-password-123',
+  }, ownerHeaders);
+  assert.equal(tenant.status, 201);
+  return { authorization: `Bearer ${(tenant.body as { token: string }).token}` };
 }
 
 async function withServer(run: (base: string, app: Awaited<ReturnType<typeof freshApp>>) => Promise<void>) {
@@ -61,15 +92,8 @@ test('POST /api/finance/refunds rejects a request whose contract/schedule line d
     // A real contract/schedule line inside company-demo (Tenant A).
     const { contractId, lineId } = await signRealDemoContract(base, ceoHeaders);
 
-    // A completely separate real tenant (Tenant B), via self-service signup.
-    const signupB = await call(base, 'POST', '/api/auth/signup', {
-      companyName: `Refund Tenant B ${Date.now()}`,
-      fullName: 'Owner B',
-      email: `refund-ownerb-${Date.now()}@example.com`,
-      password: 'a-real-password-123',
-    });
-    assert.equal(signupB.status, 201);
-    const tenantBHeaders = { authorization: `Bearer ${(signupB.body as { token: string }).token}` };
+    // A completely separate real tenant (Tenant B), via owner-gated tenant creation.
+    const tenantBHeaders = await createSecondTenant(base, 'Refund Tenant B');
 
     // Before the fix, this created a real, queued ApprovalRequest under
     // Tenant B's own companyId that referenced Tenant A's real

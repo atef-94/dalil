@@ -6,32 +6,34 @@ import { api } from '../api.js';
 // Only one goal type exists today — see AiWorkflowService. Listed here (not
 // hardcoded into the start form) so a second goal type added later shows up
 // with zero frontend changes.
-const GOAL_TYPES = [{ value: 'high_value_lead_followup', label: 'High-Value Lead Follow-up' }];
+function goalTypeOptions(locale) {
+  return [{ value: 'high_value_lead_followup', label: t(locale, 'ai_workflows_goal_high_value_lead_followup') }];
+}
 
 function formatWhen(iso) {
   return iso ? new Date(iso).toLocaleString() : '—';
 }
 
-async function openRunDetail(run, onChanged) {
+async function openRunDetail(locale, run, onChanged) {
   const body = el('div');
-  const { close } = contentModal(`AI Workflow Run — ${run.goalType}`, body, { wide: true });
+  const { close } = contentModal(`${t(locale, 'ai_workflows_run_title_prefix')}${run.goalType}`, body, { wide: true });
 
   const summary = el('div', { class: 'card', style: 'margin-bottom:12px' }, [
-    el('div', {}, [el('strong', {}, 'Status: '), statusBadge(run.status)]),
-    el('div', {}, [el('strong', {}, 'Subject: '), `${run.subjectType}:${run.subjectId}`]),
-    el('div', {}, [el('strong', {}, 'Current step: '), run.currentStepName || '—']),
-    run.resumeAt ? el('div', {}, [el('strong', {}, 'Resumes at: '), formatWhen(run.resumeAt)]) : null,
-    run.outcomeSummary ? el('div', { style: 'margin-top:8px' }, [el('strong', {}, 'Outcome: '), el('span', { class: 'wrap' }, run.outcomeSummary)]) : null,
+    el('div', {}, [el('strong', {}, t(locale, 'ai_workflows_field_status')), statusBadge(run.status)]),
+    el('div', {}, [el('strong', {}, t(locale, 'ai_workflows_field_subject')), `${run.subjectType}:${run.subjectId}`]),
+    el('div', {}, [el('strong', {}, t(locale, 'ai_workflows_field_current_step')), run.currentStepName || '—']),
+    run.resumeAt ? el('div', {}, [el('strong', {}, t(locale, 'ai_workflows_field_resumes_at')), formatWhen(run.resumeAt)]) : null,
+    run.outcomeSummary ? el('div', { style: 'margin-top:8px' }, [el('strong', {}, t(locale, 'ai_workflows_field_outcome')), el('span', { class: 'wrap' }, run.outcomeSummary)]) : null,
   ].filter(Boolean));
   body.appendChild(summary);
 
   if (run.status === 'waiting') {
-    const resumeBtn = el('button', { class: 'primary' }, 'Resume now');
+    const resumeBtn = el('button', { class: 'primary' }, t(locale, 'ai_workflows_resume_btn'));
     resumeBtn.addEventListener('click', async () => {
       resumeBtn.disabled = true;
       try {
         const updated = await api.post(`/api/ai/workflows/${run.id}/resume`, {});
-        toast(`Run resumed — now ${updated.status}.`, 'success');
+        toast(`${t(locale, 'ai_workflows_resumed_prefix')}${updated.status}${t(locale, 'ai_workflows_resumed_suffix')}`, 'success');
         close();
         onChanged();
       } catch (err) {
@@ -43,7 +45,7 @@ async function openRunDetail(run, onChanged) {
     body.appendChild(el('div', { style: 'margin-bottom:12px' }, [resumeBtn]));
   }
 
-  body.appendChild(el('h3', {}, 'Execution trace'));
+  body.appendChild(el('h3', {}, t(locale, 'ai_workflows_execution_trace_heading')));
   const stepsSlot = el('div');
   stepsSlot.appendChild(loadingState());
   body.appendChild(stepsSlot);
@@ -54,13 +56,13 @@ async function openRunDetail(run, onChanged) {
     stepsSlot.appendChild(table(
       [
         { label: '#', key: 'sequence' },
-        { label: 'Step', key: 'stepName' },
-        { label: 'Status', render: (s) => statusBadge(s.status) },
-        { label: 'Reasoning', render: (s) => el('span', { class: 'wrap' }, s.reasoning || '') },
-        { label: 'When', render: (s) => formatWhen(s.finishedAt) },
+        { label: t(locale, 'ai_workflows_col_step'), key: 'stepName' },
+        { label: t(locale, 'automation_label_status'), render: (s) => statusBadge(s.status) },
+        { label: t(locale, 'ai_col_reasoning'), render: (s) => el('span', { class: 'wrap' }, s.reasoning || '') },
+        { label: t(locale, 'ai_col_when'), render: (s) => formatWhen(s.finishedAt) },
       ],
       steps,
-      { empty: 'No steps recorded yet.', emptyIcon: 'ai' },
+      { empty: t(locale, 'ai_workflows_no_steps'), emptyIcon: 'ai' },
     ));
   } catch (err) {
     clear(stepsSlot);
@@ -76,22 +78,22 @@ export async function renderAiWorkflows(container) {
   container.appendChild(el('div', { class: 'page-header' }, [
     el('div', {}, [
       el('h1', {}, t(locale, 'page_title_ai_workflows')),
-      el('p', { class: 'page-subtitle' }, 'Multi-step, replanning AI workflows — each run plans, executes, evaluates, and either continues, waits for a real reply, completes, or escalates to a human. Every mutating step passes through the same permission/policy/approval pipeline as the rest of the AI Execution Layer.'),
+      el('p', { class: 'page-subtitle' }, t(locale, 'ai_workflows_subtitle')),
     ]),
   ]));
   const errorSlot = el('div');
   container.appendChild(errorSlot);
 
   // ---- Start a new workflow ----
-  const goalSelect = selectInput(GOAL_TYPES);
-  const subjectInput = el('input', { type: 'text', placeholder: 'lead id' });
-  const startBtn = el('button', { class: 'primary' }, 'Start workflow');
+  const goalSelect = selectInput(goalTypeOptions(locale));
+  const subjectInput = el('input', { type: 'text', placeholder: t(locale, 'ai_workflows_subject_placeholder') });
+  const startBtn = el('button', { class: 'primary' }, t(locale, 'ai_workflows_start_btn'));
   startBtn.addEventListener('click', async () => {
     if (!subjectInput.value.trim()) return;
     startBtn.disabled = true;
     try {
       const run = await api.post('/api/ai/workflows', { goalType: goalSelect.value, subjectId: subjectInput.value.trim() });
-      toast(`Workflow started — status: ${run.status}.`, run.status === 'escalated' ? 'info' : 'success');
+      toast(`${t(locale, 'ai_workflows_started_prefix')}${run.status}${t(locale, 'ai_workflows_started_suffix')}`, run.status === 'escalated' ? 'info' : 'success');
       subjectInput.value = '';
       await loadRuns();
     } catch (err) {
@@ -101,10 +103,10 @@ export async function renderAiWorkflows(container) {
     }
   });
   container.appendChild(el('div', { class: 'card', style: 'margin-bottom:16px' }, [
-    el('h3', { style: 'margin-top:0' }, 'Start a workflow'),
+    el('h3', { style: 'margin-top:0' }, t(locale, 'ai_workflows_start_heading')),
     el('div', { class: 'form-row', style: 'align-items:flex-end' }, [
-      el('div', {}, [el('label', {}, 'Goal'), goalSelect]),
-      el('div', {}, [el('label', {}, 'Subject (lead) id'), subjectInput]),
+      el('div', {}, [el('label', {}, t(locale, 'ai_workflows_goal_label')), goalSelect]),
+      el('div', {}, [el('label', {}, t(locale, 'ai_workflows_subject_lead_label')), subjectInput]),
       startBtn,
     ]),
   ]));
@@ -120,23 +122,23 @@ export async function renderAiWorkflows(container) {
       clear(runsSlot);
       runsSlot.appendChild(table(
         [
-          { label: 'Goal', key: 'goalType' },
-          { label: 'Subject', render: (r) => `${r.subjectType}:${r.subjectId.slice(0, 8)}…` },
-          { label: 'Status', render: (r) => statusBadge(r.status) },
-          { label: 'Current step', render: (r) => r.currentStepName || '—' },
-          { label: 'Started', render: (r) => formatWhen(r.createdAt) },
-          { label: 'Updated', render: (r) => formatWhen(r.updatedAt) },
+          { label: t(locale, 'ai_workflows_goal_label'), key: 'goalType' },
+          { label: t(locale, 'ai_workflows_col_subject'), render: (r) => `${r.subjectType}:${r.subjectId.slice(0, 8)}…` },
+          { label: t(locale, 'automation_label_status'), render: (r) => statusBadge(r.status) },
+          { label: t(locale, 'ai_workflows_col_current_step'), render: (r) => r.currentStepName || '—' },
+          { label: t(locale, 'automation_col_started'), render: (r) => formatWhen(r.createdAt) },
+          { label: t(locale, 'ai_workflows_col_updated'), render: (r) => formatWhen(r.updatedAt) },
           {
             label: '',
             render: (r) => {
-              const btn = el('button', {}, 'View');
-              btn.addEventListener('click', () => openRunDetail(r, loadRuns));
+              const btn = el('button', {}, t(locale, 'ai_workflows_view_btn'));
+              btn.addEventListener('click', () => openRunDetail(locale, r, loadRuns));
               return btn;
             },
           },
         ],
         page.items,
-        { empty: 'No AI workflow runs yet — start one above.', emptyIcon: 'ai' },
+        { empty: t(locale, 'ai_workflows_empty_runs'), emptyIcon: 'ai' },
       ));
       runsSlot.appendChild(paginationControls(page, (next) => { offset = next; loadRuns(); }));
     } catch (err) {
