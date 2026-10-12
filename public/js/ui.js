@@ -82,6 +82,7 @@ const ICONS = {
   whatsapp: '<path d="M12 3a9 9 0 0 0-7.8 13.5L3 21l4.6-1.2A9 9 0 1 0 12 3z"/><path d="M8.5 8.3c.2-.5.4-.5.6-.5h.5c.2 0 .4 0 .6.5.2.5.7 1.7.7 1.9s0 .3-.2.5l-.5.6c-.1.2-.3.3-.1.6.2.4.9 1.3 1.9 2.1 1.3 1 1.7 1.1 2 1.2.2 0 .4 0 .5-.2l.6-.8c.2-.3.4-.2.6-.1l1.6.8c.2.1.4.2.4.4 0 .8-.3 1.6-1.4 2-1 .4-2.2.4-3.6-.2-2.9-1.2-4.8-4-5-4.3-.2-.3-1.3-1.8-1.3-3.4s.8-2.4 1.1-2.7z" fill="currentColor" stroke="none"/>',
   folder: '<path d="M4 6a1.5 1.5 0 0 1 1.5-1.5h4l2 2h7A1.5 1.5 0 0 1 20 8v9.5A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5z"/>',
   calendar: '<rect x="4" y="5" width="16" height="15" rx="1.5"/><line x1="4" y1="9.5" x2="20" y2="9.5"/><line x1="8" y1="3" x2="8" y2="6.5"/><line x1="16" y1="3" x2="16" y2="6.5"/>',
+  moreVertical: '<circle cx="12" cy="5" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.7" fill="currentColor" stroke="none"/>',
 };
 
 export function icon(name, cls = '') {

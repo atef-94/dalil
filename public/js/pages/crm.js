@@ -1011,6 +1011,31 @@ export async function renderCrm(container) {
       const owner = employees.find((e) => e.ownerUserId === lead.ownerEmployeeUserId);
       const DELIVERY_COLORS = { delivered: 'green', read: 'green', sent: 'blue', queued: 'amber', failed: 'red', rejected: 'red', unknown: '' };
 
+      // ---- Actions: a single "⋮" menu at the very top of the page, per
+      // user request — everything that used to be two rows of always-
+      // visible buttons (assign owner, move stage, edit interest, add
+      // note, edit tags/priority, grant portal access) now lives in a
+      // dropdown that opens under the trigger. "Ask AI" stays its own
+      // visible button, as it wasn't one of the actions the user asked to
+      // collapse. ----
+      function moreMenuItem(label, onClick) {
+        const btn = el('button', { class: 'ghost', style: 'width:100%;text-align:start' }, label);
+        btn.addEventListener('click', onClick);
+        return btn;
+      }
+      const moreTrigger = el('button', { class: 'icon-btn', 'aria-label': t(locale, 'crm_action_more') }, icon('moreVertical', 'sm'));
+      const moreMenu = popover(moreTrigger, (close) => [
+        moreMenuItem(t(locale, 'crm_action_assign_owner'), () => { close(); reassignOwner(lead, refreshDetail); }),
+        moreMenuItem(t(locale, 'crm_action_move_stage'), async () => { close(); await openMoveStageModal(lead, null); await refreshDetail(); reload?.(); }),
+        moreMenuItem(t(locale, 'crm_action_edit_interest'), () => { close(); editDetails(lead, refreshDetail); }),
+        moreMenuItem(t(locale, 'crm_action_add_note'), () => { close(); quickAddNote(lead, refreshDetail); }),
+        moreMenuItem(t(locale, 'crm_action_edit_tags'), () => { close(); editTagsAndPriority(lead, refreshDetail); }),
+        moreMenuItem(t(locale, 'crm_action_grant_portal'), () => { close(); grantPortalAccess(lead); }),
+      ]);
+      const aiBtn = el('button', { class: 'primary' }, [icon('ai', 'sm'), ' ', t(locale, 'crm_action_ask_ai')]);
+      aiBtn.addEventListener('click', async () => { await askAi(lead, null); await refreshDetail(); reload?.(); });
+      body.appendChild(el('div', { style: 'display:flex;justify-content:flex-end;gap:8px;margin-bottom:14px' }, [aiBtn, moreMenu]));
+
       // ---- Status badges (stage/priority/delivery/score) — kept visible,
       // just compact, above the identity/contact block. ----
       const badgesRow = el('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px' }, [
@@ -1063,35 +1088,6 @@ export async function renderCrm(container) {
         reqPair(t(locale, 'crm_req_location_field'), lead.preferredLocation),
         reqPair(t(locale, 'crm_detail_interested_label'), interestedValue),
       ]));
-
-      // ---- Quick actions: the 4 primary actions up front, the rest
-      // (tags/priority, portal access, AI) as a secondary row — nothing
-      // removed, just reorganized so the most-used actions read first. ----
-      const primaryActionsRow = el('div', { class: 'lead-detail-actions' });
-      const assignBtn = el('button', {}, t(locale, 'crm_action_assign_owner'));
-      assignBtn.addEventListener('click', () => reassignOwner(lead, refreshDetail));
-      const moveBtn = el('button', {}, t(locale, 'crm_action_move_stage'));
-      moveBtn.addEventListener('click', async () => { await openMoveStageModal(lead, null); await refreshDetail(); reload?.(); });
-      const interestBtn = el('button', {}, t(locale, 'crm_action_edit_interest'));
-      interestBtn.addEventListener('click', () => editDetails(lead, refreshDetail));
-      const noteBtn = el('button', {}, t(locale, 'crm_action_add_note'));
-      noteBtn.addEventListener('click', () => quickAddNote(lead, refreshDetail));
-      primaryActionsRow.append(assignBtn, moveBtn, interestBtn, noteBtn);
-      body.appendChild(primaryActionsRow);
-
-      const secondaryActionsRow = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px' });
-      const tagsBtn = el('button', { class: 'ghost' }, t(locale, 'crm_action_edit_tags'));
-      tagsBtn.addEventListener('click', () => editTagsAndPriority(lead, refreshDetail));
-      secondaryActionsRow.appendChild(tagsBtn);
-
-      const portalBtn = el('button', { class: 'ghost' }, t(locale, 'crm_action_grant_portal'));
-      portalBtn.addEventListener('click', () => grantPortalAccess(lead));
-      secondaryActionsRow.appendChild(portalBtn);
-
-      const aiBtn = el('button', { class: 'ghost' }, t(locale, 'crm_action_ask_ai'));
-      aiBtn.addEventListener('click', async () => { await askAi(lead, null); await refreshDetail(); reload?.(); });
-      secondaryActionsRow.appendChild(aiBtn);
-      body.appendChild(secondaryActionsRow);
 
       if (lead.tags?.length) {
         body.appendChild(el('div', { style: 'margin-bottom:14px' }, lead.tags.map((tag) => badge(tag))));
